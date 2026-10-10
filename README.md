@@ -1,5 +1,8 @@
 # Pittore Studio
 
+<img width="2400" height="600" alt="pittore-studio-banner" src="https://github.com/user-attachments/assets/0ee74a44-6dcf-4f0f-8f49-97837959ef65" />
+
+
 A layer-based photo editor for Linux. Raster painting and retouching, vector
 shapes and paths, type, adjustment layers, filters, and an ICC-aware colour
 pipeline, written in C++20 on Qt 6.
