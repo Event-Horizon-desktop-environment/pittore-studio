@@ -115,11 +115,11 @@ jobs:
           path: dist/*.deb
 
   rpm:
-    name: rpm (Fedora)
+    name: rpm (Fedora 44)
     runs-on: ubuntu-24.04
     needs: test
     container:
-      image: fedora:41
+      image: fedora:44
     steps:
       - uses: actions/checkout@v6
       - name: Install dependencies
@@ -336,7 +336,7 @@ jobs:
       - name: Build snap
         # snapcore/action-build@v1 is still Node20 with no new tag;
         # pin to node24 PR head until upstream releases, or replace with direct snapcraft.
-        uses: snapcore/action-build@edf78ca
+        uses: snapcore/action-build@edf78ca622b1eb99b69f09420bb19f77e4f84ac1
         with:
           snapcraft-channel: stable
       - name: Stage snap
