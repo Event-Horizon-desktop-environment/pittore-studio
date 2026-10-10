@@ -18,7 +18,7 @@ jobs:
     name: build and test (Ubuntu 24.04)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -53,7 +53,7 @@ jobs:
           grep -aE "FAIL \.\./tests|AddressSanitizer|runtime error|checks=" build/meson-logs/testlog.txt || true
       - name: Upload test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: testlog
           path: build/meson-logs/testlog.txt
@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -109,7 +109,7 @@ jobs:
           set -euo pipefail
           dpkg-deb --build staging "dist/pittore-studio_${VERSION}_amd64.deb"
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: deb
           path: dist/*.deb
@@ -121,7 +121,7 @@ jobs:
     container:
       image: fedora:41
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -152,7 +152,7 @@ jobs:
           rpmbuild -bb --define "_topdir $PWD/rpmbuild" --define "_version $VERSION" rpmbuild/SPECS/pittore-studio.spec
           cp rpmbuild/RPMS/x86_64/*.rpm dist/
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: rpm
           path: dist/*.rpm
@@ -165,7 +165,7 @@ jobs:
       image: archlinux:latest
       options: --privileged
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build pacman package
         run: |
           set -euo pipefail
@@ -197,7 +197,7 @@ jobs:
           sudo -u builder makepkg --syncdeps --noconfirm --needed
           cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
           ls -l "$GITHUB_WORKSPACE/dist"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: arch
           path: dist/*.pkg.tar.zst
@@ -207,7 +207,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -236,7 +236,7 @@ jobs:
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
           tar -czf "dist/pittore-studio-${VERSION}-x86_64.tar.gz" -C staging usr
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tarball
           path: dist/*.tar.gz
@@ -246,7 +246,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -291,7 +291,7 @@ jobs:
           mkdir -p dist
           mv Pittore*.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage" 2>/dev/null || mv *.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage"
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: appimage
           path: dist/*.AppImage
@@ -301,7 +301,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install flatpak tooling
         run: |
           set -euo pipefail
@@ -322,7 +322,7 @@ jobs:
           flatpak-builder --force-clean --repo=repo flatpak-build packaging/flatpak/studio.pittore.painter.yml
           flatpak build-bundle repo "dist/pittore-studio-${VERSION}-x86_64.flatpak" studio.pittore.painter
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: flatpak
           path: dist/*.flatpak
@@ -332,9 +332,11 @@ jobs:
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build snap
-        uses: snapcore/action-build@v1
+        # snapcore/action-build@v1 is still Node20 with no new tag;
+        # pin to node24 PR head until upstream releases, or replace with direct snapcraft.
+        uses: snapcore/action-build@edf78ca
         with:
           snapcraft-channel: stable
       - name: Stage snap
@@ -348,7 +350,7 @@ jobs:
           mkdir -p dist
           cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"
           ls -l dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: snap
           path: dist/*.snap
@@ -361,14 +363,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          files: dist/pittore-studio*
+          fail_on_unmatched_files: true
           generate_release_notes: true
 
   release-latest:
@@ -379,15 +387,25 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - name: Move rolling tag
+        run: |
+          git tag -f rolling ${{ github.sha }}
+          git push -f origin rolling
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
       - name: Publish rolling release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: latest
-          name: Latest build
+          tag_name: rolling
+          name: Rolling build
+          target_commitish: ${{ github.sha }}
+          draft: false
           prerelease: true
-          files: dist/*
+          make_latest: false
+          overwrite_files: true
+          files: dist/pittore-studio*
+          fail_on_unmatched_files: true
           generate_release_notes: true
