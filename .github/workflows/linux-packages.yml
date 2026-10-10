@@ -1,0 +1,393 @@
+name: Linux packages
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MESON_OPTS: -Dbuildtype=release --prefix=/usr -Dbackend-cuda=disabled -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
+
+jobs:
+  test:
+    name: build and test (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+            zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
+            libtomlplusplus-dev liblcms2-dev \
+            qt6-base-dev libqt6svg6-dev \
+            libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+          # UI tests enumerate installed font families (type-tool-ui needs
+          # >100); a bare runner ships only a handful, so install Noto's
+          # per-script families plus the usual core sets.
+          sudo apt-get install -y fonts-dejavu-core fonts-liberation2 \
+            fonts-noto-core fonts-noto-mono fonts-noto-extra
+          fc-cache -f
+      - name: Configure
+        run: meson setup build ${{ env.MESON_OPTS }}
+      - name: Build
+        run: |
+          set -euo pipefail
+          n=$(nproc)
+          j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
+          [ "${j:-0}" -lt 1 ] && j=1
+          [ "$j" -gt "$n" ] && j=$n
+          echo "Building with -j$j"
+          ninja -C build -j"$j"
+      - name: Test
+        run: meson test -C build --print-errorlogs
+      - name: Show failing assertions
+        if: failure()
+        run: |
+          grep -aE "FAIL \.\./tests|AddressSanitizer|runtime error|checks=" build/meson-logs/testlog.txt || true
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog
+          path: build/meson-logs/testlog.txt
+
+  deb:
+    name: deb (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+            zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
+            libtomlplusplus-dev liblcms2-dev \
+            qt6-base-dev libqt6svg6-dev \
+            libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+      - name: Build and stage
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          meson setup build ${{ env.MESON_OPTS }}
+          n=$(nproc)
+          j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
+          [ "${j:-0}" -lt 1 ] && j=1
+          [ "$j" -gt "$n" ] && j=$n
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          rm -rf staging dist
+          mkdir -p staging dist
+          DESTDIR="$PWD/staging" meson install -C build --no-rebuild
+          mkdir -p staging/DEBIAN
+          cat > staging/DEBIAN/control <<EOF
+          Package: pittore-studio
+          Version: $VERSION
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Pittore Studio <noreply@example.com>
+          Description: Layer-based photo editor for Linux
+           Raster painting and retouching, vector persona, text,
+           adjustment layers, filters, and an ICC-aware colour pipeline.
+          Depends: libc6, libstdc++6, libqt6widgets6, libqt6network6, libqt6svg6, zlib1g, libharfbuzz0b, libfreetype6, libfontconfig1
+          EOF
+      - name: Pack deb
+        run: |
+          set -euo pipefail
+          dpkg-deb --build staging "dist/pittore-studio_${VERSION}_amd64.deb"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+
+  rpm:
+    name: rpm (Fedora)
+    runs-on: ubuntu-24.04
+    needs: test
+    container:
+      image: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install gcc-c++ meson ninja-build git pkgconf rpm-build tar gzip \
+            zlib-ng-compat-devel harfbuzz-devel freetype-devel fontconfig-devel \
+            tomlplusplus-devel lcms2-devel \
+            qt6-qtbase-devel qt6-qtsvg-devel \
+            libwebp-devel libtiff-devel libjpeg-turbo-devel libzstd-devel \
+            qrencode-devel
+      - name: Build and pack rpm
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dist rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          sed -e "s/^Version:.*/Version:        $VERSION/" packaging/rpm/pittore-studio.spec > rpmbuild/SPECS/pittore-studio.spec
+          # rpmbuild %prep expects a source tarball; pack the checked-out
+          # tree (no git dependency: there may be no repo inside the
+          # container) so tag and non-tag runs build the same commit.
+          tar -czf "rpmbuild/SOURCES/pittore-studio-$VERSION.tar.gz" \
+            --transform "s,^,pittore-studio-$VERSION/," \
+            --exclude=./build --exclude=./rpmbuild --exclude=./dist \
+            --exclude=./.git .
+          rpmbuild -bb --define "_topdir $PWD/rpmbuild" --define "_version $VERSION" rpmbuild/SPECS/pittore-studio.spec
+          cp rpmbuild/RPMS/x86_64/*.rpm dist/
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*.rpm
+
+  arch:
+    name: pacman package (Arch)
+    runs-on: ubuntu-24.04
+    needs: test
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pacman package
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel meson ninja git pkgconf sudo \
+            zlib harfbuzz freetype2 fontconfig tomlplusplus lcms2 \
+            qt6-base qt6-svg \
+            libwebp libtiff libjpeg-turbo zstd qrencode
+          # makepkg refuses to run as root; build as an unprivileged user.
+          useradd -m builder
+          mkdir -p pkgwork dist
+          cp packaging/arch/PKGBUILD pkgwork/
+          # The PKGBUILD points at the release tarball; pre-place an archive
+          # of this revision (no git dependency: there may be no repo
+          # inside the container) so makepkg builds this commit offline.
+          tar -czf "pkgwork/pittore-studio-$VERSION.tar.gz" \
+            --transform "s,^,pittore-studio-$VERSION/," \
+            --exclude=./build --exclude=./pkgwork --exclude=./dist \
+            --exclude=./.git .
+          sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" pkgwork/PKGBUILD
+          chown -R builder:builder "$PWD"
+          cd pkgwork
+          sudo -u builder makepkg --syncdeps --noconfirm --needed
+          cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
+          ls -l "$GITHUB_WORKSPACE/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*.pkg.tar.zst
+
+  tarball:
+    name: portable tarball
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+            zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
+            libtomlplusplus-dev liblcms2-dev \
+            qt6-base-dev libqt6svg6-dev \
+            libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+      - name: Build and pack tarball
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          meson setup build ${{ env.MESON_OPTS }}
+          n=$(nproc)
+          j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
+          [ "${j:-0}" -lt 1 ] && j=1
+          [ "$j" -gt "$n" ] && j=$n
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          rm -rf staging dist
+          mkdir -p staging dist
+          DESTDIR="$PWD/staging" meson install -C build --no-rebuild
+          tar -czf "dist/pittore-studio-${VERSION}-x86_64.tar.gz" -C staging usr
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: dist/*.tar.gz
+
+  appimage:
+    name: AppImage (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+            file wget \
+            zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
+            libtomlplusplus-dev liblcms2-dev \
+            qt6-base-dev libqt6svg6-dev qt6-base-dev-tools \
+            libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+      - name: Build and pack AppImage
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          meson setup build ${{ env.MESON_OPTS }}
+          n=$(nproc)
+          j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
+          [ "${j:-0}" -lt 1 ] && j=1
+          [ "$j" -gt "$n" ] && j=$n
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          rm -rf AppDir dist
+          mkdir -p AppDir dist
+          DESTDIR="$PWD/AppDir" meson install -C build --no-rebuild
+          cp packaging/linux/studio.pittore.painter.desktop AppDir/studio.pittore.painter.desktop
+          cp packaging/linux/icons/hicolor/scalable/apps/painter.svg AppDir/painter.svg
+          mkdir -p AppDir/usr/share/applications AppDir/usr/share/metainfo
+          cp packaging/linux/studio.pittore.painter.desktop AppDir/usr/share/applications/
+          cp packaging/linux/studio.pittore.painter.metainfo.xml AppDir/usr/share/metainfo/
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage -O linuxdeploy-plugin-qt
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+          ./linuxdeploy --appimage-extract-and-run --appdir AppDir \
+            --desktop-file AppDir/studio.pittore.painter.desktop \
+            --icon-file AppDir/painter.svg \
+            --plugin qt \
+            --output appimage
+          mkdir -p dist
+          mv Pittore*.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage" 2>/dev/null || mv *.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.kde.Platform//6.8 org.kde.Sdk//6.8
+      - name: Build bundle
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          rm -rf flatpak-build repo dist
+          mkdir -p dist
+          flatpak-builder --force-clean --repo=repo flatpak-build packaging/flatpak/studio.pittore.painter.yml
+          flatpak build-bundle repo "dist/pittore-studio-${VERSION}-x86_64.flatpak" studio.pittore.painter
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/*.flatpak
+
+  snap:
+    name: Snap
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        with:
+          snapcraft-channel: stable
+      - name: Stage snap
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          mkdir -p dist
+          cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snap
+          path: dist/*.snap
+
+  release:
+    name: publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  release-latest:
+    name: publish rolling release
+    runs-on: ubuntu-24.04
+    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: dist/*
+          generate_release_notes: true

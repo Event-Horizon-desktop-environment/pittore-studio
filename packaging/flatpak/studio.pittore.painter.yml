@@ -1,0 +1,33 @@
+app-id: studio.pittore.painter
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: painter
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --device=dri
+  - --filesystem=host
+modules:
+  - name: tomlplusplus
+    buildsystem: cmake-ninja
+    sources:
+      - type: git
+        url: https://github.com/marzer/tomlplusplus.git
+        commit: 30172438cee64926dc41fdd9c11fb3ba5b2ba9de
+  - name: pittore-studio
+    buildsystem: meson
+    builddir: true
+    config-opts:
+      - --prefix=/app
+      - -Dbuildtype=release
+      - -Dbackend-cuda=disabled
+      - -Dbackend-hip=disabled
+      - -Donnxruntime=disabled
+      - -Dapp=enabled
+    sources:
+      - type: dir
+        path: ../..

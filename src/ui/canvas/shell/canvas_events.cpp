@@ -260,7 +260,7 @@ bool CanvasView::eventFilter(QObject* watched, QEvent* event) {
                         // opening the same way File > Open does (their own
                         // document with layers/groups intact) rather than
                         // flattening to one placed bitmap.
-                        if (suffix == QLatin1String("svg")) {
+                        if (suffix == "svg") {
                             QFile f(localPath);
                             if (f.open(QIODevice::ReadOnly)) {
                                 SvgImportResult svg;

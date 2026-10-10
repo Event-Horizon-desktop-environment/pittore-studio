@@ -1,0 +1,27 @@
+# Maintainer: Pittore Studio
+pkgname=pittore-studio
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Layer-based photo editor for Linux'
+arch=('x86_64')
+url='https://github.com/arrifat346afs/pittore-studio'
+license=('MIT')
+# No LTO: makepkg's default -flto makes BFD ld fail the final link with
+# "copy relocation against non-copyable protected symbol" on Qt6's
+# staticMetaObject symbols.
+options=('!lto')
+depends=('qt6-base' 'qt6-svg' 'zlib' 'harfbuzz' 'freetype2' 'fontconfig' 'lcms2'
+         'libwebp' 'libtiff' 'libjpeg-turbo' 'zstd' 'qrencode')
+makedepends=('meson' 'ninja' 'git' 'pkgconf' 'tomlplusplus')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/arrifat346afs/pittore-studio/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  meson setup build "$srcdir/$pkgname-$pkgver" --prefix=/usr -Dbuildtype=release \
+    -Dbackend-cuda=disabled -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
+  ninja -C build src/app/painter src/app/pittore-mcp
+}
+
+package() {
+  DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

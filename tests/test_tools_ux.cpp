@@ -40,6 +40,7 @@
 #include "ui/options_bar.h"
 #include "ui/panels/registry/panel_creators.h"
 #include "ui/canvas_view.h"
+#include "ui/contextual_task_bar.h"
 #include "ui/main_window.h"
 #include "ui/panels.h"
 #include "ui/persona/persona.h"
@@ -603,6 +604,12 @@ int main(int argc, char** argv) {
             dock("properties")) == false);  // properties lives on top
         CHECK(firstTab(QStringLiteral("Layers")) ==
               QStringLiteral("Layers"));
+        // Geometry is only live for a tab group's current tab — an
+        // obscured tab keeps whatever rect it last had — so surface both
+        // docks before comparing their groups' positions.
+        if (layers) layers->raise();
+        if (adjustments) adjustments->raise();
+        app.processEvents();
         CHECK(layers->geometry().center().y() <
               adjustments->geometry().center().y());
         // Vector mode: pixel-only panels hide, Stroke/Appearance join the
@@ -623,6 +630,10 @@ int main(int argc, char** argv) {
         CHECK(win.tabifiedDockWidgets(dock("color")).contains(appearance));
         CHECK(firstTab(QStringLiteral("Layers")) ==
               QStringLiteral("Layers"));
+        // Same live-geometry rule as above: surface both docks first.
+        if (layers) layers->raise();
+        if (stroke) stroke->raise();
+        app.processEvents();
         CHECK(layers->geometry().center().y() <
               stroke->geometry().center().y());
         // Back to Pixel restores the hidden panels into their groups.
@@ -5048,12 +5059,21 @@ int main(int argc, char** argv) {
         CHECK(canvas->pixelGridVisible());
         canvas->setZoom(8.0);
         app.processEvents();
+        // The floating contextual task bar would pollute the grab with
+        // bright text pixels (font-dependent), so hide it while counting
+        // grid paint, then restore it. Grid inks are dim whites over
+        // black, so count any painted (nonzero) pixel rather than only
+        // near-white ones.
+        QWidget* taskBar = canvas->taskBar();
+        const bool taskBarWasVisible = taskBar && taskBar->isVisible();
+        if (taskBar) taskBar->hide();
+        app.processEvents();
         const QImage shot = canvas->viewport()->grab().toImage();
         int bright = 0;
         for (int y = 0; y < shot.height(); ++y)
             for (int x = 0; x < shot.width(); ++x) {
                 const QColor c = shot.pixelColor(x, y);
-                if (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+                if (c.red() > 0 || c.green() > 0 || c.blue() > 0)
                     ++bright;
             }
         CHECK(bright > 100);
@@ -5065,10 +5085,14 @@ int main(int argc, char** argv) {
         for (int y = 0; y < shot2.height(); ++y)
             for (int x = 0; x < shot2.width(); ++x) {
                 const QColor c = shot2.pixelColor(x, y);
-                if (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+                if (c.red() > 0 || c.green() > 0 || c.blue() > 0)
                     ++bright2;
             }
         CHECK(bright2 > 100);
+        // The pixel grid strictly adds lines over the regular grid, so
+        // the first grab must hold strictly more paint than the second.
+        CHECK(bright > bright2);
+        if (taskBar && taskBarWasVisible) taskBar->show();
         // Leave the sandbox as found.
         s = state.settings();
         s.gridSpacing = 64.0;

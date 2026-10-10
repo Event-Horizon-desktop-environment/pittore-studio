@@ -31,3 +31,19 @@ compile_commands.json
 *.a
 *.so
 *.log
+
+# local packaging staging (CI writes these; never commit them)
+staging/
+dist/
+AppDir/
+pkgwork/
+rpmbuild/
+repo/
+flatpak-build/
+*.AppImage
+*.flatpak
+*.snap
+*.deb
+*.rpm
+*.pkg.tar.zst
+pittore-studio-*.tar.gz

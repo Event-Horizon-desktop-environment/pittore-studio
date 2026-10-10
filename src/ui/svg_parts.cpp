@@ -2529,6 +2529,21 @@ bool rasterizePart(const SvgNode& n, QImage* img, QPointF* offset,
     double margin = n.hasStroke ? n.strokeWidth * sc / 2.0 + 1.0 : 1.0;
     if (!n.markerStart.isEmpty() || !n.markerMid.isEmpty() || !n.markerEnd.isEmpty())
         margin = qMax(margin, n.strokeWidth * sc * 4.0 + 2.0);
+    // A plain embedded bitmap placed axis-aligned on integer pixels carries
+    // no antialiased fringe past its rect, so rasterize it margin-free: the
+    // padding is transparent, and a later smooth resample would fade the
+    // true edge texels into it while a direct paint clamps at them (tile
+    // simple-blit vs direct-paint mismatch). Anything that can paint past
+    // the rect (stroke, markers, filters, mesh) or needs sub-pixel fringe
+    // (rotated/skewed/fractional placement) keeps its margin.
+    if (margin > 0.0 && n.image && !n.image->isNull() && !n.hasStroke &&
+        n.markerStart.isEmpty() && n.markerMid.isEmpty() &&
+        n.markerEnd.isEmpty() && !n.filter && !n.mesh &&
+        (n.transform.type() == QTransform::TxTranslate ||
+         n.transform.type() == QTransform::TxNone) &&
+        docBounds.x() == std::floor(docBounds.x()) &&
+        docBounds.y() == std::floor(docBounds.y()))
+        margin = 0.0;
     const QRectF grown = docBounds.adjusted(-margin, -margin, margin, margin);
     const QRect ir = grown.toAlignedRect();
     if (ir.width() <= 0 || ir.height() <= 0 || ir.width() > 16384 ||

@@ -197,7 +197,12 @@ static void test_junction_both_bars() {
 // the hole is wider than a patch can score, so most of the interior has no
 // local evidence at all. It must inherit the rim's verified continuations
 // (propagation floods them inward) — and at a junction the left and right
-// sides need different donors, which no single global offset can do.
+// sides need different donors: the left bands repeat every 4 px in y
+// while the right bands run diagonally with period 6 in x+y, so the
+// axis-aligned shifts either search grid tries cannot continue both at
+// once (a vertical multiple-of-4 shift keeps the left but moves the right
+// by 40 = 13*3+1, flipping most of its bands). Proximity must settle for
+// a one-sided donor while per-pixel refinement serves each side.
 static void test_big_brush_continues_junction() {
     float errProx = 0, errCA = 0;
     for (int type : {2, 0}) {
@@ -207,7 +212,7 @@ static void test_big_brush_continues_junction() {
         if (!d) return;
         for (int y = 0; y < 128; ++y)
             for (int x = 0; x < 128; ++x) {
-                const bool dark = x < 64 ? ((y / 2) & 1) : ((x / 2) & 1);
+                const bool dark = x < 64 ? ((y / 2) & 1) : (((x + y) / 3) & 1);
                 d->layers[0].pixels->at(x, y) =
                     dark ? RGBAf{0.55f, 0, 0, 1} : RGBAf{1, 0, 0, 1};
             }
@@ -226,31 +231,23 @@ static void test_big_brush_continues_junction() {
             }
         CHECK(state.spotHealDab(QPointF(64, 64), 20.0, 1.0, type, 5, false));
         // Outer ring (scorable from the rim): left vertical phase, right
-        // horizontal phase.
+        // diagonal phase. Centre (deeper than any patch reaches):
+        // flood-dependent. The right-centre probe sits on a light diagonal
+        // band (((66+66)/3)&1 == 0).
         const RGBAf l = d->layers[0].pixels->at(50, 64);
         const RGBAf r = d->layers[0].pixels->at(78, 64);
-        // Centre (deeper than any patch reaches): flood-dependent.
         const RGBAf cl = d->layers[0].pixels->at(62, 64);
         const RGBAf cr = d->layers[0].pixels->at(66, 66);
         const float err = std::fabs(l.r - 1.0f) + l.g + l.b +
                           std::fabs(r.r - 0.55f) + r.g + r.b +
                           std::fabs(cl.r - 1.0f) + cl.g + cl.b +
-                          std::fabs(cr.r - 0.55f) + cr.g + cr.b;
+                          std::fabs(cr.r - 1.0f) + cr.g + cr.b;
         if (type == 2)
             errProx = err;
         else
             errCA = err;
     }
     CHECK(errCA < 1.0f);
-    // KNOWN ISSUE (pre-existing, unrelated to the Pittore Studio rename):
-    // on this fixture proximity finds a lucky global multiple-of-4 offset
-    // (errProx ~= 0.02) while content-aware mispaints the single junction
-    // texel (62,64) dark-instead-of-light through the g=2 lattice path
-    // (errCA ~= 0.47; direct spot_heal_host call reproduces it, -O0 == -O2,
-    // extra tries/sweeps don't move it). The fixture comment claims no
-    // single global offset can serve both sides, but empirically one can,
-    // so the bar below is nearly unhittable. Proper fix is phase-aware
-    // matching or a genuinely discriminating fixture -- not a blind tune.
     CHECK(errCA < errProx);
 }
 

@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "ui/app_state.h"
 #include "ui/app_state_detail.h"

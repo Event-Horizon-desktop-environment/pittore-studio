@@ -1,0 +1,56 @@
+name: pittore-studio
+base: core24
+version: '0.1.0'
+summary: Layer-based photo editor for Linux
+description: |
+  Raster painting and retouching, vector persona, text,
+  adjustment layers, filters, and an ICC-aware colour pipeline.
+confinement: classic
+grade: stable
+
+apps:
+  painter:
+    command: usr/bin/painter
+    common-id: studio.pittore.painter
+    desktop: usr/share/applications/studio.pittore.painter.desktop
+
+parts:
+  pittore-studio:
+    plugin: meson
+    source: .
+    meson-parameters:
+      - --prefix=/usr
+      - -Dbuildtype=release
+      - -Dbackend-cuda=disabled
+      - -Dbackend-hip=disabled
+      - -Donnxruntime=disabled
+      - -Dapp=enabled
+    build-packages:
+      - build-essential
+      - meson
+      - ninja-build
+      - git
+      - pkg-config
+      - zlib1g-dev
+      - libharfbuzz-dev
+      - libfreetype-dev
+      - libfontconfig-dev
+      - libtomlplusplus-dev
+      - liblcms2-dev
+      - qt6-base-dev
+      - libqt6svg6-dev
+      - qt6-base-dev-tools
+      - libwebp-dev
+      - libtiff-dev
+      - libjpeg-dev
+      - libzstd-dev
+      - libqrencode-dev
+    stage-packages:
+      - libqt6widgets6
+      - libqt6network6
+      - libqt6svg6
+      - zlib1g
+      - libharfbuzz0b
+      - libfreetype6
+      - libfontconfig1
+      - liblcms2-2

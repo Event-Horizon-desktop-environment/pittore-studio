@@ -80,7 +80,7 @@ PITTORE_BLEND_DEVICE float bsqrt(float v) {
 #if defined(__CUDACC__) || defined(__HIPCC__)
     return sqrtf(v);
 #else
-    return std::sqrtf(v);
+    return std::sqrt(v);
 #endif
 }
 

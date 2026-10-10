@@ -293,16 +293,27 @@ static void test_stashed_pixels() {
     // Top-first panel: the recovered layer first, the flattened base below it.
     CHECK_EQ(d->layers.size(), 2);
     if (d->layers.size() != 2) return;
+    // Visibility contract: recovered layers open with the file's own
+    // visibility and realise from the packed stash on the first composite;
+    // the flattened preview stays as the hidden reference copy below them.
+    LayerItem& recovered = d->layers[0];
+    CHECK(recovered.visible);
+    CHECK(recovered.pixels != nullptr);
+    CHECK(!hasDeferredPixels(recovered));
+    CHECK(!d->layers[1].visible);
+    // The decode buffer it came from was released as it was consumed.
+    CHECK(pd.layers.empty() || pd.layers[0].rgba.empty());
+
+    // Hide the layer to reach the packed state: the stash is exactly the
+    // decoder's 8-bit source, u16>>8.
+    recovered.visible = false;
+    stashDeferredPixels(*d, QVector<int>{0});
     LayerItem& stashed = d->layers[0];
-    CHECK(!stashed.visible);
     CHECK(stashed.pixels == nullptr);
     CHECK(hasDeferredPixels(stashed));
     CHECK_EQ(int(stashed.deferredWidth), kW);
     CHECK_EQ(int(stashed.deferredHeight), kH);
-    // The stash is exactly the decoder's 8-bit source, u16>>8.
     CHECK(stashed.deferredRgba8 == expect);
-    // The decode buffer it came from was released as it was consumed.
-    CHECK(pd.layers.empty() || pd.layers[0].rgba.empty());
 
     // Save straight out of the packed state.
     const ProjectFileData saved = projectDataFromDocument(*d);
