@@ -552,6 +552,16 @@ QImage CanvasView::proofedComposite(const QRect& docRect, QRect* srcRect) const 
 
 
 void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
+    // DPR sync: moving the window across mixed-DPR screens changes the
+    // paint device ratio with no zoom event. Tile buckets (zoom × DPR)
+    // and the checker key (DPR) rebake on miss by construction; scroll
+    // ranges still need re-evaluation here in the paint path.
+    if (QPaintDevice* dev = p.device()) {
+        const qreal now = qreal(dev->devicePixelRatioF());
+        if (now > 0.0 && lastPaintDpr_ > 0.0 && now != lastPaintDpr_)
+            updateScrollRange();
+        if (now > 0.0) lastPaintDpr_ = now;
+    }
     DocumentItem* d = doc();
     const QTransform t = documentTransform();
     const QRectF docRect(0, 0, d->size.width(), d->size.height());
@@ -586,17 +596,27 @@ void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
     // (multiples of 8), which is exactly how the old loop placed them.
     const AppSettings& prefs = state_->settings();
     const int cell = qBound(4, prefs.transparencyCellPx, 64);
-    const QString tileKey = QStringLiteral("%1/%2/%3")
+    // Bake the checker at device resolution and tag its DPR, or Qt
+    // stretches a 1x pixmap on 150/200% displays and the transparency
+    // grid goes soft. Keyed by DPR so a screen move rebakes crisply.
+    const qreal dpr = p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0;
+    const qreal useDpr = dpr > 0.0 ? dpr : 1.0;
+    const QString tileKey = QStringLiteral("%1/%2/%3/%4")
                                 .arg(cell)
                                 .arg(prefs.transparencyLight.name(QColor::HexArgb),
-                                     prefs.transparencyDark.name(QColor::HexArgb));
+                                     prefs.transparencyDark.name(QColor::HexArgb))
+                                .arg(QString::number(useDpr, 'f', 2));
     static QMap<QString, QPixmap> checkerCache;
     auto it = checkerCache.find(tileKey);
     if (it == checkerCache.end()) {
         if (checkerCache.size() >= 8) checkerCache.clear();
-        QPixmap pm(2 * cell, 2 * cell);
+        const int dev = qMax(1, qRound(2 * cell * useDpr));
+        QPixmap pm(dev, dev);
+        pm.setDevicePixelRatio(useDpr);
         pm.fill(Qt::transparent);
         QPainter qp(&pm);
+        // Painter coords are logical (Qt maps to device via the DPR tag),
+        // so paint in logical cell units, not device px.
         qp.fillRect(0, 0, cell, cell, prefs.transparencyLight);
         qp.fillRect(cell, cell, cell, cell, prefs.transparencyLight);
         qp.fillRect(cell, 0, cell, cell, prefs.transparencyDark);

@@ -424,7 +424,7 @@ void CanvasRuler::paintEvent(QPaintEvent*) {
 
 void CanvasRuler::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
-        view_->beginRulerGuide(orientation_, event->pos());
+        view_->beginRulerGuide(orientation_, event->position());
         event->accept();
         return;
     }
@@ -433,7 +433,7 @@ void CanvasRuler::mousePressEvent(QMouseEvent* event) {
 
 
 void CanvasRuler::mouseMoveEvent(QMouseEvent* event) {
-    view_->updateRulerGuide(orientation_, event->pos());
+    view_->updateRulerGuide(orientation_, event->position());
     event->accept();
 }
 

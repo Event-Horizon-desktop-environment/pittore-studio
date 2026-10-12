@@ -12,6 +12,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QScreen>
+#include <QWindow>
 #include <QPainterPath>
 #include <QScrollBar>
 #include <QDateTime>
@@ -146,11 +148,23 @@ void CanvasView::setZoom(double zoom, QPointF anchor) {
     }
     zoomSettleTimer_->start();
 
-    // Keep the anchored document point under the cursor.
+    // Keep the anchored document point under the cursor. Rounded (not
+    // truncated) so fractional anchors at 125/150% stay under the cursor;
+    // computed in double and clamped to the bar range first, because
+    // qRound asserts out-of-range in this build (Q_ASSERT active) and
+    // extreme zooms (1e30 → rails) make delta astronomic.
     const QPointF after = documentToView(docAnchor);
     const QPointF delta = after - anchorPoint;
-    horizontalScrollBar()->setValue(horizontalScrollBar()->value() + int(delta.x()));
-    verticalScrollBar()->setValue(verticalScrollBar()->value() + int(delta.y()));
+    QScrollBar* hb = horizontalScrollBar();
+    QScrollBar* vb = verticalScrollBar();
+    const double nxd =
+        std::floor(double(hb->value()) + delta.x() + 0.5);
+    const double nyd =
+        std::floor(double(vb->value()) + delta.y() + 0.5);
+    hb->setValue(int(qBound(double(hb->minimum()), nxd,
+                            double(hb->maximum()))));
+    vb->setValue(int(qBound(double(vb->minimum()), nyd,
+                            double(vb->maximum()))));
 
     emit zoomChanged(z);
     refresh();
@@ -220,18 +234,35 @@ void CanvasView::zoomToActiveLayer() {
 void CanvasView::zoomPrintSize() {
     DocumentItem* d = doc();
     if (!d || d->size.isEmpty()) return;
-    // Print Size (R14): one image pixel shown at one physical print pixel —
-    // the screen DPI divided by the document DPI. Photography print output is
-    // conventionally 300 DPI; the document's own DPI wins when it is set.
+    // Print Size (R14): one image pixel shown at one physical print pixel.
+    // zoom is logical (doc px -> logical view px); Qt maps logical to
+    // device via DPR. device px per doc px = zoom * DPR, and we want
+    // physicalDpi / docDpi, so zoom = physical / (docDpi * DPR).
+    // Uses the window's own screen (not primary) so mixed-DPR multi-monitor
+    // picks the screen the canvas is actually on.
     const int dpi = d->dpi > 0 ? d->dpi : 300;
-    const double screenDpi =
-        QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->logicalDotsPerInch()
-                                         : 96.0;
-    setZoom(screenDpi / dpi);
+    qreal physical = 0.0;
+    qreal dpr = viewport() ? viewport()->devicePixelRatioF() : 1.0;
+    if (QWindow* win = window() ? window()->windowHandle() : nullptr) {
+        if (QScreen* scr = win->screen()) physical = scr->physicalDotsPerInch();
+    }
+    if (!(physical > 0.0)) {
+        if (QScreen* primary = QGuiApplication::primaryScreen())
+            physical = primary->physicalDotsPerInch();
+    }
+    if (!(physical > 0.0)) physical = 96.0;
+    if (!(dpr > 0.0)) dpr = 1.0;
+    setZoom(physical / (dpi * dpr));
 }
 
 
-void CanvasView::zoomActualPixels() { setZoom(1.0); }
+void CanvasView::zoomActualPixels() {
+    // 1 image px = 1 device px. device px per doc px = zoom * DPR,
+    // so zoom = 1 / DPR (not 1.0, which shows 200% on a 200% display).
+    qreal dpr = viewport() ? viewport()->devicePixelRatioF() : 1.0;
+    if (!(dpr > 0.0)) dpr = 1.0;
+    setZoom(1.0 / dpr);
+}
 
 
 void CanvasView::setRotation(double degrees) {

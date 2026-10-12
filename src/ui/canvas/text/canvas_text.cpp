@@ -273,11 +273,11 @@ void CanvasView::commitTextEdit() {
                 QPointF(float(raster->bounds.left), float(raster->bounds.top)));
             const int bw = raster->bounds.width();
             for (int y = 0; y < raster->bounds.height(); ++y) {
-                const int dy = int(topLeft.y()) + y;
+                const int dy = qRound(topLeft.y()) + y;
                 if (dy < 0 || dy >= mask.height()) continue;
                 uchar* row = mask.scanLine(dy);
                 for (int x = 0; x < bw; ++x) {
-                    const int dx = int(topLeft.x()) + x;
+                    const int dx = qRound(topLeft.x()) + x;
                     if (dx < 0 || dx >= mask.width()) continue;
                     row[dx] = raster->coverage[std::size_t(y) * bw + x];
                 }

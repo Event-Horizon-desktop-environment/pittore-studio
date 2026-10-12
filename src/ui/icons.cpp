@@ -1552,13 +1552,22 @@ QIcon toolIcon(ToolId id, const QColor& normal, const QColor& active) {
 
 QIcon chromeIcon(const QString& key, const QColor& normal, const QColor& active) {
     QIcon icon;
+    // Ship 1x and 2x DPR variants so Qt picks (or downscales) correctly at
+    // fractional scales like 125/150%: a single 2.0 bake blurs one notch
+    // down and wastes VRAM at scale 1.
     for (int size : {16, 20, 24, 32}) {
-        icon.addPixmap(glyphPixmap(key, size, normal, 2.0), QIcon::Normal, QIcon::Off);
-        icon.addPixmap(glyphPixmap(key, size, active, 2.0), QIcon::Normal, QIcon::On);
-        icon.addPixmap(glyphPixmap(key, size, active, 2.0), QIcon::Active, QIcon::Off);
-        QColor disabled = normal;
-        disabled.setAlpha(90);
-        icon.addPixmap(glyphPixmap(key, size, disabled, 2.0), QIcon::Disabled, QIcon::Off);
+        for (qreal dpr : {1.0, 2.0}) {
+            icon.addPixmap(glyphPixmap(key, size, normal, dpr), QIcon::Normal,
+                           QIcon::Off);
+            icon.addPixmap(glyphPixmap(key, size, active, dpr), QIcon::Normal,
+                           QIcon::On);
+            icon.addPixmap(glyphPixmap(key, size, active, dpr), QIcon::Active,
+                           QIcon::Off);
+            QColor disabled = normal;
+            disabled.setAlpha(90);
+            icon.addPixmap(glyphPixmap(key, size, disabled, dpr),
+                           QIcon::Disabled, QIcon::Off);
+        }
     }
     return icon;
 }

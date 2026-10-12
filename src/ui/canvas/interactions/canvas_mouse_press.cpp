@@ -168,7 +168,7 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::MiddleButton ||
         (tool == ToolId::Hand && event->button() == Qt::LeftButton)) {
         panning_ = true;
-        panStartView_ = event->position().toPoint();
+        panStartView_ = event->position();
         panStartScroll_ = QPoint(horizontalScrollBar()->value(), verticalScrollBar()->value());
         viewport()->setCursor(Qt::ClosedHandCursor);
         return;

@@ -156,7 +156,7 @@ class LayerRow final : public QWidget {
 
         // Visibility eye.
         if (layer.visible) {
-            p.drawPixmap(QRect(5, 12, 16, 16), glyphPixmap(QStringLiteral("eye"), 16, c.text, 2.0));
+            p.drawPixmap(QRect(5, 12, 16, 16), glyphPixmap(QStringLiteral("eye"), 16, c.text, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
         } else {
             p.setPen(QPen(c.textDim, 1));
             p.drawRect(QRect(8, 15, 10, 10));
@@ -194,7 +194,7 @@ class LayerRow final : public QWidget {
             const QImage preview = groupThumbnail(*d, index_, 30);
             if (preview.isNull()) {
                 p.drawPixmap(thumb.adjusted(7, 7, -7, -7),
-                             glyphPixmap(QStringLiteral("group"), 18, c.text, 2.0));
+                             glyphPixmap(QStringLiteral("group"), 18, c.text, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
             } else {
                 const QRect inner = thumb.adjusted(1, 1, -1, -1);
                 constexpr int kCell = 5;
@@ -209,7 +209,7 @@ class LayerRow final : public QWidget {
             }
         } else if (layer.kind == LayerItem::Kind::Adjustment) {
             p.drawPixmap(thumb.adjusted(6, 6, -6, -6),
-                         glyphPixmap(QStringLiteral("adjustments"), 20, c.text, 2.0));
+                         glyphPixmap(QStringLiteral("adjustments"), 20, c.text, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
         } else {
             // Text layers letterbox the whole run so every glyph stays legible;
             // other layers COVER the square with their own content. Both sit on
@@ -278,12 +278,12 @@ class LayerRow final : public QWidget {
         }
         if (layer.locked) {
             p.drawPixmap(QRect(badge, 13, 14, 14),
-                         glyphPixmap(QStringLiteral("lock"), 14, c.textDim, 2.0));
+                         glyphPixmap(QStringLiteral("lock"), 14, c.textDim, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
             badge -= 18;
         }
         if (!layer.style.empty()) {
             p.drawPixmap(QRect(badge, 13, 14, 14),
-                         glyphPixmap(QStringLiteral("fx"), 14, c.textDim, 2.0));
+                         glyphPixmap(QStringLiteral("fx"), 14, c.textDim, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
             badge -= 18;
         }
         if (layer.hasLiveFilter) {
@@ -291,7 +291,7 @@ class LayerRow final : public QWidget {
                          glyphPixmap(QStringLiteral("smart"), 14,
                                       layer.liveFilterEnabled ? c.textDim
                                                               : c.textDim.darker(180),
-                                      2.0));
+                                      p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
             badge -= 18;
         }
 

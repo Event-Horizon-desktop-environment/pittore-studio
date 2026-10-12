@@ -510,9 +510,9 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (panning_) {
-        const QPoint delta = event->position().toPoint() - panStartView_;
-        horizontalScrollBar()->setValue(panStartScroll_.x() - delta.x());
-        verticalScrollBar()->setValue(panStartScroll_.y() - delta.y());
+        const QPointF delta = event->position() - panStartView_;
+        horizontalScrollBar()->setValue(panStartScroll_.x() - qRound(delta.x()));
+        verticalScrollBar()->setValue(panStartScroll_.y() - qRound(delta.y()));
         return;  // scrollContentsBy refreshes the viewport
     }
     // Polygonal rubber band tracks the cursor between clicks (no buttons).

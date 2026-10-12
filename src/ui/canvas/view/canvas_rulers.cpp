@@ -53,7 +53,7 @@ void CanvasView::layoutRulers() {
 
 
 void CanvasView::beginRulerGuide(Qt::Orientation orientation,
-                                 const QPoint& rulerPos) {
+                                 const QPointF& rulerPos) {
     if (!doc()) return;
     rulerGuideDragging_ = true;
     rulerGuideHorizontal_ = (orientation == Qt::Horizontal);
@@ -62,7 +62,7 @@ void CanvasView::beginRulerGuide(Qt::Orientation orientation,
 
 
 void CanvasView::updateRulerGuide(Qt::Orientation orientation,
-                                  const QPoint& rulerPos) {
+                                const QPointF& rulerPos) {
     DocumentItem* d = doc();
     if (!d || !rulerGuideDragging_) return;
     // The ruler strip is off-document on its own axis; sample through the
@@ -112,13 +112,17 @@ void CanvasView::paintRuler(QPainter& p, Qt::Orientation orientation,
     if (!d) return;
 
     // Tick spacing: the first step on the ladder that leaves at least 48 device
-    // pixels between labels at the current zoom.
+    // pixels between labels at the current zoom (zoom is logical, so fold
+    // the ruler's DPR in or labels go DPR× sparser on 150/200%).
     static const int ladder[] = {1, 2, 5, 10, 25, 50, 100, 250, 500,
                                  1000, 2500, 5000, 10000, 25000};
+    const qreal rulerDpr =
+        p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0;
+    const double effZoom = d->zoom * (rulerDpr > 0.0 ? rulerDpr : 1.0);
     int step = ladder[0];
     for (int candidate : ladder) {
         step = candidate;
-        if (candidate * d->zoom >= 48) break;
+        if (candidate * effZoom >= 48) break;
     }
 
     QFont f = p.font();

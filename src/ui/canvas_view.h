@@ -75,8 +75,8 @@ class CanvasView final : public QAbstractScrollArea {
     // Ruler-drag guide creation (driven by the ruler strips): press begins
     // the pending guide, moves track it, release commits it to the document
     // (Escape abandons). The overlay draws the pending line dashed.
-    void beginRulerGuide(Qt::Orientation orientation, const QPoint& rulerPos);
-    void updateRulerGuide(Qt::Orientation orientation, const QPoint& rulerPos);
+    void beginRulerGuide(Qt::Orientation orientation, const QPointF& rulerPos);
+    void updateRulerGuide(Qt::Orientation orientation, const QPointF& rulerPos);
     void finishRulerGuide(bool commit);
     void cancelRulerGuide();
     // Node tool click-selection (convert/close/split/join/reverse target):
@@ -580,6 +580,12 @@ class CanvasView final : public QAbstractScrollArea {
     qint64 lastPressMs_ = 0;
     QPointF lastPressView_;
     bool lastPressOnCanvas_ = false;
+    // Last viewport DPR seen by the paint path. Moving the window across
+    // mixed-DPR screens changes devicePixelRatioF without any zoom change:
+    // tile buckets key on zoomEff (zoom × DPR) so they miss and rebake,
+    // and the checker key includes DPR — but scroll ranges and print-size
+    // assumptions must be re-evaluated, so the paint path syncs on change.
+    qreal lastPaintDpr_ = 0.0;
     // The tool that owned the previous press: switching tools between clicks
     // restarts the double-click window (a fresh gesture, not a second press).
     ToolId lastPressTool_ = ToolId::Move;
@@ -590,7 +596,7 @@ class CanvasView final : public QAbstractScrollArea {
     // Shape-drag press point. Shift/Alt recompute both drag ends absolutely
     // from this anchor every move event, so toggling keys mid-drag is stable.
     QPointF shapeAnchorDoc_;
-    QPoint panStartView_;
+    QPointF panStartView_;
     QPoint panStartScroll_;
     QPointF cursorDoc_;
     // Brush-size cursor: every tool that strokes with the dab kernel shows its

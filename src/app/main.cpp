@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QGuiApplication>
 #include <QStyleFactory>
 
 #include <cstring>
@@ -31,15 +32,16 @@ int main(int argc, char** argv) {
     if (hasFlag(argc, argv, "--fetch-model"))
         return pittore::ui::ai_model_cli(argc, argv, /*list=*/false);
 
-    QApplication app(argc, argv);
     // Fractional display scaling (125/150%) rounds to full pixels by
     // default, blurring the whole UX one notch down. PassThrough keeps
-    // the real scale factor on every screen (Qt6; no-op elsewhere).
+    // the real scale factor on every screen. Must run before the
+    // QApplication ctor so the first screen query already sees it.
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+    QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("painter"));
     QCoreApplication::setOrganizationName(QStringLiteral("PittoreStudio"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.1"));
 
     // Fusion lets our theme own every colour; native styles hard-code theirs.
     QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
@@ -48,7 +50,7 @@ int main(int argc, char** argv) {
     // (alpha); PITTORE_DEBUG=0 silences verbose lines.
     pittore::ui::install_logging();
     ::pittore::core::log::log_info(
-        "[app] Pittore Studio 0.1.0 starting | log dir: %s",
+        "[app] Pittore Studio 0.1.1 starting | log dir: %s",
         ::pittore::core::log::log_dir().c_str());
 
     pittore::ui::AppState state;

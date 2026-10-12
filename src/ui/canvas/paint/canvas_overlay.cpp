@@ -183,6 +183,12 @@ void CanvasView::paintOverlay(QPainter& p) {
     DocumentItem* d = doc();
     const QTransform t = documentTransform();
     const ThemeColors c = colorsFor(state_->theme());
+    // Legibility is a device-px question: at DPR 2 a 4-logical-px gap is 8
+    // device px, so grid/ruler/pixel-grid gates use zoom × DPR.
+    const qreal overlayDpr =
+        p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0;
+    const double effZoom =
+        d->zoom * (overlayDpr > 0.0 ? overlayDpr : 1.0);
 
     // Grid (document-space multiples of the spacing setting, so lines stay
     // glued to the same coordinates at any zoom or rotation; view-space
@@ -192,7 +198,7 @@ void CanvasView::paintOverlay(QPainter& p) {
         const QColor ink = state_->settings().gridColor;
         p.setPen(QPen(ink, 1));
         const double step = gridStep();
-        if (step * d->zoom > 4) {
+        if (step * effZoom > 4) {
             const QRectF vis =
                 t.inverted().mapRect(QRectF(viewport()->rect()));
             const long long kx0 =
@@ -221,7 +227,7 @@ void CanvasView::paintOverlay(QPainter& p) {
             const int subdiv =
                 qBound(1, state_->settings().gridSubdivisions, 16);
             const double sub = step / subdiv;
-            if (subdiv > 1 && sub * d->zoom > 4) {
+            if (subdiv > 1 && sub * effZoom > 4) {
                 p.setPen(QPen(QColor(ink.red(), ink.green(), ink.blue(),
                                      ink.alpha() / 2),
                                1));
@@ -261,8 +267,9 @@ void CanvasView::paintOverlay(QPainter& p) {
     }
 
     // Pixel grid: document-pixel boundaries, only where a pixel covers
-    // enough screen to read.
-    if (pixelGrid_ && d->zoom >= 4.0) {
+    // enough screen to read (device px, so HiDPI shows it at the same
+    // physical density instead of one zoom stop late).
+    if (pixelGrid_ && effZoom >= 4.0) {
         p.setPen(QPen(QColor(255, 255, 255, 22), 1));
         const QRectF vis = t.inverted().mapRect(QRectF(viewport()->rect()));
         const int x0 = std::max(0, int(std::floor(vis.left())));

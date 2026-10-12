@@ -4,6 +4,7 @@
 #include <QContextMenuEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QImageReader>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -14,6 +15,7 @@
 #include <QPixmap>
 #include <QPainterPath>
 #include <QScrollBar>
+#include <QScreen>
 #include <QDateTime>
 #include <QTimer>
 #include <QWheelEvent>
@@ -268,6 +270,16 @@ CanvasView::CanvasView(AppState* state, QWidget* parent)
     connect(state_, &AppState::surroundChanged, this, [this] { refresh(); });
     connect(state_, &AppState::themeChanged, this, [this] { refresh(); });
     connect(state_, &AppState::quickMaskChanged, this, [this] { refresh(); });
+
+    // Mixed-DPR multi-monitor: a screen appearing/vanishing (dock/undock)
+    // can change which DPR the canvas paints at — repaint so tile buckets
+    // (keyed by zoom × DPR) and the DPR-keyed checker rebake promptly.
+    // Window moves between existing screens are caught by the paint-path
+    // DPR sync in paintDocument (lastPaintDpr_).
+    connect(qApp, &QGuiApplication::screenAdded, this,
+            [this](QScreen*) { refresh(); });
+    connect(qApp, &QGuiApplication::screenRemoved, this,
+            [this](QScreen*) { refresh(); });
 
     applyToolCursor();
 }

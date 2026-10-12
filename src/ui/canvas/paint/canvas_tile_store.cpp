@@ -169,16 +169,33 @@ void drawTileImage(QPainter& p, const QRectF& docRect, const QImage& img) {
         p.drawImage(docRect, img);
         return;
     }
-    int x0 = qRound(w.dx() + docRect.left() * w.m11());
-    int x1 = qRound(w.dx() + docRect.right() * w.m11());
-    int y0 = qRound(w.dy() + docRect.top() * w.m22());
-    int y1 = qRound(w.dy() + docRect.bottom() * w.m22());
-    if (x1 < x0) std::swap(x0, x1);
-    if (y1 < y0) std::swap(y0, y1);
-    if (x1 <= x0 || y1 <= y0) return;  // thinner than the device grid
-    const QRect dest(x0, y0, x1 - x0, y1 - y0);
-    const double rx = double(dest.width()) / img.width();
-    const double ry = double(dest.height()) / img.height();
+    // Tile rasters are baked at view density (zoom * DPR), but dest here is
+    // logical. Compare and snap in device px so the near-1:1 band fires at
+    // any DPR and abutting tiles share exact device edges (no seam/gap).
+    qreal dpr = p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0;
+    if (!(dpr > 0.0)) dpr = 1.0;
+    const double lx0 = w.dx() + docRect.left() * w.m11();
+    const double lx1 = w.dx() + docRect.right() * w.m11();
+    const double ly0 = w.dy() + docRect.top() * w.m22();
+    const double ly1 = w.dy() + docRect.bottom() * w.m22();
+    // qRound asserts out-of-range in this build (Q_ASSERT active): at
+    // extreme zoom scroll offsets approach INT_MAX, times DPR exceeds it.
+    // Saturate first — off-screen edges clamp harmlessly.
+    const double satLo =
+        double((std::numeric_limits<int>::min)());
+    const double satHi =
+        double((std::numeric_limits<int>::max)());
+    int dx0 = qRound(qBound(satLo, lx0 * dpr, satHi));
+    int dx1 = qRound(qBound(satLo, lx1 * dpr, satHi));
+    int dy0 = qRound(qBound(satLo, ly0 * dpr, satHi));
+    int dy1 = qRound(qBound(satLo, ly1 * dpr, satHi));
+    if (dx1 < dx0) std::swap(dx0, dx1);
+    if (dy1 < dy0) std::swap(dy0, dy1);
+    if (dx1 <= dx0 || dy1 <= dy0) return;  // thinner than the device grid
+    const QRectF dest(dx0 / dpr, dy0 / dpr, (dx1 - dx0) / dpr,
+                      (dy1 - dy0) / dpr);
+    const double rx = double(dx1 - dx0) / img.width();
+    const double ry = double(dy1 - dy0) / img.height();
     // The band is exactly what the readiness rule can hand us: a tile baked
     // within kDensityTol of the view maps at view/density, which lands in
     // [1/(1+tol), 1/(1-tol)] - so a tile that counts as ready is always
