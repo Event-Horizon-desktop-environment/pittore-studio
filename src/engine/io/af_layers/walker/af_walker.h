@@ -63,6 +63,7 @@ struct Walker {
                       const TextPayload* text = nullptr,
                       std::shared_ptr<const pittore::vector::ArtNode> art = nullptr);
     void emitRaster(const Node* node, const Mat& ctm, int indent, bool clipped);
+    void emitFill(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emitShape(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emitText(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emit(const Node* node, const Mat& ctm, int indent, bool clipped);

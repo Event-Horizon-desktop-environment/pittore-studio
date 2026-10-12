@@ -109,6 +109,52 @@ void Walker::emitRaster(const Node* node, const Mat& ctm, int indent, bool clipp
                      placed->rect);
 }
 
+    // A fill raster ("FRst", sections FRst, Rstr, Node): a solid fill colour
+    // from its `BFFl` descriptor (same classes as vector paint, so HSLA and
+    // friends resolve) masked by its bitmap, which is usually format 6 (one
+    // mask channel). The mask-kind interleave stores coverage in R.
+    void Walker::emitFill(const Node* node, const Mat& ctm, int indent, bool clipped) {
+        const std::vector<Node*> fillDesc = g.children(node, "BFFl");
+        Node* fillNode = fillDesc.empty() ? nullptr : g.child(fillDesc.front(), "FDeF");
+        if (!fillNode) fillNode = g.child(node, "BFil");
+        const auto color = fillColorBytes(g, fillNode);
+        if (!color) {
+            noteSkip(node, "fill has no solid colour");
+            return;
+        }
+        Node* bitm = g.child(node, "Bitm");
+        if (!bitm || g.typeTag(bitm) != tag4("DyBm")) {
+            noteSkip(node, "fill has no bitmap record");
+            return;
+        }
+        std::string why;
+        auto mask = decodeBitmap(bitm, why);
+        if (!mask) {
+            noteSkip(node, "fill bitmap: " + why);
+            return;
+        }
+        render::Rgba8Image img;
+        img.w = mask->w;
+        img.h = mask->h;
+        img.px.resize(static_cast<std::size_t>(mask->w) * mask->h * 4);
+        for (std::size_t i = 0, n = static_cast<std::size_t>(mask->w) * mask->h; i < n; ++i) {
+            const std::uint32_t cov = mask->px[i * 4];
+            img.px[i * 4 + 0] = static_cast<std::uint8_t>((*color)[0] * cov / 255);
+            img.px[i * 4 + 1] = static_cast<std::uint8_t>((*color)[1] * cov / 255);
+            img.px[i * 4 + 2] = static_cast<std::uint8_t>((*color)[2] * cov / 255);
+            img.px[i * 4 + 3] = static_cast<std::uint8_t>((*color)[3] * cov / 255);
+        }
+        std::string display = strOf(g, node, "Desc");
+        if (display.empty()) display = "Fill";
+        auto placed = placeRaster(nodeCtm(node, ctm), std::move(img));
+        if (!placed) {
+            noteSkip(node, "fill placement failed");
+            return;
+        }
+        const IntRect rect{placed->rect.x0, placed->rect.y0, placed->rect.x1, placed->rect.y1};
+        finishImageLayer(node, ctm, indent, clipped, display, "", std::move(placed->img), rect);
+    }
+
     // Rebuild a live shape ("ShpN") or free path ("PCrv") into pixels.
 void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clipped) {
     using namespace pittore::vector;
@@ -609,6 +655,10 @@ void Walker::emit(const Node* node, const Mat& ctm, int indent, bool clipped) {
     }
     if (kind == tag4("Rstr") || kind == tag4("ImgN")) {
         emitRaster(node, ctm, indent, clipped);
+        return;
+    }
+    if (kind == tag4("FRst")) {
+        emitFill(node, ctm, indent, clipped);
         return;
     }
     if (kind == tag4("ShpN") || kind == tag4("PCrv")) {
