@@ -260,7 +260,7 @@ layers (stack + `kLayerDragMime` re-parent), channels, paths, adjustments, prope
 
 - `docs/FEATURES.md` (feature truth + "Not there yet"), `docs/BUILDING.md` (deps + loss table + distro lines + meson/just/test/AI/install notes).
 - `packaging/linux/studio.pittore.painter.desktop` (`Exec=painter %F`), `studio.pittore.painter.metainfo.xml` (MIT AppStream), `mime/painter.xml` (`application/x-painter-project` `*.psc/*.ifp`), `icons/hicolor/scalable/apps/painter.svg`, `packaging/README.md`.
-- Root: `meson.build` (0.1.0 MIT C++20, Linux-only), `meson_options.txt` (cuda/hip/onnx/app), `justfile` (build/reconf/test/app/models/backends/install/clean), `build.sh` (bootstrap; never installs GPU toolchains), `AGENTS.md` (agent rules), `README.md`, `LICENSE`, `ink.md` (scratch/spec), `Reference/` (reference material, not compiled), `Pittore-studio.zip` (artifact).
+- Root: `meson.build` (0.1.1 MIT C++20, Linux-only), `meson_options.txt` (cuda/hip/onnx/app), `justfile` (build/reconf/test/app/models/backends/install/clean), `build.sh` (bootstrap; never installs GPU toolchains), `AGENTS.md` (agent rules), `README.md`, `LICENSE`, `ink.md` (scratch/spec), `Reference/` (reference material, not compiled), `Pittore-studio.zip` (artifact).
 
 ## 10. Line-level reading guide (how deep this map goes)
 

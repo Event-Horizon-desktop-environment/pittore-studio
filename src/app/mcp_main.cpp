@@ -492,7 +492,7 @@ QJsonObject handleMessage(const QJsonObject& msg) {
                               {"serverInfo",
                                QJsonObject{
                                    {"name", QStringLiteral("pittore-studio-mcp")},
-                                   {"version", QStringLiteral("0.1.0")},
+                                   {"version", QStringLiteral("0.1.1")},
                                }},
                           });
     }

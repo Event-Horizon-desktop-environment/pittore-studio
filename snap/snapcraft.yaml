@@ -1,6 +1,6 @@
 name: pittore-studio
 base: core24
-version: '0.1.0'
+version: '0.1.1'
 summary: Layer-based photo editor for Linux
 description: |
   Raster painting and retouching, vector persona, text,

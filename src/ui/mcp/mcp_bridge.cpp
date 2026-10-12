@@ -275,7 +275,7 @@ QJsonObject McpBridge::dispatch(const QJsonObject& req) {
 
     if (cmd == QStringLiteral("ping")) {
         return okResp(id, QJsonObject{{"app", QStringLiteral("pittore-studio")},
-                                      {"version", QStringLiteral("0.1.0")}});
+                                      {"version", QStringLiteral("0.1.1")}});
     }
     if (cmd == QStringLiteral("list_documents")) {
         QJsonArray docs;
