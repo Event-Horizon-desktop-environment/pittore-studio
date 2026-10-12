@@ -4,7 +4,9 @@
 
 #include "ui/app_state.h"
 #include "ui/app_state_detail.h"
+#include "ui/color_mode.h"
 
+#include "engine/color/icc_convert.h"
 #include "engine/compute/layer_mask.h"
 #include "engine/compute/paint.h"
 #include "engine/core/log.h"
@@ -12,9 +14,72 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <random>
+#include <string>
 
 namespace pittore::ui {
+
+namespace {
+struct StrokeCmykTransforms {
+    QByteArray profile;
+    std::unique_ptr<pittore::color::SrgbToCmyk> separation;
+    std::unique_ptr<pittore::color::CmykToSrgb> preview;
+};
+
+StrokeCmykTransforms& strokeCmykTransforms(const QByteArray& profile) {
+    static thread_local StrokeCmykTransforms cache;
+    if (cache.profile != profile || !cache.separation || !cache.preview) {
+        cache.profile = profile;
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(profile.constData());
+        const auto size = static_cast<std::size_t>(profile.size());
+        cache.separation = std::make_unique<pittore::color::SrgbToCmyk>(bytes, size);
+        cache.preview = std::make_unique<pittore::color::CmykToSrgb>(bytes, size);
+    }
+    return cache;
+}
+}  // namespace
+
+bool AppState::prepareNativeCmykPaint(
+    DocumentItem& doc, LayerItem& layer, const QColor& color,
+    pittore::compute::NativeCmykPaint& paint, bool trackStroke) {
+    if (!layer.pixels ||
+        !doc.colorMode.startsWith(QStringLiteral("CMYK"), Qt::CaseInsensitive))
+        return false;
+    const QByteArray profile = resolveCmykProfile(doc);
+    const std::uint64_t profileStamp = pittore::color::CmykImage::fingerprint(
+        reinterpret_cast<const std::uint8_t*>(profile.constData()),
+        static_cast<std::size_t>(profile.size()));
+    if (!trackStroke || nativeCmykStrokeDoc_ != &doc ||
+        nativeCmykStrokeLayer_ != &layer) {
+        const bool current = layer.cmykPixels && layer.cmykPixels->valid() &&
+            layer.cmykPixels->width == layer.pixels->width() &&
+            layer.cmykPixels->height == layer.pixels->height() &&
+            layer.cmykPixels->profileFingerprint == profileStamp &&
+            layer.cmykPixels->appearanceFingerprint ==
+                pittore::color::CmykImage::fingerprint(*layer.pixels);
+        if (!current) refreshLayerCmyk(doc, layer);
+        if (!layer.cmykPixels || !layer.cmykPixels->valid()) return false;
+        if (layer.cmykPixels.use_count() > 1)
+            layer.cmykPixels = std::make_shared<pittore::color::CmykImage>(
+                *layer.cmykPixels);
+        if (trackStroke) {
+            nativeCmykStrokeDoc_ = &doc;
+            nativeCmykStrokeLayer_ = &layer;
+        }
+    }
+    auto& transforms = strokeCmykTransforms(profile);
+    float ink[4];
+    transforms.separation->convert(color.redF(), color.greenF(), color.blueF(),
+                                   ink);
+    for (int c = 0; c < 4; ++c)
+        paint.source[c] = static_cast<std::uint16_t>(std::clamp(
+            std::lround(ink[c] * 65535.0f), 0L, 65535L));
+    paint.pixels = layer.cmykPixels->pixels.data();
+    paint.preview = transforms.preview.get();
+    paint.separation = transforms.separation.get();
+    return true;
+}
 
 bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                         double opacity, const QColor& color, double ratio,
@@ -91,6 +156,8 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                 washScratch_ = pittore::Image(lw, lh);
                 washScratch_.fill(pittore::RGBAf{0, 0, 0, 0});
             }
+            if (washScratchCmyk_.size() != static_cast<std::size_t>(lw) * lh)
+                washScratchCmyk_.assign(static_cast<std::size_t>(lw) * lh, {});
             dabDst = washScratch_.data();
             toScratch = true;
         }
@@ -117,6 +184,29 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
         // second resolve would also skip it).
         const pittore::compute::PatternTex paintTex =
             resolveTexture(activeTool_, lsx, lsy, targetOffset, dabPressure01_);
+        const pittore::compute::papergrain::PaperGrain paintGrain =
+            resolvePaperGrain(activeTool_, lsx, lsy, targetOffset,
+                              dabPressure01_);
+        const pittore::compute::papergrain::PaperGrain* grainPtr =
+            paintGrain.valid() ? &paintGrain : nullptr;
+        const std::string mixId =
+            option(activeTool_, QStringLiteral("brush_composite"))
+                .toString()
+                .toStdString();
+        const auto mixOp =
+            pittore::compute::dabmix::mix_from_id(mixId.c_str());
+        pittore::compute::NativeCmykPaint nativePaint;
+        pittore::compute::NativeCmykPaint* nativePaintPtr = nullptr;
+        const bool useNativeCmyk =
+            !toMask && mixOp == pittore::compute::dabmix::DabMixOp::Normal &&
+            d->colorMode.startsWith(QStringLiteral("CMYK"), Qt::CaseInsensitive) &&
+            (activeTool_ == ToolId::Brush || activeTool_ == ToolId::Pencil);
+        if (useNativeCmyk && prepareNativeCmykPaint(*d, *layer, color, nativePaint)) {
+            if (toScratch && washScratchCmyk_.size() ==
+                                 static_cast<std::size_t>(lw) * lh)
+                nativePaint.pixels = washScratchCmyk_.data();
+            nativePaintPtr = &nativePaint;
+        }
         const pittore::compute::DabDensity dabDenPaint =
             resolveDensity(activeTool_);
         const pittore::compute::MaskTip maskPaint =
@@ -127,7 +217,8 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                 static_cast<float>(std::clamp(hardness, 0.0, 1.0)),
                 static_cast<float>(std::clamp(opacity, 0.0, 1.0)),
                 pittore::RGBAf{color.redF(), color.greenF(), color.blueF(), 1.0f},
-                selPtr, &paintTex, &dabDenPaint, &maskPaint);
+                selPtr, &paintTex, &dabDenPaint, &maskPaint, grainPtr, mixOp,
+                nativePaintPtr);
         } else {
             pittore::compute::AutoTip tip;
             tip.silhouette = squareTip
@@ -152,17 +243,25 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
             tip.autoSpacing =
                 option(activeTool_, QStringLiteral("brush_spacing_auto"))
                     .toBool();
+            tip.spacingAutoCoeff = static_cast<float>(qBound(
+                0.0,
+                option(activeTool_,
+                       QStringLiteral("brush_spacing_auto_coeff"))
+                    .toDouble(),
+                8.0));
             tip.sanitize();
             pittore::compute::paint_tip_dab_host(
                 dabDst, lw, lh, lcx, lcy, lradius, tip,
                 static_cast<float>(std::clamp(opacity, 0.0, 1.0)),
                 pittore::RGBAf{color.redF(), color.greenF(), color.blueF(), 1.0f},
-                selPtr, &paintTex, &dabDenPaint, &maskPaint);
+                selPtr, &paintTex, &dabDenPaint, &maskPaint, grainPtr, mixOp,
+                nativePaintPtr);
         }
         if (!toScratch) {
             // Incremental device refresh (region upload, no stamp churn);
             // falls back to the stamp bump internally when not direct.
-            d->touchPixelsAfterDab(*layer, lcx, lcy, lradius, lw, lh);
+            d->touchPixelsAfterDab(*layer, lcx, lcy, lradius, lw, lh,
+                                   nativePaintPtr != nullptr);
         }
     }
 
@@ -240,6 +339,8 @@ void AppState::beginStrokeState(ToolId tool, std::uint64_t seed) {
     strokeSeed_ = seed;
     strokeRng_.seed(static_cast<std::uint32_t>(seed ^ (seed >> 32)));
     strokeStateLive_ = true;
+    nativeCmykStrokeDoc_ = nullptr;
+    nativeCmykStrokeLayer_ = nullptr;
     dabCount_ = 0;
     strokeSelLayer_ = nullptr;  // selection cache re-arms on first dab
     smudgeCarry_.clear();         // travelling patch re-arms per stroke
@@ -269,6 +370,7 @@ void AppState::beginStrokeState(ToolId tool, std::uint64_t seed) {
                  option(tool, QStringLiteral("brush_painting_mode"))
                          .toString() != QStringLiteral("buildup");
     washDirty_ = QRect();
+    if (DocumentItem* dd = activeDocument()) dd->washOverlayDirty = QRect();
     // Authored pressure response for this tool (empty = built-in).
     strokeSizeCurve_ = pittore::ui::brushcurve::parseEncoded(
         option(tool, QStringLiteral("brush_size_curve")).toString());
@@ -293,9 +395,21 @@ strokeRotationCurve_ = pittore::ui::brushcurve::parseEncoded(
 }
 
 void AppState::endStrokeState() {
+    if (nativeCmykStrokeDoc_ && nativeCmykStrokeLayer_ &&
+        nativeCmykStrokeLayer_->pixels && nativeCmykStrokeLayer_->cmykPixels &&
+        nativeCmykStrokeLayer_->cmykPixels->valid()) {
+        nativeCmykStrokeLayer_->cmykPixels->appearanceFingerprint =
+            pittore::color::CmykImage::fingerprint(
+                *nativeCmykStrokeLayer_->pixels);
+        nativeCmykStrokeLayer_->cmykSourceStamp =
+            nativeCmykStrokeLayer_->sourceStamp;
+    }
+    nativeCmykStrokeDoc_ = nullptr;
+    nativeCmykStrokeLayer_ = nullptr;
     strokeStateLive_ = false;
     washArmed_ = false;
     washDirty_ = QRect();
+    if (DocumentItem* dd = activeDocument()) dd->washOverlayDirty = QRect();
     strokeSelLayer_ = nullptr;
     // Mixer clean_after: the brush comes up empty for the next stroke.
     if (activeTool_ == ToolId::MixerBrush &&
@@ -308,6 +422,8 @@ void AppState::endStrokeState() {
     if (washScratch_.width() > 1 || washScratch_.height() > 1) {
         washScratch_.fill(pittore::RGBAf{0, 0, 0, 0});
     }
+    std::fill(washScratchCmyk_.begin(), washScratchCmyk_.end(),
+              std::array<std::uint16_t, 4>{});
 }
 
 const pittore::compute::SelectionMask* AppState::strokeSelectionMask(

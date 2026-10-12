@@ -190,10 +190,8 @@ bool spot_heal_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
         haveDonor = best < std::numeric_limits<float>::infinity();
     }
     if (!haveDonor) return false;
-    if (std::getenv("PITTORE_HEAL_DEBUG") || std::getenv("INFINITY_HEAL_DEBUG")) {
-        std::fprintf(stderr, "[heal] type=%d donor=(%.1f,%.1f) gbest=%g\n",
-                     static_cast<int>(type), bestOx, bestOy, globalBest);
-    }
+    std::fprintf(stderr, "[heal] type=%d donor=(%.1f,%.1f) gbest=%g\n",
+                 static_cast<int>(type), bestOx, bestOy, globalBest);
     const auto tDonor = std::chrono::steady_clock::now();
 
     // Accuracy counters for the per-dab log line: lowFb counts blur windows

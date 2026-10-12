@@ -125,6 +125,42 @@ static void test_round_trip() {
     CHECK_EQ(back->preview.size(), 64u * 40u * 4u);
 }
 
+static void test_cmyk_payload_round_trip() {
+    ProjectFileDoc p;
+    p.width = 2;
+    p.height = 1;
+    p.dpi = 300;
+    p.colorMode = 4;
+    p.colorModeName = "CMYK/16";
+    p.name = "Native inks";
+    p.icc = {0x00, 0x43, 0x4d, 0x59, 0xff};
+
+    ProjectLayerFile layer;
+    layer.name = "CMYK pixels";
+    layer.width = 2;
+    layer.height = 1;
+    layer.rgba = {0x1111, 0x2222, 0x3333, 0xffff,
+                  0xaaaa, 0xbbbb, 0xcccc, 0x8000};
+    layer.cmyk = {0x0000, 0x1111, 0x2222, 0xffff,
+                  0x3333, 0x4444, 0x5555, 0x6666};
+    p.layers.push_back(layer);
+
+    std::string error;
+    const auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) return;
+    const auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(back.has_value());
+    if (!back) return;
+    CHECK_EQ(back->colorMode, 4u);
+    CHECK(back->colorModeName == "CMYK/16");
+    CHECK(back->icc == p.icc);
+    CHECK_EQ(back->layers.size(), 1u);
+    if (back->layers.size() != 1) return;
+    CHECK(back->layers[0].rgba == layer.rgba);
+    CHECK(back->layers[0].cmyk == layer.cmyk);
+}
+
 static void test_scan_skips_layers() {
     ProjectFileDoc p = sampleProject();
     std::string error;
@@ -371,6 +407,7 @@ static void test_v4_psd_blocks() {
 
 int main() {
     test_round_trip();
+    test_cmyk_payload_round_trip();
     test_scan_skips_layers();
     test_corrupt_inputs();
     test_black_background_round_trip();

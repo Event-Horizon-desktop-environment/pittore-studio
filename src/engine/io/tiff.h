@@ -57,6 +57,16 @@ bool tiffEncodeExport(std::uint32_t width, std::uint32_t height, int dpi,
 bool tiffProbeFile(const char* path, std::uint32_t& width,
                    std::uint32_t& height, int& dpi);
 
+// Read original 8/16-bit separated ink samples without converting them
+// through the display RGB preview. Supports stripped or tiled, contiguous or
+// planar-separate CMYK/CMYKA in all eight TIFF orientations; samples use
+// top-left display order.
+bool tiffDecodeCmykFile(const char* path, std::uint32_t& width,
+                        std::uint32_t& height,
+                        std::vector<std::uint16_t>& cmyk,
+                        std::vector<std::uint8_t>* icc = nullptr,
+                        int* bitDepth = nullptr);
+
 // Streaming decode for large files: reads row-by-row via TIFFReadScanline and
 // calls sink(y, rgba8Row) with W*4 straight-alpha bytes per row. Only one row
 // is in flight; the caller owns the destination (e.g. QImage scanlines).

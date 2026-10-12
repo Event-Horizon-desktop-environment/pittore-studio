@@ -464,6 +464,140 @@ int main() {
         }
     }
 
+    // Native CMYK decoding preserves the samples while applying the TIFF
+    // orientation transform expected by the RGB preview import path.
+    {
+        const std::string rotatedPath =
+            scratchPath("pittore_tiff_cmyk_rotated.tif");
+        constexpr std::uint32_t rw = 3, rh = 2;
+        TIFF* tif = TIFFOpen(rotatedPath.c_str(), "w");
+        CHECK(tif != nullptr);
+        if (tif) {
+            TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, rw);
+            TIFFSetField(tif, TIFFTAG_IMAGELENGTH, rh);
+            TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 4);
+            TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+            TIFFSetField(tif, TIFFTAG_INKSET, INKSET_CMYK);
+            TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_RIGHTTOP);
+            TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+            TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, rh);
+            for (std::uint32_t y = 0; y < rh; ++y) {
+                std::uint8_t row[rw * 4]{};
+                for (std::uint32_t x = 0; x < rw; ++x)
+                    for (std::uint32_t c = 0; c < 4; ++c)
+                        row[x * 4 + c] =
+                            static_cast<std::uint8_t>(y * 60 + x * 20 + c);
+                CHECK(TIFFWriteScanline(tif, row, y, 0) >= 0);
+            }
+            TIFFClose(tif);
+            std::uint32_t dw = 0, dh = 0;
+            std::vector<std::uint16_t> inks;
+            CHECK(pittore::io::tiffDecodeCmykFile(
+                rotatedPath.c_str(), dw, dh, inks));
+            CHECK(dw == rh && dh == rw);
+            CHECK(inks.size() == static_cast<std::size_t>(rw) * rh * 4);
+            if (inks.size() == static_cast<std::size_t>(rw) * rh * 4) {
+                // RIGHTTOP maps source (x=0,y=0) to destination (1,0),
+                // source (2,1) to destination (0,2).
+                const std::size_t first = (0u * dw + 1u) * 4;
+                CHECK(inks[first] == 0 && inks[first + 3] == 3 * 257);
+                const std::size_t last = (2u * dw + 0u) * 4;
+                CHECK(inks[last] == 100 * 257 && inks[last + 3] == 103 * 257);
+            }
+        }
+        std::remove(rotatedPath.c_str());
+    }
+
+    // Planar-separate CMYK stores one scanline per ink. Preserve those device
+    // values too; libtiff still provides the profile/preview path separately.
+    {
+        const std::string planarPath =
+            scratchPath("pittore_tiff_cmyk_planar.tif");
+        constexpr std::uint32_t pw = 3, ph = 2;
+        TIFF* tif = TIFFOpen(planarPath.c_str(), "w");
+        CHECK(tif != nullptr);
+        if (tif) {
+            TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, pw);
+            TIFFSetField(tif, TIFFTAG_IMAGELENGTH, ph);
+            TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 4);
+            TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+            TIFFSetField(tif, TIFFTAG_INKSET, INKSET_CMYK);
+            TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_SEPARATE);
+            TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+            TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+            TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, ph);
+            for (std::uint32_t c = 0; c < 4; ++c)
+                for (std::uint32_t y = 0; y < ph; ++y) {
+                    std::uint8_t row[pw]{};
+                    for (std::uint32_t x = 0; x < pw; ++x)
+                        row[x] = static_cast<std::uint8_t>(c * 40 + y * 10 + x);
+                    CHECK(TIFFWriteScanline(tif, row, y, c) >= 0);
+                }
+            TIFFClose(tif);
+            std::uint32_t dw = 0, dh = 0;
+            std::vector<std::uint16_t> inks;
+            CHECK(pittore::io::tiffDecodeCmykFile(
+                planarPath.c_str(), dw, dh, inks));
+            CHECK(dw == pw && dh == ph);
+            CHECK(inks.size() == static_cast<std::size_t>(pw) * ph * 4);
+            if (inks.size() == static_cast<std::size_t>(pw) * ph * 4) {
+                const std::size_t pixel = (1u * pw + 2u) * 4;
+                CHECK(inks[pixel] == 12 * 257);
+                CHECK(inks[pixel + 1] == 52 * 257);
+                CHECK(inks[pixel + 2] == 92 * 257);
+                CHECK(inks[pixel + 3] == 132 * 257);
+            }
+        }
+        std::remove(planarPath.c_str());
+    }
+
+    // Tiled TIFF stores complete fixed-size tile blocks instead of scanlines.
+    {
+        const std::string tiledPath =
+            scratchPath("pittore_tiff_cmyk_tiled.tif");
+        constexpr std::uint32_t tw = 16, th = 16;
+        TIFF* tif = TIFFOpen(tiledPath.c_str(), "w");
+        CHECK(tif != nullptr);
+        if (tif) {
+            TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, tw);
+            TIFFSetField(tif, TIFFTAG_IMAGELENGTH, th);
+            TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 4);
+            TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 16);
+            TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+            TIFFSetField(tif, TIFFTAG_INKSET, INKSET_CMYK);
+            TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+            TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+            TIFFSetField(tif, TIFFTAG_TILEWIDTH, tw);
+            TIFFSetField(tif, TIFFTAG_TILELENGTH, th);
+            std::vector<std::uint16_t> tile(tw * th * 4);
+            for (std::uint32_t y = 0; y < th; ++y)
+                for (std::uint32_t x = 0; x < tw; ++x)
+                    for (std::uint32_t c = 0; c < 4; ++c)
+                        tile[(y * tw + x) * 4 + c] =
+                            static_cast<std::uint16_t>(1000 + y * 100 + x * 4 + c);
+            CHECK(TIFFWriteTile(tif, tile.data(), 0, 0, 0, 0) >= 0);
+            TIFFClose(tif);
+            std::uint32_t dw = 0, dh = 0;
+            std::vector<std::uint16_t> inks;
+            CHECK(pittore::io::tiffDecodeCmykFile(
+                tiledPath.c_str(), dw, dh, inks));
+            CHECK(dw == tw && dh == th);
+            CHECK(inks.size() == static_cast<std::size_t>(tw) * th * 4);
+            if (inks.size() == static_cast<std::size_t>(tw) * th * 4) {
+                const std::size_t i = (7u * tw + 5u) * 4;
+                CHECK(inks[i] == 1720);
+                CHECK(inks[i + 1] == 1721);
+                CHECK(inks[i + 2] == 1722);
+                CHECK(inks[i + 3] == 1723);
+            }
+        }
+        std::remove(tiledPath.c_str());
+    }
+
     std::remove(tmpPath.c_str());
     std::remove(scratchPath("pittore_tiff_gray.tif").c_str());
     if (failures == 0) std::cout << "test_tiff OK\n";

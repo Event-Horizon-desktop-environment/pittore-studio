@@ -150,6 +150,8 @@ void ContextualTaskBar::rebuild() {
                        QStringLiteral("mask"));
             addCommand(QStringLiteral("enhance_edges"), tr("Enhance Edges"),
                        QStringLiteral("sparkle"));
+            addCommand(QStringLiteral("auto_refine"), tr("Auto Refine"),
+                       QStringLiteral("sparkle"));
             addDivider();
             addCommand(QStringLiteral("invert_selection"), tr("Invert"));
             addCommand(QStringLiteral("deselect"), tr("Deselect"));
@@ -245,6 +247,8 @@ void ContextualTaskBar::rebuild() {
                        QStringLiteral("object-sel"));
             addCommand(QStringLiteral("remove_background"), tr("Remove Background"),
                        QStringLiteral("eraser"));
+            addCommand(QStringLiteral("auto_refine"), tr("Auto Refine"),
+                       QStringLiteral("sparkle"));
             addDivider();
             addCommand(QStringLiteral("adjustment_layer"), tr("Adjustment Layer"),
                        QStringLiteral("adjustments"));

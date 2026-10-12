@@ -1,11 +1,13 @@
 #include "ui/app_state.h"
 #include "ui/app_state_detail.h"
 #include "ui/ai_models.h"
+#include "ui/color_mode.h"
 #include "ui/live_filter.h"
 #include "ui/mask_finish.h"
 #include "ui/project_manager.h"
 #include "ui/selection_mask.h"
 #include "ui/settings.h"
+#include "ui/color_mode.h"
 #include "ui/svg_parts.h"
 
 #include "engine/io/af.h"
@@ -36,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -54,6 +57,7 @@
 #include "engine/compute/brushes/adjust/adjust_dab.h"
 #include "engine/compute/brushes/history/history_dab.h"
 #include "engine/compute/brushes/mixer/mixer.h"
+#include "engine/compute/brushes/mix/mix.h"
 #include "engine/compute/brushes/stamp/stamp.h"
 #include "engine/core/log.h"
 #include "engine/core/parallel.h"
@@ -604,8 +608,8 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
         for (int i = groupIndex + 1; i < d.layers.size(); ++i) {
             const LayerItem& l = d.layers[i];
             if (l.indent <= base) break;      // end of the group's subtree
-            const bool isPix =
-                l.kind == LayerItem::Kind::Pixel && l.pixels;
+            const bool isPix = l.kind == LayerItem::Kind::Pixel &&
+                                 (l.pixels || hasDeferredPixels(l));
             const bool isAdj =
                 l.kind == LayerItem::Kind::Adjustment &&
                 l.adjustmentKind != 0;
@@ -617,7 +621,16 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
             mixStamp(stamp, static_cast<std::uint64_t>(l.fill));
             if (isPix) {
                 pix.append(i);
-                mixStamp(stamp, l.sourceStamp);
+                if (l.pixels) {
+                    mixStamp(stamp, l.sourceStamp);
+                } else {
+                    // Stashed members count exactly like realised ones: the
+                    // stash identity (size) changes if and only if the bytes
+                    // do, so the preview still resamples only on real change.
+                    mixStamp(stamp, static_cast<std::uint64_t>(l.deferredWidth));
+                    mixStamp(stamp, static_cast<std::uint64_t>(l.deferredHeight));
+                    mixStamp(stamp, static_cast<std::uint64_t>(l.deferredRgba8.size()));
+                }
                 mixStamp(stamp,
                          static_cast<std::uint64_t>(qRound64(l.offset.x() * 100.0)));
                 mixStamp(stamp,
@@ -664,13 +677,17 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
         grp.groupThumbnailCache.width() == box)
         return grp.groupThumbnailCache;
 
-    // Fit the union of the descendants' doc-space bounds to COVER the square,
-    // exactly like layerThumbnail does for one layer.
+    // Fit the union of the descendants' doc-space bounds INSIDE the square
+    // (contain, letterboxed): the preview shows the group's whole combined
+    // content — every member — the way the Layers panel reads. Cover would
+    // crop wide groups down to a zoomed slice.
     QRectF b;
     for (int idx : pix) {
         const LayerItem& c = d.layers[idx];
-        b |= QRectF(c.offset, QSizeF(c.pixels->width() * c.scaleX,
-                                     c.pixels->height() * c.scaleY));
+        const double cw = double(c.pixels ? c.pixels->width() : c.deferredWidth);
+        const double ch =
+            double(c.pixels ? c.pixels->height() : c.deferredHeight);
+        b |= QRectF(c.offset, QSizeF(cw * c.scaleX, ch * c.scaleY));
     }
     if (b.width() <= 0.0 || b.height() <= 0.0) {
         // THROWAWAY thumb logging (removed after diagnosis).
@@ -678,7 +695,7 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
                                         d.layers[groupIndex].name.toUtf8().constData());
         return QImage();
     }
-    const double k = std::max(box / b.width(), box / b.height());
+    const double k = std::min(box / b.width(), box / b.height());
     const double ox = (box - b.width() * k) * 0.5 - b.x() * k;
     const double oy = (box - b.height() * k) * 0.5 - b.y() * k;
 
@@ -725,10 +742,14 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
             }
             continue;
         }
-        const int sw = static_cast<int>(c.pixels->width());
-        const int sh = static_cast<int>(c.pixels->height());
+        const int sw = static_cast<int>(c.pixels ? c.pixels->width() : c.deferredWidth);
+        const int sh =
+            static_cast<int>(c.pixels ? c.pixels->height() : c.deferredHeight);
         if (sw < 1 || sh < 1) continue;
-        const pittore::RGBAf* src = c.pixels->data();
+        const RealizedView realized{c.pixels ? c.pixels->data() : nullptr};
+        const StashedView packed{
+            c.pixels ? nullptr
+                     : reinterpret_cast<const uchar*>(c.deferredRgba8.constData())};
         const double sox = c.offset.x() * k + ox;
         const double soy = c.offset.y() * k + oy;
         const double ssx = c.scaleX * k;
@@ -750,8 +771,10 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
         for (int ty = ty0; ty < ty1; ++ty) {
             for (int tx = tx0; tx < tx1; ++tx) {
                 const pittore::RGBAf s =
-                    thumbSample(RealizedView{src}, sw, sh, tx + 0.5, ty + 0.5,
-                                sox, soy, ssx, ssy);
+                    c.pixels ? thumbSample(realized, sw, sh, tx + 0.5, ty + 0.5,
+                                           sox, soy, ssx, ssy)
+                             : thumbSample(packed, sw, sh, tx + 0.5, ty + 0.5,
+                                           sox, soy, ssx, ssy);
                 const float sa = s.a * alpha;
                 if (sa <= 0.0f) continue;
                 painted = true;
@@ -1119,7 +1142,8 @@ void DocumentItem::refreshPlacedRegion(LayerItem& l, const QRect& layerRect) {
 
 void DocumentItem::touchPixelsAfterDab(LayerItem& l, float lcx, float lcy,
                                        float lradius, std::uint32_t lw,
-                                       std::uint32_t lh) {
+                                       std::uint32_t lh,
+                                       bool preserveInkColor) {
     const int x0 = std::max(0, static_cast<int>(std::floor(lcx - lradius - 1.0f)));
     const int y0 = std::max(0, static_cast<int>(std::floor(lcy - lradius - 1.0f)));
     const int x1 = std::min(static_cast<int>(lw),
@@ -1127,6 +1151,8 @@ void DocumentItem::touchPixelsAfterDab(LayerItem& l, float lcx, float lcy,
     const int y1 = std::min(static_cast<int>(lh),
                             static_cast<int>(std::ceil(lcy + lradius + 1.0f)));
     refreshPlacedRegion(l, QRect(x0, y0, x1 - x0, y1 - y0));
+    if (!preserveInkColor)
+        refreshLayerCmyk(*this, l, QRect(x0, y0, x1 - x0, y1 - y0));
     l.thumbnail = QImage();  // stale panel preview
 }
 
@@ -2864,6 +2890,9 @@ DocumentItem* AppState::createNewProject(const ProjectFileData& data, QString* e
         return nullptr;
     }
     doc->colorMode = data.colorMode;
+    if (doc->colorMode.startsWith(QStringLiteral("CMYK"),
+                                  Qt::CaseInsensitive))
+        doc->iccProfile = resolveCmykProfile(*doc);
 
     // The canvas bottom erasing restores: white/black paper, or real
     // transparency the eraser punches through.
@@ -3161,7 +3190,8 @@ bool AppState::eraseDab(const QPointF& docPos, double radius, double hardness,
         }
         d->touchPixelsAfterDab(*layer, lcx, lcy, lradius,
                                static_cast<std::uint32_t>(layer->pixels->width()),
-                               static_cast<std::uint32_t>(layer->pixels->height()));
+                               static_cast<std::uint32_t>(layer->pixels->height()),
+                               true);
     }
 
     const double ex = (static_cast<double>(lradius) + 1.0) * lsx + 1.0;
@@ -3227,6 +3257,9 @@ bool AppState::toneDab(const QPointF& docPos, double radius, double hardness,
 
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
 
     // The touched layer rect mapped back to document space, plus a one-pixel
@@ -3380,6 +3413,9 @@ bool AppState::blurSharpenDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -3575,6 +3611,9 @@ bool AppState::backgroundEraseDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -3697,6 +3736,9 @@ bool AppState::patternStampDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -3796,6 +3838,9 @@ bool AppState::historyBrushDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -3928,6 +3973,9 @@ bool AppState::healBrushDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -4174,6 +4222,7 @@ bool AppState::patchTransfer(const QPointF& deltaDoc, int mode,
     if (!touched.load()) return false;
     d->refreshPlacedRegion(
         *layer, QRect(selX0, selY0, bw, bh));
+    refreshLayerCmyk(*d, *layer, QRect(selX0, selY0, bw, bh));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (selX0 - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (selY0 - 1.0) * lsy;
@@ -4242,6 +4291,9 @@ bool AppState::artHistoryDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -4364,6 +4416,9 @@ bool AppState::mixerBrushDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -4468,9 +4523,10 @@ bool AppState::healFillGrid(DocumentItem& d, LayerItem& layer,
                 uy1 = std::max(uy1, bbox[3]);
             }
         }
-    if (moved)
+    if (moved) {
         d.refreshPlacedRegion(layer,
                               QRect(ux0, uy0, ux1 - ux0, uy1 - uy0));
+    }
     return moved;
 }
 
@@ -4541,6 +4597,8 @@ bool AppState::removeHealMarked(bool consume, bool sampleAll, int diffusion) {
         removeCoverage_.assign(removeCoverage_.size(), 0.0f);
     }
     if (!moved) return false;
+    refreshLayerCmyk(*d, *layer, QRect(bx0, by0, bx1 - bx0 + 1,
+                                      by1 - by0 + 1));
     layer->thumbnail = QImage();
     d->rebuildComposite();
     return true;
@@ -4801,6 +4859,7 @@ bool AppState::contentAwareMove(const QPointF& deltaDoc, bool extend,
     if (!touched.load() && !healed) return false;
     d->refreshPlacedRegion(*layer,
                            QRect(ux0, uy0, ux1 - ux0, uy1 - uy0));
+    refreshLayerCmyk(*d, *layer, QRect(ux0, uy0, ux1 - ux0, uy1 - uy0));
     layer->thumbnail = QImage();
     const double rx0 = layer->offset.x() + (ux0 - 1.0) * lsx;
     const double ry0 = layer->offset.y() + (uy0 - 1.0) * lsy;
@@ -5189,6 +5248,9 @@ bool AppState::adjustmentBrushDab(const QPointF& docPos, double radius,
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     const double dx0 = layer->offset.x() + (bbox[0] - 1.0) * lsx;
     const double dy0 = layer->offset.y() + (bbox[1] - 1.0) * lsy;
@@ -5463,6 +5525,9 @@ bool AppState::cloneStampDab(const QPointF& docPos, double radius,
 
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
 
     // The touched layer rect mapped back to document space, plus a one-pixel
@@ -5547,6 +5612,9 @@ bool AppState::redEyeAt(const QRectF& boxDoc, double darken01) {
     commitUndoStep(tr("Red Eye"), QStringLiteral("red-eye"));
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
     d->rebuildComposite();
     return true;
@@ -5583,6 +5651,12 @@ bool AppState::replaceColorDab(const QPointF& docPos, double radius,
         strokeSelectionMask(*d, *layer, nullptr, QPointF(), -1.0, -1.0);
 
     const QColor fg = foreground();
+    pittore::compute::NativeCmykPaint nativePaint;
+    pittore::compute::NativeCmykPaint* nativePaintPtr = nullptr;
+    if (d->colorMode.startsWith(QStringLiteral("CMYK"),
+                                Qt::CaseInsensitive) &&
+        prepareNativeCmykPaint(*d, *layer, fg, nativePaint))
+        nativePaintPtr = &nativePaint;
     int bbox[4] = {0, 0, 0, 0};
     const bool changed = pittore::compute::replace_color_dab_host(
         layer->pixels->data(), lw, lh, lcx, lcy, lradius,
@@ -5592,7 +5666,8 @@ bool AppState::replaceColorDab(const QPointF& docPos, double radius,
         static_cast<float>(std::clamp(tolerance, 0.0, 1.0)),
         static_cast<pittore::compute::ReplaceMode>(std::clamp(mode, 0, 3)),
         std::clamp(limits, 0, 2), antialias,
-        static_cast<float>(std::clamp(harmony, 0.0, 1.0)), bbox, selPtr);
+        static_cast<float>(std::clamp(harmony, 0.0, 1.0)), bbox, selPtr,
+        nativePaintPtr);
     if (!changed) return false;
 
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
@@ -5855,6 +5930,9 @@ bool AppState::spotHealDab(const QPointF& docPos, double radius,
 
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    refreshLayerCmyk(*d, *layer,
+                     QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
+                           bbox[3] - bbox[1]));
     layer->thumbnail = QImage();
 
     // The touched layer rect mapped back to document space, plus a one-pixel
@@ -5986,11 +6064,17 @@ bool AppState::floodEdit(const QPointF& docPos, bool erase) {
     // Per-stroke cached selection (one resample per stroke, not per dab).
     const auto* selPtr =
         strokeSelectionMask(*d, *layer, nullptr, QPointF(), -1.0, -1.0);
+    pittore::compute::NativeCmykPaint nativeFill;
+    pittore::compute::NativeCmykPaint* nativeFillPtr = nullptr;
+    if (!erase && d->colorMode.startsWith(QStringLiteral("CMYK"),
+                                           Qt::CaseInsensitive) &&
+        prepareNativeCmykPaint(*d, *layer, fg, nativeFill, false))
+        nativeFillPtr = &nativeFill;
     const bool changed = pittore::compute::flood_fill_host(
         match, layer->pixels->data(), lw, lh, sx, sy, tol, contiguous, antialias,
         opacity,
         pittore::RGBAf{fg.redF(), fg.greenF(), fg.blueF(), 1.0f}, erase, bbox,
-        selPtr);
+        selPtr, nativeFillPtr);
     if (!changed) {
         discardUndoStep();
         return false;
@@ -5998,6 +6082,11 @@ bool AppState::floodEdit(const QPointF& docPos, bool erase) {
 
     d->refreshPlacedRegion(*layer, QRect(bbox[0], bbox[1], bbox[2] - bbox[0],
                                          bbox[3] - bbox[1]));
+    if (nativeFillPtr) {
+        layer->cmykPixels->appearanceFingerprint =
+            pittore::color::CmykImage::fingerprint(*layer->pixels);
+        layer->cmykSourceStamp = layer->sourceStamp;
+    }
     layer->thumbnail = QImage();
 
     const double dx0 = layer->offset.x() + bbox[0] * lsx;
@@ -6278,6 +6367,7 @@ LayerItem* AppState::beginTonalEdit() {
         return nullptr;
     }
     tonalEditPre_ = std::make_shared<pittore::Image>(layer->pixels->clone());
+    tonalEditCmykPre_ = layer->cmykPixels;
     tonalEditActive_ = true;
     return layer;
 }
@@ -6304,8 +6394,13 @@ void AppState::resetTonalEditPixels() {
 
 void AppState::commitTonalEdit(const QString& name, const QString& iconKey) {
     if (!tonalEditActive_) return;
+    if (DocumentItem* d = activeDocument()) {
+        if (LayerItem* layer = activeLayer(); layer && layer->pixels)
+            refreshLayerCmyk(*d, *layer);
+    }
     tonalEditActive_ = false;
     tonalEditPre_.reset();
+    tonalEditCmykPre_.reset();
     commitUndoStep(name, iconKey);
 }
 
@@ -6318,12 +6413,17 @@ void AppState::cancelTonalEdit() {
             layer->pixels->height() == tonalEditPre_->height()) {
             *layer->pixels = *tonalEditPre_;
             ++layer->sourceStamp;
+            layer->cmykPixels = tonalEditCmykPre_;
+            layer->cmykSourceStamp = layer->cmykPixels
+                                         ? layer->sourceStamp
+                                         : 0;
             layer->thumbnail = QImage();
             DocumentItem* d = activeDocument();
             if (d) d->rebuildComposite();
         }
     }
     tonalEditPre_.reset();
+    tonalEditCmykPre_.reset();
     discardUndoStep();
 }
 
@@ -6473,6 +6573,7 @@ bool AppState::applyLayerEditOneShot(const std::function<void(pittore::Image&)>&
     }
     edit(*layer->pixels);
     ++layer->sourceStamp;
+    refreshLayerCmyk(*d, *layer);
     layer->thumbnail = QImage();
     d->rebuildComposite();
     commitUndoStep(name, iconKey);
@@ -6505,6 +6606,18 @@ bool AppState::transformDocumentImage(const QString& op) {
         const double cy = layer.offset.y() + src->height() * lsy * 0.5;
 
         std::shared_ptr<pittore::Image> dst;
+        std::shared_ptr<pittore::color::CmykImage> nativeCmyk;
+        if (layer.cmykPixels && layer.cmykPixels->valid() &&
+            layer.cmykPixels->width == src->width() &&
+            layer.cmykPixels->height == src->height() &&
+            layer.cmykPixels->appearanceFingerprint ==
+                pittore::color::CmykImage::fingerprint(*src)) {
+            nativeCmyk = std::make_shared<pittore::color::CmykImage>(
+                cw90 ? layer.cmykPixels->rotate90(true)
+                : ccw90 ? layer.cmykPixels->rotate90(false)
+                : r180 ? layer.cmykPixels->rotate180()
+                : layer.cmykPixels->flip(flipH));
+        }
         double sx = lsx, sy = lsy;
         const double origOx = layer.offset.x();
         const double origOy = layer.offset.y();
@@ -6552,6 +6665,15 @@ bool AppState::transformDocumentImage(const QString& op) {
 
         syncLinkedMaskPlacement(layer);
         ++layer.sourceStamp;
+        if (nativeCmyk && layer.pixels) {
+            nativeCmyk->appearanceFingerprint =
+                pittore::color::CmykImage::fingerprint(*layer.pixels);
+            layer.cmykPixels = std::move(nativeCmyk);
+            layer.cmykSourceStamp = layer.sourceStamp;
+        } else if (layer.cmykPixels) {
+            layer.cmykPixels.reset();
+            layer.cmykSourceStamp = 0;
+        }
         layer.thumbnail = QImage();
         any = true;
     }
@@ -6654,10 +6776,17 @@ void AppState::flushPaint() {
             const QRect region =
                 dirty.intersected(washDirty_).intersected(
                     QRect(QPoint(0, 0), d->size));
+            const std::string mixId =
+                option(activeTool_, QStringLiteral("brush_composite"))
+                    .toString()
+                    .toStdString();
+            const auto mixOp =
+                pittore::compute::dabmix::mix_from_id(mixId.c_str());
+            const bool useMix =
+                mixOp != pittore::compute::dabmix::DabMixOp::Normal;
             const pittore::RGBAf* src = washScratch_.data();
             const std::uint32_t w = washScratch_.width();
-            for (int y = region.top(); y <= region.bottom(); ++y) {
-                QRgb* row = reinterpret_cast<QRgb*>(
+            for (int y = region.top(); y <= region.bottom(); ++y) {                QRgb* row = reinterpret_cast<QRgb*>(
                     d->composite.scanLine(y));
                 for (int x = region.left(); x <= region.right(); ++x) {
                     const pittore::RGBAf& s =
@@ -6665,6 +6794,30 @@ void AppState::flushPaint() {
                     const float sa =
                         std::clamp(s.a * float(op), 0.0f, 1.0f);
                     if (sa <= 0.0f) continue;
+                    if (useMix) {
+                        // Pigment-mix preview: run the dab color through
+                        // the mean shell, then re-premultiply into the
+                        // composite row (which stores premultiplied, so
+                        // un-premultiply first).
+                        const QRgb dst = row[x];
+                        const float da = qAlpha(dst) / 255.0f;
+                        float dr = 0.0f, dg = 0.0f, db = 0.0f;
+                        if (da > 1e-6f) {
+                            dr = qRed(dst) / 255.0f / da;
+                            dg = qGreen(dst) / 255.0f / da;
+                            db = qBlue(dst) / 255.0f / da;
+                        }
+                        float or_, og, ob, oa;
+                        pittore::compute::dabmix::mix_pixel(
+                            mixOp, s.r, s.g, s.b, sa, dr, dg, db, da, or_,
+                            og, ob, oa);
+                        row[x] = qRgba(
+                            std::clamp(int(or_ * oa * 255.0f), 0, 255),
+                            std::clamp(int(og * oa * 255.0f), 0, 255),
+                            std::clamp(int(ob * oa * 255.0f), 0, 255),
+                            std::clamp(int(oa * 255.0f), 0, 255));
+                        continue;
+                    }
                     const QRgb dst = row[x];
                     const float inv = 1.0f - sa;
                     const float out_a =
@@ -6682,6 +6835,11 @@ void AppState::flushPaint() {
                                    std::clamp(int(out_a * 255.0f), 0, 255));
                 }
             }
+            // Track the overlay footprint so the tile cache falls back to
+            // the composite tier under live wash (simple-tier tiles blit
+            // own layer pixels, which carry no wash ink until bake).
+            if (!region.isEmpty())
+                d->washOverlayDirty = d->washOverlayDirty.united(region);
         }
     }
     const double ms = std::chrono::duration<double, std::milli>(
@@ -6732,8 +6890,12 @@ bool AppState::beginLiquifyStroke() {
     // frozen image stays alive for the whole stroke (the undo snapshot shares
     // it, so undoing restores the original).
     liquifySrc_ = layer->pixels;
+    liquifyCmykSrc_ = layer->cmykPixels;
     layer->pixels = std::make_shared<pittore::Image>(liquifySrc_->clone());
     ++layer->sourceStamp;
+    layer->cmykSourceStamp = layer->cmykPixels
+                                 ? layer->sourceStamp
+                                 : 0;
     layer->thumbnail = QImage();
 
     // Stage the frozen source once: a displaced sample can land anywhere in it,
@@ -6799,6 +6961,7 @@ bool AppState::liquifyDab(const pittore::compute::WarpMesh& mesh, int x0,
         std::memcpy(dst + static_cast<std::size_t>(y) * w + x0,
                     src + static_cast<std::size_t>(y) * w + x0, rowBytes);
     ++layer->sourceStamp;
+    refreshLayerCmyk(*d, *layer, QRect(x0, y0, x1 - x0, y1 - y0));
     layer->thumbnail = QImage();
     // Dirty rect: the resampled layer rect mapped to document space, plus the
     // resampling halo (as in paintDab).
@@ -6823,6 +6986,7 @@ void AppState::endLiquifyStroke() {
     // Keep the staging buffers (grown on demand, reused across strokes); only
     // the frozen snapshot is stroke-scoped.
     liquifySrc_.reset();
+    liquifyCmykSrc_.reset();
 }
 
 void AppState::cancelLiquifyStroke() {
@@ -6833,6 +6997,10 @@ void AppState::cancelLiquifyStroke() {
         layer->pixels->height() == liquifySrc_->height()) {
         layer->pixels = liquifySrc_;   // drop the partially warped copy
         ++layer->sourceStamp;
+        layer->cmykPixels = liquifyCmykSrc_;
+        layer->cmykSourceStamp = layer->cmykPixels
+                                     ? layer->sourceStamp
+                                     : 0;
         layer->thumbnail = QImage();
     }
     endLiquifyStroke();
@@ -7069,6 +7237,7 @@ bool AppState::liquifyMirrorDab(float cx, float cy, float radius,
     }
     if (!changed) return false;
     d->refreshPlacedRegion(*layer, QRect(x0, y0, x1 - x0, y1 - y0));
+    refreshLayerCmyk(*d, *layer, QRect(x0, y0, x1 - x0, y1 - y0));
     layer->thumbnail = QImage();
     const double lsx = std::max(layer->scaleX, 1e-6);
     const double lsy = std::max(layer->scaleY, 1e-6);
@@ -7239,6 +7408,54 @@ bool AppState::applyActiveLayerAlpha(const float* mask, int width, int height,
     return true;
 }
 
+bool AppState::replaceActiveLayerRgba(const QImage& rgba,
+                                      const QString& historyName,
+                                      const QString& iconKey) {
+    DocumentItem* d = activeDocument();
+    if (!d) return false;
+    LayerItem* layer = activeLayer();
+    if (!layer || layer->locked || layer->kind != LayerItem::Kind::Pixel ||
+        !layer->pixels)
+        return false;
+    if (rgba.isNull() || rgba.format() != QImage::Format_RGBA8888) return false;
+    if (static_cast<std::uint32_t>(rgba.width()) != layer->pixels->width() ||
+        static_cast<std::uint32_t>(rgba.height()) != layer->pixels->height())
+        return false;
+
+    d->beginUndoAction();
+    copyOnWriteActiveLayer();
+    layer = activeLayer();
+    if (!layer || !layer->pixels) {
+        d->discardUndoAction();
+        return false;
+    }
+
+    pittore::RGBAf* px = layer->pixels->data();
+    for (int y = 0; y < rgba.height(); ++y) {
+        const uchar* s = rgba.constScanLine(y);
+        for (int x = 0; x < rgba.width(); ++x) {
+            const std::size_t i = std::size_t(y) * rgba.width() + x;
+            px[i].r = s[x * 4 + 0] / 255.0f;
+            px[i].g = s[x * 4 + 1] / 255.0f;
+            px[i].b = s[x * 4 + 2] / 255.0f;
+            px[i].a = s[x * 4 + 3] / 255.0f;
+        }
+    }
+    ++layer->sourceStamp;
+    refreshLayerCmyk(*d, *layer);
+    layer->thumbnail = QImage();
+    const QRect bounds =
+        layerBounds(*d, *layer).toAlignedRect().intersected(QRect(QPoint(0, 0), d->size));
+    if (bounds.isEmpty())
+        d->rebuildComposite();
+    else
+        d->renderRegion(bounds);
+    d->commitUndoAction(historyName, iconKey);
+    emit historyChanged();
+    emit documentModified(d);
+    return true;
+}
+
 bool AppState::eraseSelectionFromActiveLayer() {
     DocumentItem* d = activeDocument();
     if (!d || !d->selectionIsMask || d->selectionMask.isNull() ||
@@ -7341,6 +7558,10 @@ bool AppState::fillActiveSelectionWithColor(const QColor& color,
     pittore::RGBAf* px = layer->pixels->data();
     const bool hasMask = !covMask.isNull();
     const bool maskSized = hasMask && covMask.size() == d->size;
+    pittore::compute::NativeCmykPaint nativeFill;
+    const bool nativeCmyk = prepareNativeCmykPaint(
+        *d, *layer, color, nativeFill, false);
+    int nativeX0 = pw, nativeY0 = ph, nativeX1 = -1, nativeY1 = -1;
     for (int dy = clipRect.top(); dy <= clipRect.bottom(); ++dy) {
         const uchar* mrow = maskSized ? covMask.constScanLine(dy) : nullptr;
         for (int dx = clipRect.left(); dx <= clipRect.right(); ++dx) {
@@ -7350,13 +7571,15 @@ bool AppState::fillActiveSelectionWithColor(const QColor& color,
             const double lyf = (dy + 0.5 - layer->offset.y()) / sy - 0.5;
             const int lx = std::clamp(int(std::lround(lxf)), 0, pw - 1);
             const int ly = std::clamp(int(std::lround(lyf)), 0, ph - 1);
-            pittore::RGBAf& p = px[std::size_t(ly) * pw + lx];
+            const std::size_t index = std::size_t(ly) * pw + lx;
+            pittore::RGBAf& p = px[index];
+            const float oldAlpha = p.a;
             // Straight-alpha "over": opaque FG over dst by coverage.
-            const float na = cov + p.a * (1.0f - cov);
+            const float na = cov + oldAlpha * (1.0f - cov);
             if (na > 1e-6f) {
-                p.r = (fr * cov + p.r * p.a * (1.0f - cov)) / na;
-                p.g = (fg * cov + p.g * p.a * (1.0f - cov)) / na;
-                p.b = (fb * cov + p.b * p.a * (1.0f - cov)) / na;
+                p.r = (fr * cov + p.r * oldAlpha * (1.0f - cov)) / na;
+                p.g = (fg * cov + p.g * oldAlpha * (1.0f - cov)) / na;
+                p.b = (fb * cov + p.b * oldAlpha * (1.0f - cov)) / na;
                 p.a = na;
             } else {
                 p.r = fr;
@@ -7364,9 +7587,32 @@ bool AppState::fillActiveSelectionWithColor(const QColor& color,
                 p.b = fb;
                 p.a = 0.0f;
             }
+            if (nativeCmyk && nativeFill.pixels) {
+                auto& inks = nativeFill.pixels[index];
+                for (int c = 0; c < 4; ++c) {
+                    const float oldInk = inks[c] / 65535.0f;
+                    const float srcInk = nativeFill.source[c] / 65535.0f;
+                    const float outInk = na > 1e-6f
+                        ? (srcInk * cov + oldInk * oldAlpha * (1.0f - cov)) / na
+                        : srcInk;
+                    inks[c] = static_cast<std::uint16_t>(std::clamp(
+                        std::lround(outInk * 65535.0f), 0L, 65535L));
+                }
+                nativeX0 = std::min(nativeX0, lx);
+                nativeY0 = std::min(nativeY0, ly);
+                nativeX1 = std::max(nativeX1, lx);
+                nativeY1 = std::max(nativeY1, ly);
+            }
         }
     }
     ++layer->sourceStamp;
+    if (nativeCmyk && nativeX1 >= nativeX0 && nativeY1 >= nativeY0) {
+        layer->cmykPixels->appearanceFingerprint =
+            pittore::color::CmykImage::fingerprint(*layer->pixels);
+        layer->cmykSourceStamp = layer->sourceStamp;
+    } else {
+        refreshLayerCmyk(*d, *layer);
+    }
     layer->thumbnail = QImage();
     d->renderRegion(clipRect);
     d->commitUndoAction(undoName.isEmpty() ? tr("Fill") : undoName,
@@ -7402,6 +7648,7 @@ bool AppState::invertActiveLayerPixels() {
             all[i].b = 1.0f - all[i].b;
         }
         ++layer->sourceStamp;
+        refreshLayerCmyk(*d, *layer);
         layer->thumbnail = QImage();
         d->rebuildComposite();
         d->commitUndoAction(tr("Invert"), QStringLiteral("invert"));
@@ -7443,6 +7690,7 @@ bool AppState::invertActiveLayerPixels() {
         }
     }
     ++layer->sourceStamp;
+    refreshLayerCmyk(*d, *layer);
     layer->thumbnail = QImage();
     d->renderRegion(clipRect);
     d->commitUndoAction(tr("Invert"), QStringLiteral("invert"));
@@ -7546,10 +7794,10 @@ bool AppState::newDecontaminatedLayer(const QImage& coverage, bool withMask) {
         QRect(QPoint(x0, y0), QPoint(x1, y1))
             .intersected(QRect(QPoint(0, 0), d->size));
     if (clip.isEmpty()) return false;
-    // Full appearance lift (no clipping mask: decontamination estimates its
-    // background from nearby pixels that read as clear coverage, and those
-    // pixels must carry their raw photo color — lifting masked would leave
-    // them black and unmix every edge toward black).
+    // Full appearance lift (no clipping mask: decontamination fills edge
+    // colours from nearby confident-foreground pixels, and those pixels must
+    // carry their raw photo color — lifting masked would leave them black
+    // and tint every edge toward black).
     QRectF docRect;
     QImage lifted = copyActiveLayerMasked(QImage(), QRectF(clip), &docRect);
     if (lifted.isNull()) return false;

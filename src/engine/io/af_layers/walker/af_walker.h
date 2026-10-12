@@ -56,7 +56,15 @@ struct Walker {
     std::optional<Bitmap> decodeBitmap(const Node* bitm, std::string& why);
     void noteSkip(const Node* node, const std::string& why);
     void applyCommon(const Node* node, AfLayer& layer);
-    std::vector<AfMask> placeMasks(const Node* node, const Mat& ctm);
+    std::vector<AfMask> placeMasks(const Node* node, const Mat& ctm,
+                              const IntRect* pad = nullptr);
+    // Vector-crop shapes ("ShpN") and free paths ("PCrv") nested in a
+    // layer's `AdCh` list, rasterized to live coverage masks. `pad`
+    // optionally widens each mask to a footprint (the photo's placed
+    // rect): masks reveal outside their own rect, so an unpadded crop
+    // would show the photo past its frame.
+    std::vector<AfMask> cropMasks(const Node* node, const Mat& base,
+                                  const IntRect* pad = nullptr);
     void finishImageLayer(const Node* node, const Mat& ctm, int indent, bool clipped,
                       const std::string& display, const std::string& irfn,
                       render::Rgba8Image img, IntRect rect, bool isText = false,

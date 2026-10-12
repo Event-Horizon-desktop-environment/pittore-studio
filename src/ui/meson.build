@@ -183,6 +183,7 @@ if has_qt6
     'settings.cpp',
     'spotlight.cpp',
     'svg_parts.cpp',
+    'svg_import_task.cpp',
     'svg_bridge.cpp',
     'theme.cpp',
     'tone_dialogs.cpp',

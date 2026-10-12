@@ -189,7 +189,8 @@ void fillCommon(pittore::io::PsdLayerFile& f, const LayerItem& l, int indent,
 pittore::io::PsdLayerFile exportPixel(const LayerItem& l, int indent,
                                        int unfoldedOpacity,
                                        bool unfoldedVisible,
-                                       const QSize& canvas) {
+                                       const QSize& canvas,
+                                       std::uint64_t profileFingerprint) {
     pittore::io::PsdLayerFile f;
     fillCommon(f, l, indent, unfoldedOpacity, unfoldedVisible);
     // Live filters bake: PSD has no live-filter record, so the
@@ -207,6 +208,35 @@ pittore::io::PsdLayerFile exportPixel(const LayerItem& l, int indent,
     if (f.rgba.empty()) {
         f.width = f.height = 0;
         return f;
+    }
+    if (base == l.pixels.get() && l.cmykPixels &&
+        l.cmykPixels->valid() &&
+        l.cmykPixels->width == l.pixels->width() &&
+        l.cmykPixels->height == l.pixels->height() &&
+        l.cmykPixels->appearanceFingerprint ==
+            pittore::color::CmykImage::fingerprint(*l.pixels) &&
+        l.cmykPixels->profileFingerprint == profileFingerprint &&
+        l.scaleX == 1.0 &&
+        l.scaleY == 1.0) {
+        const int ox = qRound(l.offset.x());
+        const int oy = qRound(l.offset.y());
+        const std::uint32_t nw = l.pixels->width();
+        const std::uint32_t nh = l.pixels->height();
+        f.cmyk.resize(static_cast<std::size_t>(f.width) * f.height * 4);
+        for (std::uint32_t y = 0; y < f.height; ++y) {
+            const int sy = rect.top() + static_cast<int>(y) - oy;
+            for (std::uint32_t x = 0; x < f.width; ++x) {
+                const int sx = rect.left() + static_cast<int>(x) - ox;
+                if (sx < 0 || sy < 0 || static_cast<std::uint32_t>(sx) >= nw ||
+                    static_cast<std::uint32_t>(sy) >= nh)
+                    continue;
+                const auto& sample = l.cmykPixels->pixels[
+                    static_cast<std::size_t>(sy) * nw + sx];
+                const std::size_t dst =
+                    (static_cast<std::size_t>(y) * f.width + x) * 4;
+                std::copy(sample.begin(), sample.end(), f.cmyk.begin() + dst);
+            }
+        }
     }
     auto mask = rasterizeMask(l, rect);
     if (!mask.empty()) {
@@ -281,6 +311,11 @@ pittore::io::PsdLayersDoc buildLayeredPsdDoc(DocumentItem& doc) {
     out.width = static_cast<std::uint32_t>(std::max(0, doc.size.width()));
     out.height = static_cast<std::uint32_t>(std::max(0, doc.size.height()));
     out.depth = doc.colorMode.contains(QStringLiteral("16")) ? 16 : 8;
+    const QByteArray resolvedProfile = resolveCmykProfile(doc);
+    const std::uint64_t profileFingerprint =
+        pittore::color::CmykImage::fingerprint(
+            reinterpret_cast<const std::uint8_t*>(resolvedProfile.constData()),
+            static_cast<std::size_t>(resolvedProfile.size()));
     // A CMYK-tagged document writes mode 4: layer planes and the composite
     // separate at write time, and the destination profile (the document's
     // own bytes, settings, or a system probe — see ui/color_mode.h) is
@@ -352,7 +387,8 @@ pittore::io::PsdLayersDoc buildLayeredPsdDoc(DocumentItem& doc) {
                 } else {
                     out.layers.push_back(exportPixel(l, n.indent,
                                                      unfoldedOpacity,
-                                                     unfoldedVisible, doc.size));
+                                                     unfoldedVisible, doc.size,
+                                                     profileFingerprint));
                 }
             }
         };

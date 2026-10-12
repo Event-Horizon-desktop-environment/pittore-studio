@@ -22,6 +22,11 @@ namespace ai_detail {
 void resizeRgba8ToNchwRgb(const std::uint8_t* src, int w, int h, float* dst, int S,
                           bool normalize = true);
 std::vector<float> resizeMaskToSize(const float* src, int sw, int sh, int w, int h);
+// Edge-aware lift of a coarse model mask into the full-res guide's lattice
+// (guided / joint-bilateral upsampling). See ai_preprocess.cpp.
+std::vector<float> resizeMaskGuided(const float* src, int sw, int sh,
+                                     const std::uint8_t* guideRgba, int w,
+                                     int h);
 #endif
 
 }  // namespace ai_detail

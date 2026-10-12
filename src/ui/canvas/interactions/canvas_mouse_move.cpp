@@ -38,6 +38,7 @@
 #include "ui/selection_mask.h"
 #include "ui/svg_parts.h"
 #include "engine/ai/bg_remove.h"
+#include "engine/compute/brushes/tip/tip.h"
 #include "engine/compute/paint.h"
 #include "engine/compute/warp.h"
 #include "engine/core/log.h"
@@ -742,7 +743,10 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
                              perspectiveFactor(cursorDoc_));
             // Spacing is always the live brush_spacing option (% of tip
             // diameter; default 15 reproduces the legacy radius*0.3 step).
-            // Auto spacing squares the percentage for fine low-end control.
+            // Auto spacing squares the percentage for fine low-end control,
+            // unless a size-law coefficient is set: then the stride follows
+            // the dab diameter directly (linear sub-pixel, square-root
+            // above), ignoring the percentage.
             // Selecting a preset seeds the option from the file, so imports
             // keep their spacing while the slider stays live for every tip
             // kind, stamps and hoses included.
@@ -751,13 +755,29 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
             double spacingPct = spacingOpt.isValid()
                                     ? qBound(1.0, spacingOpt.toDouble(), 200.0)
                                     : 15.0;
-            if (state_
+            const bool spacingAuto =
+                state_
                     ->option(strokeTool,
                              QStringLiteral("brush_spacing_auto"))
-                    .toBool())
-                spacingPct =
-                    std::clamp(spacingPct * spacingPct / 100.0, 0.5, 400.0);
-            const double spacing = qMax(0.5, 2.0 * rMin * spacingPct / 100.0);
+                    .toBool();
+            const double spacingAutoCoeff = qBound(
+                0.0,
+                state_
+                    ->option(strokeTool,
+                             QStringLiteral("brush_spacing_auto_coeff"))
+                    .toDouble(),
+                8.0);
+            double spacing = 0.0;
+            if (spacingAuto && spacingAutoCoeff > 0.0) {
+                spacing = qMax(
+                    0.5, double(pittore::compute::auto_spacing_stride(
+                             float(2.0 * rMin), float(spacingAutoCoeff))));
+            } else {
+                if (spacingAuto)
+                    spacingPct = std::clamp(spacingPct * spacingPct / 100.0,
+                                            0.5, 400.0);
+                spacing = qMax(0.5, 2.0 * rMin * spacingPct / 100.0);
+            }
             const QPointF delta = cursorDoc_ - strokeLastDoc_;
             const double dist = std::hypot(delta.x(), delta.y());
             if (dist > 0.0) {

@@ -105,17 +105,36 @@ SegmentResult segment_rgba8(const std::uint8_t* rgba, int width, int height,
             return res;
         }
 
-        // Single-channel logit map: min-max normalise into [0,1] (rembg does the
-        // same per-prediction, which auto-adapts to per-model output ranges).
+        // The map is a single-channel score. Two families of model are
+        // shipped and they need different handling:
+        //   * logits (BiRefNet, most modern export heads) — unbounded, e.g.
+        //     [-23, +164]; the correct map to [0,1] is the logistic sigmoid,
+        //     which is monotonic and saturates so a lone hot outlier no longer
+        //     squashes the whole foreground (min–max on logits turns a
+        //     confident interior into a ~0.25 ghost).
+        //   * probabilities — already in [0,1]; pass through, lightly
+        //     re-normalised to use the full 8-bit span.
         float mn = raw[0], mx = raw[0];
         for (std::size_t i = 1; i < total; ++i) {
             mn = std::min(mn, raw[i]);
             mx = std::max(mx, raw[i]);
         }
         norm.assign(total, 0.0f);
-        if (mx > mn) {
+        const bool logits = (mn < -0.5f) || (mx > 1.5f);
+        if (logits) {
+            for (std::size_t i = 0; i < total; ++i) {
+                // Sigmoid, computed overflow-safely for large |x|.
+                const float x = raw[i];
+                norm[i] = x >= 0.0f ? 1.0f / (1.0f + std::exp(-x))
+                                    : std::exp(x) / (1.0f + std::exp(x));
+            }
+        } else if (mx > mn) {
             const float inv = 1.0f / (mx - mn);
             for (std::size_t i = 0; i < total; ++i) norm[i] = (raw[i] - mn) * inv;
+        }
+        if (logits) {
+            PITTORE_LOG("[ai] logits detected (raw range [%.3f,%.3f]); applied sigmoid",
+                        mn, mx);
         }
 
         // Resample the network's (typically [1,1,H,W]) map back to source
@@ -131,7 +150,11 @@ SegmentResult segment_rgba8(const std::uint8_t* rgba, int width, int height,
                 sw = static_cast<int>(b);
             }
         }
-        res.alpha = resizeMaskToSize(norm.data(), sw, sh, width, height);
+        // Lift the model's coarse mask into the full-res lattice guided by
+        // the source image, so the contour snaps to real edges instead of
+        // staying quantized to the model grid (a diagonal edge otherwise
+        // upsamples to a visible staircase at high zoom).
+        res.alpha = resizeMaskGuided(norm.data(), sw, sh, rgba, width, height);
         res.ok = true;
         PITTORE_LOG("[ai] segment done: %dx%d mask=%zu range=[%.4f,%.4f] total %.0f ms",
                      width, height, res.alpha.size(), mn, mx, elapsedMs());

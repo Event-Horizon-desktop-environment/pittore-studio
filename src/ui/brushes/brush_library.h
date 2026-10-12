@@ -39,12 +39,15 @@ struct BrushPreset {
     // -100..100 (0 isotropic). Edge curve 0 linear, 1 gaussian.
     // Sharpness threshold 0 off .. 100 full cut, soften edge 0 hard ..
     // 100 soft. Auto spacing squares the percentage for fine control.
+    // A positive size-law coefficient strides the dab diameter directly
+    // instead (linear sub-pixel, square-root above).
     int spikes = 0;
     double fadeAniso = 0.0;
     int falloff = 0;
     double sharpness = 0.0;
     double soften = 0.0;
     bool spacingAuto = false;
+    double spacingAutoCoeff = 0.0;
     double opacity = 100.0;
     bool pressureSize = true;
     bool pressureOpacity = true;
@@ -91,12 +94,19 @@ struct BrushPreset {
     double textureBrightness = 0.0;
     double textureContrast = 100.0;
     bool textureInvert = false;
+    // Paper-grain evaluator: false keeps the legacy texture combine,
+    // true evaluates the grain pipeline (subtractive brightness,
+    // neutral remap, cutoff window) used by imported preset bundles.
+    bool textureGrain = false;
     // Multi-cell hose: ordered cell stamp ids + pick mode.
     QString hoseId;
     QStringList hoseCells;
     QString hoseSelection;  // "incremental" (default) or "random"
     QStringList tags;       // bundle grouping labels (empty = untagged)
     QString paintingMode;   // "" (wash default) or "buildup"
+    // Dab composite op id: "" (normal default), "geometric_mean",
+    // "parallel" or "allanon" (pigment-mix glazing for imported presets).
+    QString compositeOp;
     // Tip rotation source: 0 off, 1 tilt, 2 drawing angle, 3 pressure,
     // 4 barrel, 5 fuzzy. Plus the pressure/fuzzy response curve.
     int rotationMode = 0;
@@ -221,6 +231,7 @@ struct BrushPreset {
         if (sharpness > 0.0) o.insert("sharpness", sharpness);
         if (soften > 0.0) o.insert("soften", soften);
         if (spacingAuto) o.insert("spacing_auto", spacingAuto);
+        if (spacingAutoCoeff > 0.0) o.insert("spacing_auto_coeff", spacingAutoCoeff);
         if (!textureFile.isEmpty()) {
             o.insert("texture", textureFile);
             o.insert("texture_strength", textureStrength);
@@ -229,6 +240,7 @@ struct BrushPreset {
             o.insert("texture_brightness", textureBrightness);
             o.insert("texture_contrast", textureContrast);
             o.insert("texture_invert", textureInvert);
+            if (textureGrain) o.insert("texture_grain", true);
         }
         if (!hoseId.isEmpty()) {
             o.insert("hose", hoseId);
@@ -244,6 +256,9 @@ struct BrushPreset {
         }
         if (paintingMode == QStringLiteral("buildup"))
             o.insert("painting_mode", paintingMode);
+        if (!compositeOp.isEmpty() &&
+            compositeOp != QStringLiteral("normal"))
+            o.insert("composite", compositeOp);
         if (rotationMode != 0) {
             o.insert("rotation_mode", rotationMode);
             o.insert("rotation_curve", rotationCurve);
@@ -357,6 +372,8 @@ struct BrushPreset {
         p.sharpness = o.value(QStringLiteral("sharpness")).toDouble(0.0);
         p.soften = o.value(QStringLiteral("soften")).toDouble(0.0);
         p.spacingAuto = o.value(QStringLiteral("spacing_auto")).toBool(false);
+        p.spacingAutoCoeff =
+            o.value(QStringLiteral("spacing_auto_coeff")).toDouble(0.0);
         p.textureFile = o.value(QStringLiteral("texture")).toString();
         p.textureStrength = o.value(QStringLiteral("texture_strength")).toDouble(80.0);
         p.textureScale = o.value(QStringLiteral("texture_scale")).toDouble(100.0);
@@ -366,6 +383,7 @@ struct BrushPreset {
         p.textureContrast =
             o.value(QStringLiteral("texture_contrast")).toDouble(100.0);
         p.textureInvert = o.value(QStringLiteral("texture_invert")).toBool(false);
+        p.textureGrain = o.value(QStringLiteral("texture_grain")).toBool(false);
         p.hoseId = o.value(QStringLiteral("hose")).toString();
         p.hoseCells.clear();
         for (const QJsonValue& cv : o.value(QStringLiteral("hose_cells")).toArray())
@@ -376,6 +394,7 @@ struct BrushPreset {
         for (const QJsonValue& tv : o.value(QStringLiteral("tags")).toArray())
             p.tags.push_back(tv.toString());
         p.paintingMode = o.value(QStringLiteral("painting_mode")).toString();
+        p.compositeOp = o.value(QStringLiteral("composite")).toString();
         p.rotationMode = o.value(QStringLiteral("rotation_mode")).toInt(0);
         p.rotationCurve = o.value(QStringLiteral("rotation_curve")).toString();
         p.sourceMode = o.value(QStringLiteral("source")).toInt(0);
@@ -561,6 +580,8 @@ inline ApplyResult applyPreset(AppState* state, const BrushPreset& p) {
                      qBound(0.0, p.soften, 100.0));
     state->setOption(tool, QStringLiteral("brush_spacing_auto"),
                      p.spacingAuto);
+    state->setOption(tool, QStringLiteral("brush_spacing_auto_coeff"),
+                     qBound(0.0, p.spacingAutoCoeff, 8.0));
     if (!lockOpacity)
         state->setOption(tool, QStringLiteral("opacity"), p.opacity);
     state->setOption(tool, QStringLiteral("pressure_size"), p.pressureSize);
@@ -617,11 +638,16 @@ inline ApplyResult applyPreset(AppState* state, const BrushPreset& p) {
                      p.textureContrast);
     state->setOption(tool, QStringLiteral("brush_texture_invert"),
                      p.textureInvert);
+    state->setOption(tool, QStringLiteral("brush_texture_grain"),
+                     p.textureGrain);
     }  // !lockTexture
     state->setOption(tool, QStringLiteral("brush_hose"), p.hoseId);
     state->setOption(tool, QStringLiteral("brush_painting_mode"),
                      p.paintingMode.isEmpty() ? QStringLiteral("wash")
                                               : p.paintingMode);
+    state->setOption(tool, QStringLiteral("brush_composite"),
+                     p.compositeOp.isEmpty() ? QStringLiteral("normal")
+                                             : p.compositeOp);
     // Rotation source + response curve. The legacy tilt toggle stays in
     // sync so older snapshots keep working.
     state->setOption(tool, QStringLiteral("brush_rotation"),
@@ -752,10 +778,12 @@ brushPopupDefaults() {
         {"brush_sharpness", 0.0},
         {"brush_soften", 0.0},
         {"brush_spacing_auto", false},
+        {"brush_spacing_auto_coeff", 0.0},
         {"brush_rotation", 0},
         {"brush_source", 0},
         {"brush_texture_mode", 0},
         {"brush_painting_mode", QStringLiteral("wash")},
+        {"brush_composite", QStringLiteral("normal")},
         {"smoothing_mode", 0},
         {"brush_tip_filter", 1},
         {"brush_flip_x", false},
@@ -836,6 +864,7 @@ inline BrushPreset captureBrushState(AppState* state, ToolId tool) {
     p.sharpness = dbl("brush_sharpness", 0.0);
     p.soften = dbl("brush_soften", 0.0);
     p.spacingAuto = flag("brush_spacing_auto");
+    p.spacingAutoCoeff = dbl("brush_spacing_auto_coeff", 0.0);
     p.opacity = dbl("opacity", 100.0);
     p.pressureSize = flag("pressure_size", true);
     p.pressureOpacity = flag("pressure_opacity", true);
@@ -871,8 +900,10 @@ inline BrushPreset captureBrushState(AppState* state, ToolId tool) {
     p.textureBrightness = dbl("brush_texture_brightness", 0.0);
     p.textureContrast = dbl("brush_texture_contrast", 100.0);
     p.textureInvert = flag("brush_texture_invert");
+    p.textureGrain = flag("brush_texture_grain");
     p.hoseId = str("brush_hose");
     p.paintingMode = str("brush_painting_mode", QStringLiteral("wash"));
+    p.compositeOp = str("brush_composite", QStringLiteral("normal"));
     p.rotationMode = int(dbl("brush_rotation", 0.0));
     p.rotationCurve = str("brush_rotation_curve");
     p.sourceMode = int(dbl("brush_source", 0.0));

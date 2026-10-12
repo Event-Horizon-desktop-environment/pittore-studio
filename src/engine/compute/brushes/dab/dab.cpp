@@ -6,6 +6,7 @@
 #include <limits>
 
 #include "engine/core/pixel.h"
+#include "engine/color/icc_convert.h"
 
 namespace pittore::compute {
 
@@ -13,7 +14,9 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     float cy, float radius, float hardness, float opacity,
                     const RGBAf& color, const SelectionMask* selection,
                     const PatternTex* tex, const DabDensity* den,
-                    const MaskTip* mask) {
+                    const MaskTip* mask,
+                    const papergrain::PaperGrain* kgrain,
+                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
 
     const float hard = std::clamp(hardness, 0.0f, 1.0f);
@@ -49,19 +52,44 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
             cov = combine_mask(cov, mask, dx, dy, radius);
             if (cov <= 0.0f) continue;
             if (selection) cov *= selection->coverage(x, y);
-            if (tex) cov *= texture_mult(tex, float(x), float(y));
+            if (kgrain)
+                cov = papergrain::grain_mult(kgrain, cov, float(x), float(y));
+            else if (tex)
+                cov *= texture_mult(tex, float(x), float(y));
             if (cov <= 0.0f || !density_keep(den, x, y)) continue;
             const float a = cov * op;
             if (a <= 0.0f) continue;
 
             RGBAf& d = dst[idx];
-            const float inv_a = 1.0f - a;
-            const float out_a = a + d.a * inv_a;
-            if (out_a > 0.0f) {
-                d.r = (a * cr + d.r * d.a * inv_a) / out_a;
-                d.g = (a * cg + d.g * d.a * inv_a) / out_a;
-                d.b = (a * cb + d.b * d.a * inv_a) / out_a;
-                d.a = out_a;
+            if (mix == dabmix::DabMixOp::Normal) {
+                const float inv_a = 1.0f - a;
+                const float out_a = a + d.a * inv_a;
+                if (out_a > 0.0f) {
+                    if (nativeCmyk && nativeCmyk->pixels && nativeCmyk->preview) {
+                        auto& ink = nativeCmyk->pixels[idx];
+                        float previewInk[4];
+                        for (int c = 0; c < 4; ++c) {
+                            const float oldInk = ink[c] / 65535.0f;
+                            const float srcInk = nativeCmyk->source[c] / 65535.0f;
+                            const float mixed = (a * srcInk + d.a * oldInk * inv_a) / out_a;
+                            ink[c] = static_cast<std::uint16_t>(std::clamp(
+                                std::lround(mixed * 65535.0f), 0L, 65535L));
+                            previewInk[c] = ink[c] / 65535.0f;
+                        }
+                        float rgb[3];
+                        nativeCmyk->preview->convert(previewInk[0], previewInk[1],
+                                                     previewInk[2], previewInk[3], rgb);
+                        d.r = rgb[0]; d.g = rgb[1]; d.b = rgb[2];
+                    } else {
+                        d.r = (a * cr + d.r * d.a * inv_a) / out_a;
+                        d.g = (a * cg + d.g * d.a * inv_a) / out_a;
+                        d.b = (a * cb + d.b * d.a * inv_a) / out_a;
+                    }
+                    d.a = out_a;
+                }
+            } else {
+                dabmix::mix_pixel(mix, cr, cg, cb, a, d.r, d.g, d.b, d.a,
+                                  d.r, d.g, d.b, d.a);
             }
         }
     }
@@ -77,7 +105,9 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                         float opacity, const RGBAf& color,
                         const SelectionMask* selection,
                         const PatternTex* tex, const DabDensity* den,
-                    const MaskTip* mask) {
+                    const MaskTip* mask,
+                    const papergrain::PaperGrain* kgrain,
+                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
     AutoTip t = tip;
     t.sanitize();
@@ -110,18 +140,43 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
             cov = combine_mask(cov, mask, dx, dy, radius);
             if (cov <= 0.0f) continue;
             if (selection) cov *= selection->coverage(x, y);
-            if (tex) cov *= texture_mult(tex, float(x), float(y));
+            if (kgrain)
+                cov = papergrain::grain_mult(kgrain, cov, float(x), float(y));
+            else if (tex)
+                cov *= texture_mult(tex, float(x), float(y));
             if (cov <= 0.0f || !density_keep(den, x, y)) continue;
             const float a = cov * op;
             if (a <= 0.0f) continue;
             RGBAf& d = dst[idx];
-            const float inv_a = 1.0f - a;
-            const float out_a = a + d.a * inv_a;
-            if (out_a > 0.0f) {
-                d.r = (a * cr + d.r * d.a * inv_a) / out_a;
-                d.g = (a * cg + d.g * d.a * inv_a) / out_a;
-                d.b = (a * cb + d.b * d.a * inv_a) / out_a;
-                d.a = out_a;
+            if (mix == dabmix::DabMixOp::Normal) {
+                const float inv_a = 1.0f - a;
+                const float out_a = a + d.a * inv_a;
+                if (out_a > 0.0f) {
+                    if (nativeCmyk && nativeCmyk->pixels && nativeCmyk->preview) {
+                        auto& ink = nativeCmyk->pixels[idx];
+                        float previewInk[4];
+                        for (int c = 0; c < 4; ++c) {
+                            const float oldInk = ink[c] / 65535.0f;
+                            const float srcInk = nativeCmyk->source[c] / 65535.0f;
+                            const float mixed = (a * srcInk + d.a * oldInk * inv_a) / out_a;
+                            ink[c] = static_cast<std::uint16_t>(std::clamp(
+                                std::lround(mixed * 65535.0f), 0L, 65535L));
+                            previewInk[c] = ink[c] / 65535.0f;
+                        }
+                        float rgb[3];
+                        nativeCmyk->preview->convert(previewInk[0], previewInk[1],
+                                                     previewInk[2], previewInk[3], rgb);
+                        d.r = rgb[0]; d.g = rgb[1]; d.b = rgb[2];
+                    } else {
+                        d.r = (a * cr + d.r * d.a * inv_a) / out_a;
+                        d.g = (a * cg + d.g * d.a * inv_a) / out_a;
+                        d.b = (a * cb + d.b * d.a * inv_a) / out_a;
+                    }
+                    d.a = out_a;
+                }
+            } else {
+                dabmix::mix_pixel(mix, cr, cg, cb, a, d.r, d.g, d.b, d.a,
+                                  d.r, d.g, d.b, d.a);
             }
         }
     }

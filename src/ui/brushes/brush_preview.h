@@ -27,6 +27,8 @@ struct AutoParams {
     bool square = false;
     double hardness = 0.5;  // 0..1
     double spacingPct = 15.0;
+    bool spacingAuto = false;
+    double spacingAutoCoeff = 0.0;
     bool pressureSize = true;
     bool pressureOpacity = true;
     double opacity = 1.0;  // 0..1
@@ -38,7 +40,9 @@ struct AutoParams {
     int falloff = 0;
     double sharpness = 0.0;  // 0..100
     double soften = 0.0;     // 0..100
-    bool spacingAuto = false;
+    // Dab composite op for pigment-mix presets (normal default).
+    pittore::compute::dabmix::DabMixOp mixOp =
+        pittore::compute::dabmix::DabMixOp::Normal;
 };
 
 namespace detail {
@@ -120,6 +124,7 @@ inline pittore::compute::AutoTip toTip(const AutoParams& a) {
     tip.sharpness = float(std::clamp(a.sharpness / 100.0, 0.0, 1.0));
     tip.soften = float(std::clamp(a.soften / 100.0, 0.0, 1.0));
     tip.autoSpacing = a.spacingAuto;
+    tip.spacingAutoCoeff = float(std::clamp(a.spacingAutoCoeff, 0.0, 8.0));
     tip.sanitize();
     return tip;
 }
@@ -168,7 +173,8 @@ inline QImage tipThumbAuto(const AutoParams& a, int px = 56,
     const auto tip = detail::toTip(a);
     pittore::compute::paint_tip_dab_host(
         buf.data(), px, px, px / 2.0f, px / 2.0f, px * 0.36f, tip, 1.0f,
-        pittore::RGBAf{0, 0, 0, 1});
+        pittore::RGBAf{0, 0, 0, 1}, nullptr, nullptr, nullptr, nullptr,
+        nullptr, a.mixOp);
     detail::blitOver(buf, px, px, img, !paper);
     return img;
 }
@@ -178,7 +184,9 @@ inline QImage tipThumbStamp(const pittore::compute::StampTip& tip, int mode,
                             const QColor& bg = QColor(),
                             double neutralPct = 50.0,
                             double brightnessPct = 0.0,
-                            double contrastPct = 100.0) {
+                            double contrastPct = 100.0,
+                            pittore::compute::dabmix::DabMixOp mix =
+                                pittore::compute::dabmix::DabMixOp::Normal) {
     QImage img(px, px, QImage::Format_ARGB32);
     if (paper)
         detail::paintChecker(img);
@@ -196,7 +204,8 @@ inline QImage tipThumbStamp(const pittore::compute::StampTip& tip, int mode,
     pittore::compute::stamp_dab_host(
         buf.data(), px, px, px / 2.0f, px / 2.0f, px * 0.36f, tip, smode, 1.0f,
         pittore::RGBAf{0, 0, 0, 1}, 0.0f, nullptr, nullptr, nullptr,
-        nullptr, 0, 1, &levels, bg.isValid() ? &bgC : &white);
+        nullptr, 0, 1, &levels, bg.isValid() ? &bgC : &white, nullptr, 0.0f,
+        mix);
     detail::blitOver(buf, px, px, img, !paper);
     return img;
 }
@@ -233,7 +242,9 @@ QImage strokeCanvas(int w, int h, DabFn&& dabAt, bool paper = true) {
 inline QImage strokePreviewAuto(const AutoParams& a, const QColor& fg,
                                 int w = 300, int h = 110,
                                 const pittore::compute::PatternTex* tex = nullptr,
-                                bool paper = true) {
+                                bool paper = true,
+                                const pittore::compute::papergrain::PaperGrain* kgrain =
+                                    nullptr) {
     const auto tip = detail::toTip(a);
     const float baseR = h * 0.20f;
     const pittore::RGBAf ink{float(fg.redF()), float(fg.greenF()),
@@ -263,7 +274,7 @@ inline QImage strokePreviewAuto(const AutoParams& a, const QColor& fg,
                                 flowBase * detail::curveOr(flowC, pressure, 1.0f);
                             pittore::compute::paint_tip_dab_host(
                                 buf, bw, bh, x, y, r, tip, o, ink, nullptr,
-                                tex);
+                                tex, nullptr, nullptr, kgrain, a.mixOp);
                             return need;
                         }, paper);
 }
@@ -277,7 +288,9 @@ inline QImage strokePreviewStamp(const pittore::compute::StampTip& tip,
                                  const QColor& bg = QColor(),
                                  double neutralPct = 50.0,
                                  double brightnessPct = 0.0,
-                                 double contrastPct = 100.0) {
+                                 double contrastPct = 100.0,
+                                 const pittore::compute::papergrain::PaperGrain* kgrain =
+                                     nullptr) {
     QImage img(w, h, QImage::Format_ARGB32);
     img.fill(paper ? Qt::white : Qt::transparent);
     if (!tip.valid()) return img;
@@ -292,6 +305,16 @@ inline QImage strokePreviewStamp(const pittore::compute::StampTip& tip,
     const float baseR = h * 0.20f;
     const auto sizeC = pittore::ui::brushcurve::parseEncoded(pr.sizeCurve);
     const auto opC = pittore::ui::brushcurve::parseEncoded(pr.opacityCurve);
+    const auto flowC = pittore::ui::brushcurve::parseEncoded(pr.flowCurve);
+    const float opBase = float(std::clamp(pr.opacity, 0.0, 1.0)) *
+                         float(std::clamp(pr.flowPct, 0.0, 1.0));
+    pittore::compute::StampSharp sharp;
+    sharp.strength =
+        float(std::clamp(pr.sharpness / 100.0, 0.0, 1.0));
+    sharp.softness =
+        float(std::clamp(pr.soften / 100.0, 0.0, 1.0));
+    const pittore::compute::papergrain::PaperGrain* grainPtr =
+        (kgrain && kgrain->valid()) ? kgrain : nullptr;
     return strokeCanvas(w, h,
                         [&](pittore::RGBAf* buf, int bw, int bh, float x,
                             float y, double pressure, bool measure) {
@@ -304,13 +327,17 @@ inline QImage strokePreviewStamp(const pittore::compute::StampTip& tip,
                             const float need =
                                 pittore::compute::stamp_spacing(r, tip);
                             if (measure) return need;
-                            const float o = detail::curveOr(
-                                opC, pressure,
-                                pr.pressureOpacity ? pc : 1.0f);
+                            const float o =
+                                opBase *
+                                detail::curveOr(
+                                    opC, pressure,
+                                    pr.pressureOpacity ? pc : 1.0f) *
+                                detail::curveOr(flowC, pressure, 1.0f);
                             pittore::compute::stamp_dab_host(
                                 buf, bw, bh, x, y, r, tip, smode, o, ink,
                                 float(angleDeg), nullptr, tex, nullptr,
-                                nullptr, 0, 1, &levels, &bgC);
+                                nullptr, 0, 1, &levels, &bgC, nullptr, 0.0f,
+                                pr.mixOp, grainPtr, &sharp);
                             return need;
                         }, paper);
 }
@@ -323,7 +350,9 @@ inline QImage strokePreviewHose(const std::vector<pittore::compute::StampTip>& c
                                 double angleDeg, int w = 300, int h = 110,
                                 const pittore::compute::PatternTex* tex = nullptr,
                                 const AutoParams& pr = AutoParams{},
-                                bool paper = true) {
+                                bool paper = true,
+                                const pittore::compute::papergrain::PaperGrain* kgrain =
+                                    nullptr) {
     QImage img(w, h, QImage::Format_ARGB32);
     img.fill(paper ? Qt::white : Qt::transparent);
     if (cells.empty()) return img;
@@ -341,6 +370,9 @@ inline QImage strokePreviewHose(const std::vector<pittore::compute::StampTip>& c
     }();
     const auto sizeC = pittore::ui::brushcurve::parseEncoded(pr.sizeCurve);
     const auto opC = pittore::ui::brushcurve::parseEncoded(pr.opacityCurve);
+    const auto flowC = pittore::ui::brushcurve::parseEncoded(pr.flowCurve);
+    const float opBase = float(std::clamp(pr.opacity, 0.0, 1.0)) *
+                         float(std::clamp(pr.flowPct, 0.0, 1.0));
     return strokeCanvas(w, h,
                         [&](pittore::RGBAf* buf, int bw, int bh, float x,
                             float y, double pressure, bool measure) {
@@ -365,12 +397,24 @@ inline QImage strokePreviewHose(const std::vector<pittore::compute::StampTip>& c
                             ++dabNo;
                             const auto& tip = cells[idx];
                             if (!tip.valid()) return need;
-                            const float o = detail::curveOr(
-                                opC, pressure,
-                                pr.pressureOpacity ? pc : 1.0f);
+                            const float o =
+                                opBase *
+                                detail::curveOr(
+                                    opC, pressure,
+                                    pr.pressureOpacity ? pc : 1.0f) *
+                                detail::curveOr(flowC, pressure, 1.0f);
+                            pittore::compute::StampSharp sharp;
+                            sharp.strength = float(
+                                std::clamp(pr.sharpness / 100.0, 0.0, 1.0));
+                            sharp.softness = float(
+                                std::clamp(pr.soften / 100.0, 0.0, 1.0));
+                            const pittore::compute::papergrain::PaperGrain* grainPtr =
+                                (kgrain && kgrain->valid()) ? kgrain : nullptr;
                             pittore::compute::stamp_dab_host(
                                 buf, bw, bh, x, y, r, tip, smode, o, ink,
-                                float(angleDeg), nullptr, tex);
+                                float(angleDeg), nullptr, tex, nullptr,
+                                nullptr, 0, 1, nullptr, nullptr, nullptr,
+                                0.0f, pr.mixOp, grainPtr, &sharp);
                             return need;
                         }, paper);
 }
@@ -532,6 +576,9 @@ class BrushPreviewWidget final : public QWidget {
     struct OwnedPattern {
         std::vector<float> gray;
         pittore::compute::PatternTex tex;
+        std::vector<float> grainGray;
+        pittore::compute::papergrain::PaperGrain grain;
+        bool grainOn = false;
     };
 
     void setExpandable(bool on) {
@@ -655,17 +702,29 @@ class BrushPreviewWidget final : public QWidget {
 
   private:
     void setPattern(const OwnedPattern* pattern) {
-        if (pattern && pattern->tex.valid() && !pattern->gray.empty()) {
+        pattern_ = OwnedPattern{};
+        if (!pattern) return;
+        if (pattern->tex.valid() && !pattern->gray.empty()) {
             pattern_.gray = pattern->gray;
             pattern_.tex = pattern->tex;
             pattern_.tex.gray = pattern_.gray.data();
-        } else {
-            pattern_ = OwnedPattern{};
+        }
+        if (pattern->grainOn && pattern->grain.valid() &&
+            !pattern->grainGray.empty()) {
+            pattern_.grainGray = pattern->grainGray;
+            pattern_.grain = pattern->grain;
+            pattern_.grain.gray = pattern_.grainGray.data();
+            pattern_.grainOn = true;
         }
     }
 
     const pittore::compute::PatternTex* texPtr() const {
         return pattern_.tex.valid() ? &pattern_.tex : nullptr;
+    }
+
+    const pittore::compute::papergrain::PaperGrain* grainPtr() const {
+        return (pattern_.grainOn && pattern_.grain.valid()) ? &pattern_.grain
+                                                            : nullptr;
     }
 
     void refresh() {
@@ -681,14 +740,15 @@ class BrushPreviewWidget final : public QWidget {
         else if (isHose_ && !hoseCells_.empty())
             cache_ = strokePreviewHose(hoseCells_, hoseSelection_, hoseSeed_,
                                        stampMode_, fg_, stampAngle_, 300, 110,
-                                       texPtr(), pressure_);
+                                       texPtr(), pressure_, true, grainPtr());
         else if (isStamp_ && stamp_.valid())
             cache_ = strokePreviewStamp(stamp_, stampMode_, fg_, stampAngle_,
                                         300, 110, texPtr(), pressure_, true,
                                         bg_, neutralPct_, brightnessPct_,
-                                        contrastPct_);
+                                        contrastPct_, grainPtr());
         else if (!isStamp_ && !isHose_ && !isSmudge_)
-            cache_ = strokePreviewAuto(auto_, fg_, 300, 110, texPtr());
+            cache_ = strokePreviewAuto(auto_, fg_, 300, 110, texPtr(), true,
+                                       grainPtr());
         else
             cache_ = QImage();
         update();

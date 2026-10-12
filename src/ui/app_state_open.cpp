@@ -3,6 +3,7 @@
 
 #include "ui/app_state.h"
 #include "ui/app_state_detail.h"
+#include "ui/color_mode.h"
 #include "ui/embedded_icc.h"
 #include "ui/project_manager.h"
 #include "ui/svg_parts.h"
@@ -175,6 +176,23 @@ bool AppState::openProject(const QString& path, QString* error) {
         if (!m.pixels.isNull() && !li.pixels) {
             li.pixels = straightRgba64ToImage(m.pixels);
             ++li.sourceStamp;   // fresh native pixels → stale device cache
+        }
+        if (li.pixels && m.cmyk.size() == li.pixels->pixel_count() * 4) {
+            li.cmykPixels =
+                std::make_shared<pittore::color::CmykImage>();
+            li.cmykPixels->width = li.pixels->width();
+            li.cmykPixels->height = li.pixels->height();
+            li.cmykPixels->pixels.resize(li.pixels->pixel_count());
+            for (std::size_t i = 0; i < li.cmykPixels->pixels.size(); ++i)
+                std::copy_n(m.cmyk.data() + i * 4, 4,
+                            li.cmykPixels->pixels[i].data());
+            li.cmykSourceStamp = li.sourceStamp;
+            li.cmykPixels->appearanceFingerprint =
+                pittore::color::CmykImage::fingerprint(*li.pixels);
+            li.cmykPixels->profileFingerprint =
+                pittore::color::CmykImage::fingerprint(
+                    reinterpret_cast<const std::uint8_t*>(doc->iccProfile.constData()),
+                    static_cast<std::size_t>(doc->iccProfile.size()));
         }
         // Re-arm verbatim PSD blocks: only fresh blocks were ever saved,
         // so the just-rebuilt counters are the new guard baseline.
@@ -394,6 +412,26 @@ bool AppState::openPsdLayers(const QString& path, const pittore::io::PsdLayersDo
                                                    static_cast<int>(l.height));
                 li.pixels = straightRgba64ToImage(q);
                 if (li.pixels) ++li.sourceStamp;  // fresh native pixels
+                if (li.pixels && l.cmyk.size() ==
+                                     static_cast<std::size_t>(l.width) *
+                                         l.height * 4) {
+                    li.cmykPixels =
+                        std::make_shared<pittore::color::CmykImage>();
+                    li.cmykPixels->width = l.width;
+                    li.cmykPixels->height = l.height;
+                    li.cmykPixels->pixels.resize(
+                        static_cast<std::size_t>(l.width) * l.height);
+                    for (std::size_t i = 0;
+                         i < li.cmykPixels->pixels.size(); ++i)
+                        std::copy_n(l.cmyk.data() + i * 4, 4,
+                                    li.cmykPixels->pixels[i].data());
+                    li.cmykSourceStamp = li.sourceStamp;
+                    li.cmykPixels->appearanceFingerprint =
+                        pittore::color::CmykImage::fingerprint(*li.pixels);
+                    li.cmykPixels->profileFingerprint =
+                        pittore::color::CmykImage::fingerprint(
+                            pd.icc.data(), pd.icc.size());
+                }
                 auto mask = psdMaskToImage(l, l.width, l.height, l.left,
                                            l.top, l.left, l.top);
                 if (mask && li.pixels) {
@@ -736,7 +774,13 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         };
     for (int i = roots.size() - 1; i >= 0; --i) emitNode(roots[i], 1.0, false);
 
-    if (hasFlat) {
+    // Ground-truth base: the flattened render, scaled to fill the canvas.
+    // Kept only when it carries information the recovered stack lacks: the
+    // render itself (nothing else recovered) or the reference copy of
+    // skipped content. A clean import drops it instead of leaving a
+    // confusing extra row in the panel.
+    const bool keepFlat = hasFlat && (useFlatBase || pd.skippedLayers > 0);
+    if (keepFlat) {
         // Ground-truth base: the flattened render, scaled to fill the canvas.
         LayerItem base;
         base.name = tr("Background (flattened)");
@@ -773,6 +817,11 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                 flattenedBase.width(), flattenedBase.height(), dw, dh,
                 pd.skippedLayers);
         }
+    } else if (hasFlat) {
+        ::pittore::core::log::log_info(
+            "[import] AF %s: all %zu layers recovered, nothing skipped; "
+            "flattened preview dropped",
+            QFileInfo(path).fileName().toUtf8().constData(), pd.layers.size());
     } else {
         ::pittore::core::log::log_info(
             "[import] AF %s: no flattened base, showing recovered layers",
@@ -1114,6 +1163,10 @@ bool AppState::openImageFile(const QString& path, QString* error) {
     int proxyFactor = 1;
     QSize fullSize;
     QImage img;
+    std::optional<pittore::io::PsdImage> flatPsd;
+    std::vector<std::uint16_t> flatTiffCmyk;
+    std::vector<std::uint8_t> flatTiffIcc;
+    int flatTiffDepth = 0;
     {
         QSize probed;
         int probeDpi = 0;
@@ -1130,9 +1183,16 @@ bool AppState::openImageFile(const QString& path, QString* error) {
             // it: past 100MP a dense document never runs well.
             std::uint64_t denseBudget = kHardDenseCapPixels;
             if (settings_.ramLimitMb > 0) {
+                // A full-resolution CMYK TIFF temporarily holds the decoded
+                // 16-bit ink vector and the retained sidecar during import.
+                // Budget that extra 16 bytes per pixel before allowing it to
+                // bypass the ordinary proxy path.
+                const std::uint64_t bytesPerPixel =
+                    (suffix == QLatin1String("tif") ||
+                     suffix == QLatin1String("tiff")) ? 68ull : 52ull;
                 const std::uint64_t ramBudget =
                     static_cast<std::uint64_t>(settings_.ramLimitMb) *
-                    1048576ull / 52ull;
+                    1048576ull / bytesPerPixel;
                 denseBudget = std::min(denseBudget, ramBudget);
             }
             if (npix > denseBudget)
@@ -1143,6 +1203,43 @@ bool AppState::openImageFile(const QString& path, QString* error) {
         if (!img.isNull()) {
             if (proxyFactor < 1) proxyFactor = 1;
             if (fullSize.isEmpty()) fullSize = img.size();
+            // The Qt image plugin returns appearance RGB and discards device
+            // inks. For reasonably sized flattened PSD/PSB files, also decode
+            // the native channels so an imported CMYK layer can round-trip.
+            const std::uint64_t np = static_cast<std::uint64_t>(img.width()) *
+                                     img.height();
+            if ((suffix == QLatin1String("psd") ||
+                 suffix == QLatin1String("psb")) &&
+                proxyFactor == 1 && np <= 16'000'000 && !psdBytes.isEmpty()) {
+                const std::vector<std::uint8_t> raw(psdBytes.constBegin(),
+                                                    psdBytes.constEnd());
+                const auto icc = pittore::io::psdEmbeddedIcc(raw);
+                flatPsd = pittore::io::psdDecode(raw, nullptr, &icc);
+                if (flatPsd && flatPsd->width ==
+                                   static_cast<std::uint32_t>(img.width()) &&
+                    flatPsd->height ==
+                        static_cast<std::uint32_t>(img.height())) {
+                    img = qimageFromRgba16(flatPsd->rgba, img.width(),
+                                           img.height());
+                } else {
+                    flatPsd.reset();
+                }
+            }
+#ifdef PITTORE_TIFF
+            if ((suffix == QLatin1String("tif") ||
+                 suffix == QLatin1String("tiff")) &&
+                proxyFactor == 1) {
+                std::uint32_t cw = 0, ch = 0;
+                if (pittore::io::tiffDecodeCmykFile(
+                        QFile::encodeName(path).constData(), cw, ch,
+                        flatTiffCmyk, &flatTiffIcc, &flatTiffDepth) &&
+                    (cw != static_cast<std::uint32_t>(img.width()) ||
+                     ch != static_cast<std::uint32_t>(img.height()))) {
+                    flatTiffCmyk.clear();
+                    flatTiffIcc.clear();
+                }
+            }
+#endif
         }
     }
     if (img.isNull()) {
@@ -1191,7 +1288,28 @@ bool AppState::openImageFile(const QString& path, QString* error) {
         }
         return false;
     }
-    doc->colorMode = QStringLiteral("RGB/8");
+    if ((flatPsd && flatPsd->colorMode == 4) || !flatTiffCmyk.empty()) {
+        const bool is16 = !flatTiffCmyk.empty()
+                              ? flatTiffDepth >= 16
+                              : (flatPsd && flatPsd->depth >= 16);
+        doc->colorMode = is16
+                             ? QStringLiteral("CMYK/16")
+                             : QStringLiteral("CMYK/8");
+        const std::vector<std::uint8_t> raw(psdBytes.constBegin(),
+                                            psdBytes.constEnd());
+        const auto icc = !flatTiffIcc.empty()
+                             ? flatTiffIcc
+                             : pittore::io::psdEmbeddedIcc(raw);
+        doc->iccProfile = QByteArray(
+            reinterpret_cast<const char*>(icc.data()),
+            static_cast<qsizetype>(icc.size()));
+    } else if (flatPsd && flatPsd->colorMode == 1) {
+        doc->colorMode = flatPsd->depth >= 16
+                             ? QStringLiteral("Grayscale/16")
+                             : QStringLiteral("Grayscale/8");
+    } else {
+        doc->colorMode = QStringLiteral("RGB/8");
+    }
     doc->importSourcePath = QFileInfo(path).absoluteFilePath();
 
     std::shared_ptr<pittore::Image> pixels;    try {
@@ -1213,6 +1331,40 @@ bool AppState::openImageFile(const QString& path, QString* error) {
     layer.kind = LayerItem::Kind::Pixel;
     layer.pixels = std::move(pixels);
     ++layer.sourceStamp;   // fresh native pixels → stale device cache
+    if (flatPsd && flatPsd->colorMode == 4 &&
+        flatPsd->cmyk.size() == layer.pixels->pixel_count() * 4) {
+        layer.cmykPixels = std::make_shared<pittore::color::CmykImage>();
+        layer.cmykPixels->width = layer.pixels->width();
+        layer.cmykPixels->height = layer.pixels->height();
+        layer.cmykPixels->pixels.resize(layer.pixels->pixel_count());
+        for (std::size_t i = 0; i < layer.cmykPixels->pixels.size(); ++i)
+            std::copy_n(flatPsd->cmyk.data() + i * 4, 4,
+                        layer.cmykPixels->pixels[i].data());
+        layer.cmykSourceStamp = layer.sourceStamp;
+        layer.cmykPixels->appearanceFingerprint =
+            pittore::color::CmykImage::fingerprint(*layer.pixels);
+        layer.cmykPixels->profileFingerprint =
+            pittore::color::CmykImage::fingerprint(
+                reinterpret_cast<const std::uint8_t*>(doc->iccProfile.constData()),
+                static_cast<std::size_t>(doc->iccProfile.size()));
+    } else if (!flatTiffCmyk.empty() &&
+               flatTiffCmyk.size() == layer.pixels->pixel_count() * 4) {
+        layer.cmykPixels = std::make_shared<pittore::color::CmykImage>();
+        layer.cmykPixels->width = layer.pixels->width();
+        layer.cmykPixels->height = layer.pixels->height();
+        layer.cmykPixels->pixels.resize(layer.pixels->pixel_count());
+        for (std::size_t i = 0; i < layer.cmykPixels->pixels.size(); ++i)
+            std::copy_n(flatTiffCmyk.data() + i * 4, 4,
+                        layer.cmykPixels->pixels[i].data());
+        layer.cmykSourceStamp = layer.sourceStamp;
+        layer.cmykPixels->appearanceFingerprint =
+            pittore::color::CmykImage::fingerprint(*layer.pixels);
+        layer.cmykPixels->profileFingerprint =
+            pittore::color::CmykImage::fingerprint(
+                reinterpret_cast<const std::uint8_t*>(doc->iccProfile.constData()),
+                static_cast<std::size_t>(doc->iccProfile.size()));
+        std::vector<std::uint16_t>().swap(flatTiffCmyk);
+    }
     doc->layers.clear();
     doc->layers.append(std::move(layer));
     doc->selectedLayers.clear();

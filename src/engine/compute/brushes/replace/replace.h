@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "engine/compute/brushes/selection_mask/selection_mask.h"
+#include "engine/compute/brushes/dab/native_cmyk.h"
 #include "engine/core/pixel.h"
 
 namespace pittore::compute {
@@ -21,6 +22,7 @@ bool replace_color_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
                             const RGBAf& replacement, float tolerance,
                             ReplaceMode mode, int limits, bool antialias,
                             float harmony, int* bbox,
-                            const SelectionMask* selection = nullptr);
+                            const SelectionMask* selection = nullptr,
+                            NativeCmykPaint* nativeCmyk = nullptr);
 
 }  // namespace pittore::compute

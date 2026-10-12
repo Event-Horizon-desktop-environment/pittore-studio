@@ -12,15 +12,16 @@ What Pittore Studio does today, and where the edges are. Anything marked
 - Full undo/redo history, plus autosave and crash recovery.
 - Native `.psc` project format — one file per project (legacy `.ifp` still opens).
 - Document modes offered at new-document time: RGB at 8, 16 or 32-bit,
-  Grayscale/8 and CMYK/8. Pixels are stored as float RGB internally — see the
-  note on CMYK below.
+  Grayscale/8 and CMYK at 8 or 16-bit. The renderer keeps an RGB appearance image and
+  CMYK documents also retain per-layer device ink samples for file round trips.
 
 ## Colour
 
 - ICC profile handling on import, with a configurable policy when the file's
   profile does not match the working space (embed, convert, or ask).
 - CMYK conversion through Little CMS (`liblcms2`), falling back to naive
-  conversion when it is not installed.
+  conversion when it is not installed. Imported CMYK PSD layer data is retained
+  as per-layer ink samples; native projects persist that data in v5 files.
 - Image ▸ Mode converts to RGB, Grayscale or CMYK as one undo step. CMYK
   runs every colour through a destination profile (the document's own, the
   configured path, or a system probe) and back, so the canvas shows the
@@ -177,9 +178,22 @@ listener.
 
 ## Not there yet
 
-- No native 4-channel CMYK editing — documents stay float-RGB inside and
-  separate at export; Lab, Bitmap, Duotone, Indexed and Multichannel modes
-  are disabled placeholders (they need side data the model does not store).
+- Normal source-over brush and pencil dabs in build-up or wash mode, plus
+  normal-composite bitmap stamp tips in all color modes, blend directly into
+  retained CMYK ink samples and derive their RGB preview through the document
+  profile.
+  Color Replacement and Paint Bucket fills also update device inks; Magic
+  Eraser and alpha-only selection edits preserve them. Accepted destructive
+  filters re-separate through the document profile; cancelled filter previews
+  restore the original inks. RGB-based raster edits such as tonal brushes,
+  healing and cloning re-separate only their changed regions, preserving
+  untouched device samples. Non-normal brush composites, vector/text paint and
+  layer compositing still cross the RGB appearance boundary. This is partial
+  native CMYK editing, not full pipeline coverage.
+  CMYK TIFF native samples are retained when a supported image opens
+  at full resolution within the document's memory budget; proxied files and
+  unsupported TIFF layouts use the appearance path. Lab, Bitmap, Duotone,
+  Indexed and Multichannel modes remain disabled placeholders.
 - No animation or timeline.
 - Plugin API is declared but not stable.
 - No Windows or macOS build; the meson configuration errors out on anything

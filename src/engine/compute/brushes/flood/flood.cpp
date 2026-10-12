@@ -6,6 +6,7 @@
 #include <limits>
 
 #include "engine/core/pixel.h"
+#include "engine/color/icc_convert.h"
 
 namespace pittore::compute {
 
@@ -25,7 +26,8 @@ bool flood_fill_host(const RGBAf* match, RGBAf* dst, std::uint32_t w,
                      std::uint32_t h, int seedX, int seedY, float tolerance,
                      bool contiguous, bool antialias, float opacity,
                      const RGBAf& color, bool erase, int* bbox,
-                     const SelectionMask* selection) {
+                     const SelectionMask* selection,
+                     NativeCmykPaint* nativeCmyk) {
     if (!match || !dst || w == 0 || h == 0) return false;
     if (seedX < 0 || seedY < 0 || seedX >= static_cast<int>(w) ||
         seedY >= static_cast<int>(h))
@@ -90,6 +92,11 @@ bool flood_fill_host(const RGBAf* match, RGBAf* dst, std::uint32_t w,
         if (a <= 0.0f) return;
         RGBAf& d = dst[static_cast<std::size_t>(y) * w + static_cast<std::size_t>(x)];
         const RGBAf before = d;
+        std::array<std::uint16_t, 4> beforeInk{};
+        const bool hasNativeInk = !erase && nativeCmyk && nativeCmyk->pixels &&
+                                  nativeCmyk->preview;
+        if (hasNativeInk)
+            beforeInk = nativeCmyk->pixels[static_cast<std::size_t>(y) * w + x];
         if (erase) {
             if (d.a <= 0.0f) return;
             d.a *= (1.0f - a);
@@ -97,14 +104,33 @@ bool flood_fill_host(const RGBAf* match, RGBAf* dst, std::uint32_t w,
             const float inv_a = 1.0f - a;
             const float out_a = a + d.a * inv_a;
             if (out_a <= 0.0f) return;
-            d.r = (a * color.r + d.r * d.a * inv_a) / out_a;
-            d.g = (a * color.g + d.g * d.a * inv_a) / out_a;
-            d.b = (a * color.b + d.b * d.a * inv_a) / out_a;
+            if (nativeCmyk && nativeCmyk->pixels && nativeCmyk->preview) {
+                auto& ink = nativeCmyk->pixels[std::size_t(y) * w + x];
+                float values[4];
+                for (int c = 0; c < 4; ++c) {
+                    const float mixed =
+                        (a * (nativeCmyk->source[c] / 65535.0f) +
+                         d.a * (ink[c] / 65535.0f) * inv_a) / out_a;
+                    ink[c] = static_cast<std::uint16_t>(std::clamp(
+                        std::lround(mixed * 65535.0f), 0L, 65535L));
+                    values[c] = ink[c] / 65535.0f;
+                }
+                float rgb[3];
+                nativeCmyk->preview->convert(values[0], values[1], values[2],
+                                             values[3], rgb);
+                d.r = rgb[0]; d.g = rgb[1]; d.b = rgb[2];
+            } else {
+                d.r = (a * color.r + d.r * d.a * inv_a) / out_a;
+                d.g = (a * color.g + d.g * d.a * inv_a) / out_a;
+                d.b = (a * color.b + d.b * d.a * inv_a) / out_a;
+            }
             d.a = out_a;
         }
         // Only count a pixel that actually moved, so a no-op fill does not
         // fabricate an undo step.
-        if (colour_distance(before, d) < 1e-6f) return;
+        const bool inkChanged = hasNativeInk &&
+            beforeInk != nativeCmyk->pixels[static_cast<std::size_t>(y) * w + x];
+        if (colour_distance(before, d) < 1e-6f && !inkChanged) return;
         if (!any) {
             rx0 = rx1 = x;
             ry0 = ry1 = y;

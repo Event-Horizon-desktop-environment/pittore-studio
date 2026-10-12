@@ -1165,6 +1165,7 @@ void assembleLayerRgba(PsdLayerFile& file, int colorMode,
     file.rgba.assign(static_cast<std::size_t>(n) * 4, 65535);
     const bool gray = colorMode == 1;
     if (colorMode == 4) {  // CMYK: C,M,Y,K in 0..3, alpha in 4 when present
+        file.cmyk.resize(static_cast<std::size_t>(n) * 4);
         for (std::uint64_t i = 0; i < n; ++i) {
             const std::uint32_t c = planes[0].size() > i ? planes[0][i] : 65535;
             const std::uint32_t m = planes[1].size() > i ? planes[1][i] : 65535;
@@ -1175,6 +1176,10 @@ void assembleLayerRgba(PsdLayerFile& file, int colorMode,
                                         : 65535;
             std::uint16_t rgb[3] = {0, 0, 0};
             convertCmykStored(cmyk, c, m, y, k, rgb);
+            file.cmyk[i * 4 + 0] = static_cast<std::uint16_t>(65535 - c);
+            file.cmyk[i * 4 + 1] = static_cast<std::uint16_t>(65535 - m);
+            file.cmyk[i * 4 + 2] = static_cast<std::uint16_t>(65535 - y);
+            file.cmyk[i * 4 + 3] = static_cast<std::uint16_t>(65535 - k);
             file.rgba[i * 4 + 0] = rgb[0];
             file.rgba[i * 4 + 1] = rgb[1];
             file.rgba[i * 4 + 2] = rgb[2];
@@ -1997,10 +2002,15 @@ std::optional<PsdImage> psdDecode(const std::vector<std::uint8_t>& data,
             const bool hasA = channels >= 5;
             const auto& C = planes[0], M = planes[1], Y = planes[2], K = planes[3];
             const auto& A = hasA ? planes[4] : planes[0];
+            img.cmyk.resize(static_cast<std::size_t>(q) * 4);
             for (std::uint64_t i = 0; i < q; ++i) {
                 const std::uint32_t cc = C[i], mm = M[i], yy = Y[i], kk = K[i];
                 std::uint16_t rgb[3] = {0, 0, 0};
                 convertCmykStored(&conv, cc, mm, yy, kk, rgb);
+                img.cmyk[i * 4 + 0] = static_cast<std::uint16_t>(65535 - cc);
+                img.cmyk[i * 4 + 1] = static_cast<std::uint16_t>(65535 - mm);
+                img.cmyk[i * 4 + 2] = static_cast<std::uint16_t>(65535 - yy);
+                img.cmyk[i * 4 + 3] = static_cast<std::uint16_t>(65535 - kk);
                 put(i, rgb[0], rgb[1], rgb[2], hasA ? A[i] : opaque);
             }
             break;
@@ -2483,11 +2493,24 @@ std::optional<std::vector<std::uint8_t>> psdEncodeLayers(
             if (cmyk) {
                 // Separate once per layer: appearance planes in, five
                 // interleaved C,M,Y,K,A planes out (inks inverted for the
-                // file), then emit each plane with its stride.
+                // file), then emit each plane with its stride. A fresh
+                // native separation is used directly when its dimensions
+                // match; otherwise appearance pixels are separated using
+                // the document profile.
                 std::vector<std::uint16_t> planed;
-                pittore::color::separateRgba16(
-                    l.rgba.data(), l.rgba.size() / 4, doc.icc.data(),
-                    doc.icc.size(), true, planed);
+                const std::size_t n = l.rgba.size() / 4;
+                if (l.cmyk.size() == n * 4) {
+                    planed.resize(n * 5);
+                    for (std::size_t i = 0; i < n; ++i) {
+                        for (int c = 0; c < 4; ++c)
+                            planed[i * 5 + c] = l.cmyk[i * 4 + c];
+                        planed[i * 5 + 4] = l.rgba[i * 4 + 3];
+                    }
+                } else {
+                    pittore::color::separateRgba16(
+                        l.rgba.data(), n, doc.icc.data(), doc.icc.size(),
+                        true, planed);
+                }
                 invertInkPlanes(planed, 5, 4);
                 for (int c = 0; c < 5; ++c)
                     r.blocks.push_back(pixBlock(

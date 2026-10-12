@@ -2727,10 +2727,37 @@ void chunkLooseRuns(QVector<SvgNode>& out, int& chunks) {
     out = std::move(res);
 }
 
+// Cooperative progress for threaded import: max-guarded stores keep
+// percent/phase monotonic across threads; the user callback (tests, and
+// cancel injection) runs synchronously on the worker.
+inline void reportImportProgress(SvgImportProgress* progress, int percent,
+                                 SvgImportPhase phase) {
+    if (!progress) return;
+    const int ph = static_cast<int>(phase);
+    int prev = progress->percent.load(std::memory_order_relaxed);
+    while (percent > prev &&
+           !progress->percent.compare_exchange_weak(
+               prev, percent, std::memory_order_relaxed)) {
+    }
+    int prevPh = progress->phase.load(std::memory_order_relaxed);
+    while (ph > prevPh && !progress->phase.compare_exchange_weak(
+                              prevPh, ph, std::memory_order_relaxed)) {
+    }
+    if (progress->onUpdate)
+        progress->onUpdate(progress->percent.load(std::memory_order_relaxed),
+                           progress->phase.load(std::memory_order_relaxed));
+}
+
+inline bool importCancelled(const SvgImportProgress* progress) {
+    return progress &&
+           progress->cancelled.load(std::memory_order_relaxed);
+}
+
 // Prints one subtree in panel order: the group header row, then each child
 // subtree from top-most (last painted) down.
-void appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res,
-                       int depth, SvgImportResult& out) {
+bool appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res,
+                       int depth, SvgImportResult& out,
+                       SvgImportProgress* progress) {
     std::vector<RasterJob> jobs;
     collectRasterJobs(children, res, depth, jobs);
 
@@ -2738,6 +2765,15 @@ void appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res
     // its QImage and QPainter, so this is safe; tiny imports stay inline to
     // avoid thread-pool overhead.
     const std::size_t total = jobs.size();
+    std::atomic<std::size_t> done{0};
+    const auto reportJob = [&] {
+        if (total == 0) return;
+        reportImportProgress(progress,
+                             40 + (int)(60.0 * (double)done.load(
+                                                  std::memory_order_relaxed) /
+                                        (double)total),
+                             SvgImportPhase::Raster);
+    };
     if (total >= 64) {
         unsigned hw = std::thread::hardware_concurrency();
         const std::size_t nthreads =
@@ -2748,6 +2784,7 @@ void appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res
         for (std::size_t t = 0; t < nthreads; ++t) {
             pool.emplace_back([&] {
                 while (true) {
+                    if (importCancelled(progress)) return;
                     const std::size_t i = next.fetch_add(1);
                     if (i >= total) return;
                     RasterJob& j = jobs[i];
@@ -2759,19 +2796,26 @@ void appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res
                         static_cast<void>(rasterizePart(*j.node, &j.pixels,
                                                         &j.offset, &j.art,
                                                         *j.res));
+                    ++done;
+                    reportJob();
                 }
             });
         }
         for (auto& t : pool) t.join();
     } else {
-        for (RasterJob& j : jobs)
+        for (RasterJob& j : jobs) {
+            if (importCancelled(progress)) return false;
             if (j.isFlattened)
                 static_cast<void>(rasterizeFlattened(*j.node, &j.pixels,
                                                      &j.offset, *j.res));
             else if (!j.isGroup)
                 static_cast<void>(rasterizePart(*j.node, &j.pixels, &j.offset,
                                                 &j.art, *j.res));
+            ++done;
+            reportJob();
+        }
     }
+    if (importCancelled(progress)) return false;
 
     std::shared_ptr<SvgResources> resShared;
     for (const RasterJob& j : jobs) {
@@ -2813,6 +2857,7 @@ void appendPanelLayers(const QVector<SvgNode>& children, const SvgResources& res
         }
         out.layers.append(std::move(layer));
     }
+    return true;
 }
 
 }  // namespace
@@ -2891,12 +2936,25 @@ void paintFlattenedLeaf(QPainter& docP, const SvgNode& n, const SvgResources& re
     docP.restore();
 }
 
-void flattenChildren(QXmlStreamReader& xml, const QTransform& parentTf,
+bool flattenChildren(QXmlStreamReader& xml, const QTransform& parentTf,
                      const PaintState& parentPaint, SvgResources& res,
-                     QPainter& docP, const QTransform& root);
-void flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
+                     QPainter& docP, const QTransform& root,
+                     SvgImportProgress* progress, qint64 streamTotal);
+bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
                     const PaintState& parentPaint, SvgResources& res,
-                    QPainter& docP, const QTransform& root) {
+                    QPainter& docP, const QTransform& root,
+                    SvgImportProgress* progress, qint64 streamTotal) {
+    // Per-shape cancel + progress: a 66-second flatten raster must stay
+    // abortable and visible. Position fraction of the streamed input keeps
+    // percent monotonic (max-guarded anyway).
+    if (importCancelled(progress)) return false;
+    if (progress && streamTotal > 0) {
+        const double frac =
+            (double)xml.characterOffset() / (double)streamTotal;
+        reportImportProgress(progress,
+                             40 + (int)(60.0 * qBound(0.0, frac, 1.0)),
+                             SvgImportPhase::Raster);
+    }
     const QString tag = xml.name().toString();
     const QXmlStreamAttributes a = xml.attributes();
     QTransform tf = parentTf;
@@ -2945,12 +3003,12 @@ void flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
             ps.fillEvenOdd = true;
     }
     if (tag == QLatin1String("g")) {
-        flattenChildren(xml, tf, ps, res, docP, root);
-        return;
+        return flattenChildren(xml, tf, ps, res, docP, root, progress,
+                               streamTotal);
     }
     if (tag == QLatin1String("defs")) {
         xml.skipCurrentElement();
-        return;
+        return true;
     }
     QPainterPath path;
     std::shared_ptr<QImage> image;
@@ -3001,24 +3059,24 @@ void flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
         if (!image || !(iw > 0.0) || !(ih > 0.0)) {
             if (!image) ++res.imagesDropped;
             xml.skipCurrentElement();
-            return;
+            return true;
         }
         path.addRect(QRectF(ix, iy, iw, ih));
         xml.skipCurrentElement();
     } else if (tag == QLatin1String("flowRoot")) {
         xml.skipCurrentElement();
-        return;
+        return true;
     } else {
         auto get = [&](QLatin1String k) -> QString { return readAttr(a, k); };
         if (!buildShapeGeometry(tag, get, path)) {
             xml.skipCurrentElement();
-            return;
+            return true;
         }
         // Resolved rule always wins over the toolkit default (see walker).
         path.setFillRule(ps.fillEvenOdd ? Qt::OddEvenFill : Qt::WindingFill);
         xml.skipCurrentElement();
     }
-    if (path.isEmpty()) return;
+    if (path.isEmpty()) return true;
     SvgNode n;
     n.group = false;
     n.name = tag;
@@ -3065,18 +3123,25 @@ void flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
         n.markerEnd.clear();
     }
     paintFlattenedLeaf(docP, n, res);
+    return true;
 }
 
-void flattenChildren(QXmlStreamReader& xml, const QTransform& parentTf,
+bool flattenChildren(QXmlStreamReader& xml, const QTransform& parentTf,
                      const PaintState& parentPaint, SvgResources& res,
-                     QPainter& docP, const QTransform& root) {
-    while (xml.readNextStartElement()) flattenElement(xml, parentTf, parentPaint, res, docP, root);
+                     QPainter& docP, const QTransform& root,
+                     SvgImportProgress* progress, qint64 streamTotal) {
+    while (xml.readNextStartElement()) {
+        if (!flattenElement(xml, parentTf, parentPaint, res, docP, root,
+                            progress, streamTotal))
+            return false;
+    }
+    return true;
 }
 
 bool svgPartsParseBudgeted(const QByteArray& xml, SvgSceneRoot* out, QString* error,
                            WalkBudget* budget, bool* overflowOut,
                            QByteArray* inOut, bool skipResWhenEmpty,
-                           SvgImportDiag* diag = nullptr) {
+                           SvgImportDiag* diag, SvgImportProgress* progress) {
     if (budget) budget->diag = diag;
     QElapsedTimer totalT;
     totalT.start();
@@ -3115,6 +3180,10 @@ bool svgPartsParseBudgeted(const QByteArray& xml, SvgSceneRoot* out, QString* er
                                                     : QStringLiteral("over-cap-skipped"));
     }
     if (budget) budget->needShapeRefs = in.contains("<textPath");
+    // Scans are fast (linear passes); the walk below is the slow part, so
+    // the parse phase reports once here rather than per scan.
+    reportImportProgress(progress, 10, SvgImportPhase::Parse);
+    if (importCancelled(progress)) return false;
     // First passes: gradients, then patterns/markers/clips/masks/filters/
     // meshes/shape-refs — every id reference resolves regardless of order.
     // Skip scans whose tags are absent: each scan is a full streaming pass
@@ -3162,6 +3231,8 @@ bool svgPartsParseBudgeted(const QByteArray& xml, SvgSceneRoot* out, QString* er
         walkT.start();
         walkChildren(r, QTransform(), ps, res, out->children, budget);
         if (diag) diag->walkMs = walkT.elapsed();
+        reportImportProgress(progress, 40, SvgImportPhase::Walk);
+        if (importCancelled(progress)) return false;
     }
     if (diag) {
         diag->gradDefs = res.grads.size();
@@ -3210,7 +3281,8 @@ bool svgPartsParseBudgeted(const QByteArray& xml, SvgSceneRoot* out, QString* er
 bool svgPartsParse(const QByteArray& xml, SvgSceneRoot* out, QString* error) {
     WalkBudget budget;
     bool overflow = false;
-    return svgPartsParseBudgeted(xml, out, error, &budget, &overflow, nullptr, true);
+    return svgPartsParseBudgeted(xml, out, error, &budget, &overflow, nullptr, true,
+                                 nullptr, nullptr);
 }
 
 bool svgFlattenSizeOk(int iw, int ih, qint64 pixelBudget) {
@@ -3226,7 +3298,7 @@ namespace {
 // files open in seconds instead of OOMing.
 bool svgFlattenImport(const QByteArray& in, SvgResources& res, int iw, int ih,
                       const QTransform& root, SvgImportResult* out, int* dpiOut,
-                      QString* error) {
+                      QString* error, SvgImportProgress* progress) {
     if (!svgFlattenSizeOk(iw, ih, svgRasterAreaBudget())) {
         if (error)
             *error = (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384)
@@ -3242,7 +3314,11 @@ bool svgFlattenImport(const QByteArray& in, SvgResources& res, int iw, int ih,
         QXmlStreamReader r(in);
         if (r.readNextStartElement() && r.name() == QLatin1String("svg")) {
             PaintState ps;
-            flattenChildren(r, QTransform(), ps, res, docP, root);
+            // False means cancelled mid-raster (not an error): leave *error
+            // alone so the caller reports a quiet abort, and skip assembly.
+            if (!flattenChildren(r, QTransform(), ps, res, docP, root,
+                                 progress, in.size()))
+                return false;
         }
         if (r.hasError()) {
             if (error) *error = QStringLiteral("SVG parse error: %1").arg(r.errorString());
@@ -3450,10 +3526,12 @@ void estimateImportRows(const QVector<SvgNode>& nodes, int& rows,
 
 bool runFlattenFallback(const QByteArray& in, SvgResources& res, int iw,
                         int ih, const QTransform& root, SvgImportResult* out,
-                        int* dpiOut, QString* error) {
+                        int* dpiOut, QString* error,
+                        SvgImportProgress* progress) {
     QElapsedTimer rasterT;
     rasterT.start();
-    const bool ok = svgFlattenImport(in, res, iw, ih, root, out, dpiOut, error);
+    const bool ok =
+        svgFlattenImport(in, res, iw, ih, root, out, dpiOut, error, progress);
     out->diag.rasterMs = rasterT.elapsed();
     out->diag.flattenFallback = true;
     out->diag.docW = iw;
@@ -3461,6 +3539,7 @@ bool runFlattenFallback(const QByteArray& in, SvgResources& res, int iw,
     if (ok) {
         out->diag.layersPixel = out->layers.size();
         if (dpiOut) out->diag.dpi = *dpiOut;
+        reportImportProgress(progress, 100, SvgImportPhase::Done);
     } else if (error) {
         out->diag.error = *error;
     }
@@ -3471,7 +3550,10 @@ bool runFlattenFallback(const QByteArray& in, SvgResources& res, int iw,
 }  // namespace
 
 bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
-                    QString* error) {
+                    QString* error, SvgImportProgress* progress) {
+    // Preset cancel (or a previous run's flag): abort before any work, with
+    // *error left empty — a quiet abort, never a warning box.
+    if (importCancelled(progress)) return false;
     SvgSceneRoot scene;
     WalkBudget budget;
     // Full imports are judged by retained weight, not leaf count: the live
@@ -3486,7 +3568,7 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
     {
         QString parseError;
         if (!svgPartsParseBudgeted(xml, &scene, &parseError, &budget, &overflow, &inStore,
-                                   true, &out->diag)) {
+                                   true, &out->diag, progress)) {
             if (!overflow) {
                 if (error) *error = parseError;
                 out->diag.error = parseError;
@@ -3531,7 +3613,7 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
         // report a real error if the flatten pass itself fails.
         out->diag.error.clear();
         return runFlattenFallback(inStore, scene.res, iw, ih, root, out,
-                                  dpiOut, error);
+                                  dpiOut, error, progress);
     }
     if (docW <= 0.0 || docH <= 0.0) {
         const QRectF b = contentBounds(scene.children);
@@ -3586,7 +3668,7 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
             if (rows > kMaxImportRows) out->diag.rowCap = true;
             if (area > areaBudget) out->diag.areaCap = true;
             return runFlattenFallback(inStore, scene.res, iw, ih, root, out,
-                                      dpiOut, error);
+                                      dpiOut, error, progress);
         }
     }
     countFlatRows(scene.children, out->diag);
@@ -3595,7 +3677,11 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
     if (dpiOut) *dpiOut = 96;
     QElapsedTimer rasterT;
     rasterT.start();
-    appendPanelLayers(scene.children, scene.res, 0, *out);
+    // Raster phase runs 40-100 in both rasterizers below; a cancel here
+    // abandons partial rows (quiet abort, *error untouched).
+    reportImportProgress(progress, 40, SvgImportPhase::Raster);
+    if (!appendPanelLayers(scene.children, scene.res, 0, *out, progress))
+        return false;
     out->diag.rasterMs = rasterT.elapsed();
     out->diag.docW = iw;
     out->diag.docH = ih;
@@ -3614,6 +3700,7 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
         logSvgImportReport(out->diag);
         return false;
     }
+    reportImportProgress(progress, 100, SvgImportPhase::Done);
     logSvgImportReport(out->diag);
     return true;
 }

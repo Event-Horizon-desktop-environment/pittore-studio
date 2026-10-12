@@ -14,6 +14,9 @@ struct PsdImage {
     int depth = 8;      // source bit depth: 8 or 16
     int colorMode = 0;  // original PSD color mode id (1 gray, 3 RGB, 4 CMYK, 9 Lab)
     std::vector<std::uint16_t> rgba;  // width*height*4, straight alpha
+    // Native C,M,Y,K device values for original CMYK data; inks are not
+    // complemented here. Empty for other source modes.
+    std::vector<std::uint16_t> cmyk;  // width*height*4
 };
 
 // Reads PSD composite (raw/RLE; 8/16-bit RGB, gray, CMYK, Lab). Nullopt on failure.
@@ -58,6 +61,9 @@ struct PsdLayerFile {
     std::string blend = "Normal";  // Pittore blend-mode name
     // width*height*4 RGBA16 (empty for groups).
     std::vector<std::uint16_t> rgba;
+    // Native C,M,Y,K device values (not complemented), retained when the
+    // source layer was decoded from a CMYK PSD/PSB.
+    std::vector<std::uint16_t> cmyk;
     // Original channel compression of the first pixel channel seen at
     // decode (0/1/2/3, -1 when authored here): untouched layers re-emit
     // with it (see preferZip), so opening and saving doesn't churn methods.

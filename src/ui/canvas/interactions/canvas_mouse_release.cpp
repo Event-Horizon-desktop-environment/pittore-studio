@@ -955,6 +955,9 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
         // Wash strokes fold their scratch buffer into the layer first, so
         // the committed snapshot holds the finished stroke.
         state_->bakeWashStroke();
+        // Finalize retained CMYK ink fingerprints before the post-stroke
+        // snapshot is captured; redo must restore valid native samples too.
+        state_->endStrokeState();
         if (strokePainted_)
             state_->commitUndoStep(toolName(tool),
                                    QString::fromUtf8(toolDef(tool).iconKey));
@@ -970,7 +973,6 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
             state_->endRemoveStroke(
                 !state_->option(tool, QStringLiteral("remove_after_stroke"))
                      .toBool());
-        state_->endStrokeState();
         strokeLastDoc_ = QPointF();
         event->accept();
         return;

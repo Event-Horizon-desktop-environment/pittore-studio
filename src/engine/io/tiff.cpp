@@ -111,6 +111,8 @@ struct BandedFormat {
     bool cmyk = false;
     bool whiteIsZero = false;
     bool assocAlpha = false;
+    std::uint16_t orientation = ORIENTATION_TOPLEFT;
+    std::uint16_t planar = PLANARCONFIG_CONTIG;
 };
 
 // Embedded ICC profile bytes for the open directory (used to make the CMYK
@@ -125,26 +127,40 @@ std::vector<std::uint8_t> iccOfOpenTiff(TIFF* tif) {
     return {};
 }
 
-bool readBandedFormat(TIFF* tif, BandedFormat& fmt) {
+bool readBandedFormat(TIFF* tif, BandedFormat& fmt,
+                      bool allowOrientation = false,
+                      bool allowSeparateCmyk = false) {
     std::uint16_t bits = 0, samples = 0, photo = 0, planar = 0, orient = 0;
     TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
     TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &samples);
     TIFFGetFieldDefaulted(tif, TIFFTAG_PHOTOMETRIC, &photo);
     TIFFGetFieldDefaulted(tif, TIFFTAG_PLANARCONFIG, &planar);
     TIFFGetFieldDefaulted(tif, TIFFTAG_ORIENTATION, &orient);
-    if (orient != 0 && orient != ORIENTATION_TOPLEFT) return false;
-    if (planar != PLANARCONFIG_CONTIG) return false;
+    std::uint16_t extraCount = 0;
+    std::uint16_t* extraTypes = nullptr;
+    TIFFGetFieldDefaulted(tif, TIFFTAG_EXTRASAMPLES, &extraCount, &extraTypes);
+    const bool hasAlpha = extraCount > 0 && extraTypes &&
+        (extraTypes[0] == EXTRASAMPLE_ASSOCALPHA ||
+         extraTypes[0] == EXTRASAMPLE_UNASSALPHA);
+    if (orient == 0) orient = ORIENTATION_TOPLEFT;
+    if (allowOrientation) {
+        if (orient < ORIENTATION_TOPLEFT || orient > ORIENTATION_LEFTBOT)
+            return false;
+    } else if (orient != ORIENTATION_TOPLEFT) {
+        return false;
+    }
+    if (planar != PLANARCONFIG_CONTIG &&
+        !(allowSeparateCmyk && photo == PHOTOMETRIC_SEPARATED &&
+          planar == PLANARCONFIG_SEPARATE))
+        return false;
     if (bits != 8 && bits != 16) return false;
     const bool gray = (photo == PHOTOMETRIC_MINISBLACK || photo == PHOTOMETRIC_MINISWHITE);
     const bool rgb = (photo == PHOTOMETRIC_RGB);
     const bool cmyk = (photo == PHOTOMETRIC_SEPARATED);
     if (!gray && !rgb && !cmyk) return false;
-    if (gray && (samples != 1 && samples != 2)) return false;
-    if (rgb && (samples != 3 && samples != 4)) return false;
-    if (cmyk && (samples != 4 && samples != 5)) return false;
-    std::uint16_t extraCount = 0;
-    std::uint16_t* extraTypes = nullptr;
-    TIFFGetFieldDefaulted(tif, TIFFTAG_EXTRASAMPLES, &extraCount, &extraTypes);
+    if (gray && (samples != 1 && !(samples == 2 && hasAlpha))) return false;
+    if (rgb && (samples != 3 && !(samples == 4 && hasAlpha))) return false;
+    if (cmyk && (samples != 4 && !(samples == 5 && hasAlpha))) return false;
     fmt.bits = bits;
     fmt.samples = samples;
     fmt.gray = gray;
@@ -152,6 +168,8 @@ bool readBandedFormat(TIFF* tif, BandedFormat& fmt) {
     fmt.whiteIsZero = gray && photo == PHOTOMETRIC_MINISWHITE;
     fmt.assocAlpha =
         extraCount > 0 && extraTypes && extraTypes[0] == EXTRASAMPLE_ASSOCALPHA;
+    fmt.orientation = orient;
+    fmt.planar = planar;
     return true;
 }
 
@@ -750,6 +768,131 @@ std::string tiffIccProfileData(const std::vector<std::uint8_t>& data) {
     const std::string out = iccFromOpenTiff(tif);
     TIFFClose(tif);
     return out;
+}
+
+bool tiffDecodeCmykFile(const char* path, std::uint32_t& width,
+                        std::uint32_t& height,
+                        std::vector<std::uint16_t>& cmyk,
+                        std::vector<std::uint8_t>* icc, int* bitDepth) {
+    if (!path || !*path) return false;
+    TIFF* tif = TIFFOpen(path, "r");
+    if (!tif) return false;
+    std::uint32_t w = 0, h = 0;
+    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+    BandedFormat fmt;
+    if (w == 0 || h == 0 || !readBandedFormat(tif, fmt, true, true) || !fmt.cmyk ||
+        static_cast<std::uint64_t>(w) * h > (1ull << 30)) {
+        TIFFClose(tif);
+        return false;
+    }
+    const std::size_t n = static_cast<std::size_t>(w) * h;
+    std::vector<std::uint16_t> decoded(n * 4);
+    const std::size_t sampleBytes = fmt.bits / 8;
+    const bool separate = fmt.planar == PLANARCONFIG_SEPARATE;
+    const bool tiled = TIFFIsTiled(tif) != 0;
+    auto storeSample = [&](std::uint32_t x, std::uint32_t y, int c,
+                           std::uint16_t value) {
+        std::uint32_t dx = x, dy = y;
+        switch (fmt.orientation) {
+            case ORIENTATION_TOPRIGHT: dx = w - 1 - x; break;
+            case ORIENTATION_BOTRIGHT:
+                dx = w - 1 - x; dy = h - 1 - y; break;
+            case ORIENTATION_BOTLEFT: dy = h - 1 - y; break;
+            case ORIENTATION_LEFTTOP: dx = y; dy = x; break;
+            case ORIENTATION_RIGHTTOP: dx = h - 1 - y; dy = x; break;
+            case ORIENTATION_RIGHTBOT:
+                dx = h - 1 - y; dy = w - 1 - x; break;
+            case ORIENTATION_LEFTBOT: dx = y; dy = w - 1 - x; break;
+            default: break;
+        }
+        const std::uint32_t outW =
+            fmt.orientation >= ORIENTATION_LEFTTOP ? h : w;
+        decoded[(static_cast<std::size_t>(dy) * outW + dx) * 4 + c] = value;
+    };
+    auto sampleAt = [&](const std::uint8_t* row,
+                        std::size_t sample) -> std::uint16_t {
+        if (fmt.bits == 8)
+            return static_cast<std::uint16_t>(row[sample] * 257u);
+        return reinterpret_cast<const std::uint16_t*>(row)[sample];
+    };
+    if (tiled) {
+        std::uint32_t tw = 0, th = 0;
+        TIFFGetField(tif, TIFFTAG_TILEWIDTH, &tw);
+        TIFFGetField(tif, TIFFTAG_TILELENGTH, &th);
+        const tmsize_t tileBytes = TIFFTileSize(tif);
+        const tmsize_t tileRowBytes = TIFFTileRowSize(tif);
+        if (!tw || !th || tileBytes <= 0 || tileRowBytes <= 0) {
+            TIFFClose(tif);
+            return false;
+        }
+        std::vector<std::uint8_t> tile(static_cast<std::size_t>(tileBytes));
+        std::vector<std::uint8_t> plane;
+        if (separate) plane.resize(static_cast<std::size_t>(tileBytes));
+        for (std::uint32_t ty = 0; ty < h; ty += th) {
+            for (std::uint32_t tx = 0; tx < w; tx += tw) {
+                for (std::uint16_t c = 0; c < (separate ? 4 : 1); ++c) {
+                    std::uint8_t* src = separate ? plane.data() : tile.data();
+                    if (TIFFReadTile(tif, src, tx, ty, 0, c) < 0) {
+                        TIFFClose(tif);
+                        return false;
+                    }
+                    const std::uint32_t rows = std::min(th, h - ty);
+                    const std::uint32_t cols = std::min(tw, w - tx);
+                    for (std::uint32_t iy = 0; iy < rows; ++iy) {
+                        const std::uint8_t* row = src +
+                            static_cast<std::size_t>(iy) * tileRowBytes;
+                        for (std::uint32_t ix = 0; ix < cols; ++ix) {
+                            const std::size_t base = static_cast<std::size_t>(ix) *
+                                (separate ? 1 : fmt.samples);
+                            const std::uint32_t x = tx + ix, y = ty + iy;
+                            if (separate) {
+                                storeSample(x, y, c, sampleAt(row, base));
+                            } else {
+                                for (int ink = 0; ink < 4; ++ink)
+                                    storeSample(x, y, ink,
+                                                sampleAt(row, base + ink));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        const std::size_t rowBytes = static_cast<std::size_t>(w) *
+            (separate ? 1 : fmt.samples) * sampleBytes;
+        std::vector<std::uint8_t> row(rowBytes);
+        std::vector<std::uint8_t> plane;
+        if (separate) plane.resize(rowBytes);
+        for (std::uint32_t y = 0; y < h; ++y) {
+            if (!separate && TIFFReadScanline(tif, row.data(), y, 0) < 0) {
+                TIFFClose(tif);
+                return false;
+            }
+            if (separate) {
+                for (std::uint16_t c = 0; c < 4; ++c) {
+                    if (TIFFReadScanline(tif, plane.data(), y, c) < 0) {
+                        TIFFClose(tif);
+                        return false;
+                    }
+                    for (std::uint32_t x = 0; x < w; ++x)
+                        storeSample(x, y, c, sampleAt(plane.data(), x));
+                }
+            } else {
+                for (std::uint32_t x = 0; x < w; ++x)
+                    for (int c = 0; c < 4; ++c)
+                        storeSample(x, y, c,
+                                    sampleAt(row.data(), x * fmt.samples + c));
+            }
+        }
+    }
+    if (icc) *icc = iccOfOpenTiff(tif);
+    if (bitDepth) *bitDepth = fmt.bits;
+    TIFFClose(tif);
+    width = fmt.orientation >= ORIENTATION_LEFTTOP ? h : w;
+    height = fmt.orientation >= ORIENTATION_LEFTTOP ? w : h;
+    cmyk = std::move(decoded);
+    return true;
 }
 
 std::string tiffIccProfileName(const char* path) {

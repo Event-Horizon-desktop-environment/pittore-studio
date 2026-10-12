@@ -11,6 +11,8 @@
 #include <QObject>
 #include <QString>
 
+#include <functional>
+
 class QLocalServer;
 class QLocalSocket;
 
@@ -30,6 +32,11 @@ class McpBridge : public QObject {
     // An explicit path overrides the well-known one (tests).
     bool start(const QString& socketPath = QString());
     QString socketPath() const;
+    // Headless command runner, wired by main.cpp to MainWindow. Kept as a
+    // callback so the bridge never includes window headers; empty until set.
+    void setCommandRunner(std::function<bool(const QString&)> runner) {
+        commandRunner_ = std::move(runner);
+    }
 
   private:
     void onNewConnection();
@@ -39,6 +46,7 @@ class McpBridge : public QObject {
     QJsonObject dispatch(const QJsonObject& req);
 
     AppState* state_ = nullptr;
+    std::function<bool(const QString&)> commandRunner_;
     QLocalServer* server_ = nullptr;
     QString socketPath_;
     QHash<QLocalSocket*, QByteArray> pending_;

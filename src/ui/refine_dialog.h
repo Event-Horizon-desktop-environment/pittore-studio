@@ -66,9 +66,12 @@ class RefineDialog final : public QDialog {
     // edge guide the snap solves against), stroke coords scaled by coordScale
     // into that space (proxyScale_ live, 1.0 at Apply).
     // rampPct is -100..100: positive hardens, negative grows the edge softly.
+    // shiftPx displaces the edge (- = contract, + = expand) after feather.
+    // smartRadius runs the snap at a narrow and a wide band, accepting the
+    // wide result only where the mask edge is soft (Photoshop-style).
     QImage runPipeline(const QImage& base, const QImage& comp, int bandPx,
-                       int smoothPasses, int featherPx, int rampPct,
-                       const QVector<Stroke>& strokes,
+                       int smoothPasses, int featherPx, int shiftPx, int rampPct,
+                       const QVector<Stroke>& strokes, bool smartRadius,
                        double coordScale) const;
     void refreshPreview();  // render preview_ from composite + refined crops
     QImage renderPreview() const;  // preview pixmap for the current view mode
@@ -101,6 +104,15 @@ class RefineDialog final : public QDialog {
     QImage compProxy_;
     QImage refinedProxy_;
     QVector<Stroke> strokes_;
+    // In-progress press footprint in proxy-crop coords + proxy radius, drawn
+    // as translucent discs so painting previews the real brush coverage
+    // (committed paint already shows in the matte itself). Cleared on release
+    // when the pipeline re-solves.
+    struct PressDot {
+        QPointF pos;
+        double radius = 1.0;
+    };
+    QVector<PressDot> pressDots_;
 
     RefineResult result_;
 
@@ -108,6 +120,7 @@ class RefineDialog final : public QDialog {
     QLabel* preview_ = nullptr;
     QComboBox* previewCombo_ = nullptr;   // Overlay/Black/White/B&W/Transparent
     QCheckBox* matteEdgesCheck_ = nullptr;
+    QCheckBox* smartRadiusCheck_ = nullptr;
     QPushButton* enhanceButton_ = nullptr;
     QLabel* enhanceStatus_ = nullptr;
     QSlider* borderSlider_ = nullptr;     // 0-100 %
@@ -116,6 +129,8 @@ class RefineDialog final : public QDialog {
     QLabel* smoothValue_ = nullptr;
     QSlider* featherSlider_ = nullptr;    // 0-100 px
     QLabel* featherValue_ = nullptr;
+    QSlider* shiftSlider_ = nullptr;       // -100..100 %
+    QLabel* shiftValue_ = nullptr;
     QSlider* rampSlider_ = nullptr;       // 0-100 %
     QLabel* rampValue_ = nullptr;
     QVector<QPushButton*> brushModes_;

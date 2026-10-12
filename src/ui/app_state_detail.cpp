@@ -912,9 +912,23 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
                 meta.psdRawBlocks.push_back(std::move(o));
             }
         }
-        if (li.pixels)
+        if (li.pixels) {
             meta.pixels = imageToStraightRgba64(*li.pixels);
-        else if (hasDeferredPixels(li))
+            if (li.cmykPixels &&
+                li.cmykPixels->valid() &&
+                li.cmykPixels->width == li.pixels->width() &&
+                li.cmykPixels->height == li.pixels->height() &&
+                li.cmykPixels->appearanceFingerprint ==
+                    pittore::color::CmykImage::fingerprint(*li.pixels) &&
+                li.cmykPixels->profileFingerprint ==
+                    pittore::color::CmykImage::fingerprint(
+                        reinterpret_cast<const std::uint8_t*>(data.iccProfile.constData()),
+                        static_cast<std::size_t>(data.iccProfile.size()))) {
+                meta.cmyk.reserve(li.cmykPixels->pixels.size() * 4);
+                for (const auto& px : li.cmykPixels->pixels)
+                    meta.cmyk.insert(meta.cmyk.end(), px.begin(), px.end());
+            }
+        } else if (hasDeferredPixels(li))
             meta.pixels = stashedToRgba64(li);  // packed, never realised
         data.layers.append(meta);
     }

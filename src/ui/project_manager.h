@@ -66,6 +66,7 @@ struct ProjectLayerMeta {
     // premultiplication ever happens). Null image = metadata-only layer
     // (text/shape/group/…).
     QImage pixels;
+    std::vector<std::uint16_t> cmyk;
     // v2 layer state: transparency lock, clip-to-below, group nesting depth,
     // and the user mask (straight RGBA64 opaque-grey coverage in R,
     // layer-native, mapped by maskOffset/maskScale like the live model).

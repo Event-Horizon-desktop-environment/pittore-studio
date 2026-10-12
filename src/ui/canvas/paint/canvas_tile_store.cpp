@@ -489,16 +489,11 @@ QImage bakedSourceImage(BakedTile::ImgCache* cache,
     return img;
 }
 
-// Tile-trace gate, file-local (not in log.h next to its siblings) so
-// enabling the trace never rebuilds the world: only this TU reads it.
-// Off unless PITTORE_TILE_TRACE=1.
+// Tile-trace gate: REMOVED — tile-plan verdict and bake lines always log
+// (deduped per document+revision by tileVerdictLogged, so repeats stay
+// bounded; bake storms still log per tile).
 bool tileTrace() {
-    static const bool on = [] {
-        const char* e = ::pittore::core::log::pittoreEnv(
-            "PITTORE_TILE_TRACE", "INFINITY_TILE_TRACE");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    return on;
+    return true;
 }
 
 // Region filter for the tile trace (PITTORE_TILE_TRACE_BOX=x,y,w,h in doc
@@ -623,6 +618,15 @@ void buildTilePlan(const DocumentItem& doc, const QRectF& vis,
             continue;
         }
         const LayerItem& l = doc.layers[k];
+        // Live wash overlay: stroke ink in this region lives in the
+        // composite snapshot only (layer pixels update at bake), so a
+        // simple/crisp tile baked from own pixels would serve pre-stroke
+        // paint and the stroke would flicker under ready tiles. Wash-
+        // covered layers fall through to the composite tier below.
+        QRectF washHit;
+        if (!doc.washOverlayDirty.isNull())
+            washHit = QRectF(doc.washOverlayDirty).intersected(
+                layerBounds(doc, l));
         if (l.kind != LayerItem::Kind::Pixel &&
             l.kind != LayerItem::Kind::Adjustment) {
             if (tracing && !traceFilter.isEmpty() &&
@@ -633,7 +637,8 @@ void buildTilePlan(const DocumentItem& doc, const QRectF& vis,
                     layerKindName(l.kind), l.name.toUtf8().constData());
             continue;
         }
-        if (l.kind == LayerItem::Kind::Pixel && simpleBlittable(l)) {
+        if (l.kind == LayerItem::Kind::Pixel && simpleBlittable(l) &&
+            washHit.isEmpty()) {
             // Own-bitmap blit: resampled to view density over crisp-baked
             // art below, so a translucent halo no longer buries sharp roads
             // under a doc-resolution snapshot. Footprint is the source's
@@ -659,7 +664,8 @@ void buildTilePlan(const DocumentItem& doc, const QRectF& vis,
                     box.x(), box.y(), l.name.toUtf8().constData());
             continue;
         }
-        if (l.kind == LayerItem::Kind::Pixel && crispReproducible(l)) {
+        if (l.kind == LayerItem::Kind::Pixel && crispReproducible(l) &&
+            washHit.isEmpty()) {
             const QRectF box = crispLayerBox(doc, k);
             if (!box.intersects(vis)) continue;
             BakedTile::Layer b;

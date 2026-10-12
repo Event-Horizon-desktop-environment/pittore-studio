@@ -16,9 +16,8 @@ namespace pittore::io {
 // block. Samples are straight big-endian 16-bit, like PSD.
 //
 // v2 adds per-layer masks, clipping, nesting depth and the transparency lock.
-// Files that use none of those still encode as v1, so old readers keep
-// working; v1 files decode with the v2 fields defaulted (no mask, unclipped,
-// indent 0, unlocked).
+// v5 adds optional per-layer native CMYK samples. Files that need no newer
+// fields retain the oldest compatible version; v1-v4 files decode unchanged.
 
 struct ProjectLayerFile {
     std::string name;
@@ -35,6 +34,8 @@ struct ProjectLayerFile {
     std::uint32_t width = 0;            // native pixel width; 0 = metadata-only
     std::uint32_t height = 0;
     std::vector<std::uint16_t> rgba;    // width*height*4 straight samples
+    // Optional native C,M,Y,K samples (width*height*4), in device ink space.
+    std::vector<std::uint16_t> cmyk;
 
     // Text: isText = rendered glyphs; hasTextSpec = live editable (fields below).
     bool isText = false;
@@ -126,6 +127,7 @@ struct ProjectLayerFile {
         std::vector<std::uint8_t> padding;
     };
     std::vector<PsdBlock> psdBlocks;
+    // Native CMYK samples use the v5 optional per-layer payload.
 };
 
 struct ProjectFileDoc {

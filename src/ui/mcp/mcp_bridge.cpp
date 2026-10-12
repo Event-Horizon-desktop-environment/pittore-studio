@@ -829,6 +829,77 @@ QJsonObject McpBridge::dispatch(const QJsonObject& req) {
                                       {"width", img.width()},
                                       {"height", img.height()}});
     }
+    if (cmd == QStringLiteral("run_command")) {
+        // Drive a headless-safe MainWindow command by id (auto_refine,
+        // select_subject, ...). Blocks the UI thread while it runs — AI
+        // commands take tens of seconds; the shim waits patiently.
+        if (!commandRunner_)
+            return errResp(id, QStringLiteral("bridge has no command runner"));
+        const QString cid = params.value("id").toString();
+        if (cid.isEmpty()) return errResp(id, QStringLiteral("need id"));
+        const bool ran = commandRunner_(cid);
+        if (!ran)
+            return errResp(id, state.statusHint().isEmpty()
+                                    ? QStringLiteral("command refused")
+                                    : state.statusHint());
+        return okResp(id, QJsonObject{{"ran", true},
+                                      {"statusHint", state.statusHint()}});
+    }
+    if (cmd == QStringLiteral("run_info")) {
+        // Last headless-capable AI run report (production get_state): what
+        // ran, whether it worked, model, timing, matte coverage, stages.
+        const AppState::AiRunReport& r = state.lastAiRun();
+        QJsonArray stages;
+        for (const QString& s : r.stages) stages.append(s);
+        return okResp(id, QJsonObject{{"command", r.command},
+                                      {"ok", r.ok},
+                                      {"message", r.message},
+                                      {"model", r.model},
+                                      {"milliseconds", r.milliseconds},
+                                      {"coverage", r.coverage},
+                                      {"stages", stages},
+                                      {"statusHint", state.statusHint()}});
+    }
+    if (cmd == QStringLiteral("export_layer_png")) {
+        // Active pixel layer's straight RGBA pixels to a PNG file (alpha
+        // preserved) — the diagnostic the composite cannot give: this is the
+        // matte as data, not as rendered.
+        DocumentItem* d = state.activeDocument();
+        LayerItem* layer = state.activeLayer();
+        if (!d || !layer || layer->kind != LayerItem::Kind::Pixel ||
+            !layer->pixels)
+            return errResp(id, QStringLiteral("no active pixel layer"));
+        const QString path = params.value("path").toString();
+        if (path.isEmpty()) return errResp(id, QStringLiteral("need path"));
+        const std::uint32_t pw = layer->pixels->width();
+        const std::uint32_t ph = layer->pixels->height();
+        QImage img(int(pw), int(ph), QImage::Format_RGBA8888);
+        for (std::uint32_t y = 0; y < ph; ++y) {
+            uchar* row = img.scanLine(int(y));
+            for (std::uint32_t x = 0; x < pw; ++x) {
+                const pittore::RGBAf& p =
+                    layer->pixels->at(int(x), int(y));
+                const auto enc = [](float v) {
+                    return static_cast<uchar>(
+                        std::clamp(int(v * 255 + 0.5f), 0, 255));
+                };
+                row[x * 4 + 0] = enc(p.r);
+                row[x * 4 + 1] = enc(p.g);
+                row[x * 4 + 2] = enc(p.b);
+                row[x * 4 + 3] = enc(p.a);
+            }
+        }
+        const int maxDim = params.value("maxDim").toInt(0);
+        if (maxDim > 0)
+            img = img.scaled(qBound(16, maxDim, 4096),
+                             qBound(16, maxDim, 4096), Qt::KeepAspectRatio,
+                             Qt::SmoothTransformation);
+        if (!img.save(path, "PNG"))
+            return errResp(id, QStringLiteral("could not write '%1'").arg(path));
+        return okResp(id, QJsonObject{{"path", path},
+                                      {"width", img.width()},
+                                      {"height", img.height()}});
+    }
     return errResp(id, QStringLiteral("unknown cmd '%1'").arg(cmd));
 }
 

@@ -7,6 +7,7 @@
 
 #include "engine/compute/blend.h"
 #include "engine/core/pixel.h"
+#include "engine/color/icc_convert.h"
 
 namespace pittore::compute {
 
@@ -29,7 +30,8 @@ bool replace_color_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
                             const RGBAf& replacement, float tolerance,
                             ReplaceMode mode, int limits, bool antialias,
                             float harmony, int* bbox,
-                            const SelectionMask* selection) {
+                            const SelectionMask* selection,
+                            NativeCmykPaint* nativeCmyk) {
     if (!dst || !targets || targetCount <= 0 || w == 0 || h == 0 ||
         radius <= 0.0f)
         return false;
@@ -295,6 +297,11 @@ bool replace_color_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
             RGBAf& d = dst[std::size_t(y) * w + x];
             if (d.a <= 0.0f) continue;
             const RGBAf before = d;
+            const std::size_t pixelIndex = std::size_t(y) * w + x;
+            std::array<std::uint16_t, 4> beforeInk{};
+            const bool hasNativeInk = nativeCmyk && nativeCmyk->pixels &&
+                nativeCmyk->preview && nativeCmyk->separation;
+            if (hasNativeInk) beforeInk = nativeCmyk->pixels[pixelIndex];
             // Plain transfer: the mode blend between this pixel and the
             // replacement colour.
             float nr, ng, nb;
@@ -336,10 +343,35 @@ bool replace_color_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
                 ng += (ag - ng) * harm;
                 nb += (ab - nb) * harm;
             }
-            d.r = before.r + (nr - before.r) * k;
-            d.g = before.g + (ng - before.g) * k;
-            d.b = before.b + (nb - before.b) * k;
-            if (replace_distance(before, d) < 1e-6f) continue;
+            bool inkChanged = false;
+            if (hasNativeInk) {
+                float resultInk[4];
+                nativeCmyk->separation->convert(
+                    std::clamp(nr, 0.0f, 1.0f),
+                    std::clamp(ng, 0.0f, 1.0f),
+                    std::clamp(nb, 0.0f, 1.0f), resultInk);
+                auto& ink = nativeCmyk->pixels[pixelIndex];
+                float previewInk[4];
+                for (int c = 0; c < 4; ++c) {
+                    const float oldValue = beforeInk[c] / 65535.0f;
+                    const float replacementValue = resultInk[c];
+                    const float mixed = oldValue +
+                        (replacementValue - oldValue) * k;
+                    ink[c] = static_cast<std::uint16_t>(std::clamp(
+                        std::lround(mixed * 65535.0f), 0L, 65535L));
+                    previewInk[c] = ink[c] / 65535.0f;
+                }
+                inkChanged = beforeInk != ink;
+                float rgb[3];
+                nativeCmyk->preview->convert(previewInk[0], previewInk[1],
+                                             previewInk[2], previewInk[3], rgb);
+                d.r = rgb[0]; d.g = rgb[1]; d.b = rgb[2];
+            } else {
+                d.r = before.r + (nr - before.r) * k;
+                d.g = before.g + (ng - before.g) * k;
+                d.b = before.b + (nb - before.b) * k;
+            }
+            if (replace_distance(before, d) < 1e-6f && !inkChanged) continue;
             if (!any) {
                 rx0 = rx1 = x;
                 ry0 = ry1 = y;

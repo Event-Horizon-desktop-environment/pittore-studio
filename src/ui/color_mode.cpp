@@ -26,7 +26,9 @@
 #include <QFileInfo>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
+#include <string>
 
 #include "engine/color/icc_convert.h"
 #include "engine/core/image.h"
@@ -65,6 +67,21 @@ bool usableCmyk(const QByteArray& bytes) {
     return probe.valid();
 }
 
+const pittore::color::SrgbToCmyk& separationFor(const QByteArray& profile) {
+    using Transform = pittore::color::SrgbToCmyk;
+    static thread_local std::string cachedKey;
+    static thread_local std::unique_ptr<Transform> cachedTransform;
+    const std::string key(profile.constData(),
+                          static_cast<std::size_t>(profile.size()));
+    if (!cachedTransform || cachedKey != key) {
+        cachedTransform = std::make_unique<Transform>(
+            reinterpret_cast<const std::uint8_t*>(profile.constData()),
+            static_cast<std::size_t>(profile.size()));
+        cachedKey = key;
+    }
+    return *cachedTransform;
+}
+
 }  // namespace
 
 QByteArray resolveCmykProfile(const DocumentItem& doc) {
@@ -96,6 +113,53 @@ QString defaultCmykProfilePath() {
         if (QFileInfo::exists(candidate)) return candidate;
     }
     return {};
+}
+
+void refreshLayerCmyk(const DocumentItem& doc, LayerItem& layer,
+                      const QRect& region) {
+    if (!doc.colorMode.startsWith(QStringLiteral("CMYK"),
+                                  Qt::CaseInsensitive) ||
+        !layer.pixels)
+        return;
+    const std::uint32_t w = layer.pixels->width();
+    const std::uint32_t h = layer.pixels->height();
+    const bool allocate = !layer.cmykPixels || !layer.cmykPixels->valid() ||
+                          layer.cmykPixels->width != w ||
+                          layer.cmykPixels->height != h;
+    if (allocate) {
+        layer.cmykPixels = std::make_shared<pittore::color::CmykImage>();
+        layer.cmykPixels->width = w;
+        layer.cmykPixels->height = h;
+        layer.cmykPixels->pixels.resize(layer.pixels->pixel_count());
+    } else if (layer.cmykPixels.use_count() > 1) {
+        layer.cmykPixels = std::make_shared<pittore::color::CmykImage>(
+            *layer.cmykPixels);
+    }
+    QRect r = allocate || region.isNull()
+                  ? QRect(0, 0, static_cast<int>(w), static_cast<int>(h))
+                  : region.intersected(QRect(0, 0, static_cast<int>(w),
+                                             static_cast<int>(h)));
+    if (r.isEmpty()) return;
+    const QByteArray profile = resolveCmykProfile(doc);
+    const pittore::color::SrgbToCmyk& sep = separationFor(profile);
+    const pittore::RGBAf* src = layer.pixels->data();
+    for (int y = r.top(); y < r.bottom() + 1; ++y) {
+        for (int x = r.left(); x < r.right() + 1; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * w + x;
+            float ink[4];
+            sep.convert(src[i].r, src[i].g, src[i].b, ink);
+            for (int c = 0; c < 4; ++c)
+                layer.cmykPixels->pixels[i][c] = static_cast<std::uint16_t>(
+                    std::clamp(std::lround(ink[c] * 65535.0f), 0L, 65535L));
+        }
+    }
+    layer.cmykSourceStamp = layer.sourceStamp;
+    layer.cmykPixels->appearanceFingerprint =
+        pittore::color::CmykImage::fingerprint(*layer.pixels);
+    layer.cmykPixels->profileFingerprint =
+        pittore::color::CmykImage::fingerprint(
+            reinterpret_cast<const std::uint8_t*>(profile.constData()),
+            static_cast<std::size_t>(profile.size()));
 }
 
 bool AppState::convertDocumentMode(ModeTarget target) {
@@ -190,6 +254,28 @@ bool AppState::convertDocumentMode(ModeTarget target) {
         const pittore::RGBAf* src = layer.pixels->data();
         pittore::RGBAf* out = dst->data();
         const std::size_t n = layer.pixels->pixel_count();
+        std::shared_ptr<pittore::color::CmykImage> native;
+        if (toCmyk && layer.cmykPixels &&
+            layer.cmykSourceStamp == layer.sourceStamp &&
+            layer.cmykPixels->valid() &&
+            layer.cmykPixels->width == layer.pixels->width() &&
+            layer.cmykPixels->height == layer.pixels->height() &&
+            d->iccProfile == icc) {
+            native = layer.cmykPixels;
+        } else if (toCmyk) {
+            native = std::make_shared<pittore::color::CmykImage>();
+            native->width = layer.pixels->width();
+            native->height = layer.pixels->height();
+            native->pixels.resize(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                float ink[4];
+                fwd->convert(src[i].r, src[i].g, src[i].b, ink);
+                for (int c = 0; c < 4; ++c)
+                    native->pixels[i][c] = static_cast<std::uint16_t>(
+                        std::clamp(std::lround(ink[c] * 65535.0f), 0L,
+                                   65535L));
+            }
+        }
         for (std::size_t i = 0; i < n; ++i) {
             pittore::RGBAf px = src[i];
             convRgb(px.r, px.g, px.b);
@@ -197,6 +283,21 @@ bool AppState::convertDocumentMode(ModeTarget target) {
         }
         layer.pixels = dst;
         ++layer.sourceStamp;
+        if (toCmyk) {
+            layer.cmykPixels = std::move(native);
+            layer.cmykSourceStamp = layer.sourceStamp;
+            if (layer.cmykPixels)
+                layer.cmykPixels->appearanceFingerprint =
+                    pittore::color::CmykImage::fingerprint(*layer.pixels);
+            if (layer.cmykPixels)
+                layer.cmykPixels->profileFingerprint =
+                    pittore::color::CmykImage::fingerprint(
+                        reinterpret_cast<const std::uint8_t*>(icc.constData()),
+                        static_cast<std::size_t>(icc.size()));
+        } else {
+            layer.cmykPixels.reset();
+            layer.cmykSourceStamp = 0;
+        }
         layer.thumbnail = QImage();
     }
     if (toCmyk || toGray) d->canvasPaper = convColor(d->canvasPaper);

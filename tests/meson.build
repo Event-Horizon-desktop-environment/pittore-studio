@@ -291,6 +291,16 @@ if has_qt6
     cpp_args : ['-fPIC'])
   test('svg-flatten', flatten_test)
 
+  # Threaded SVG import: task progress/cancel plumbing and GUI-thread
+  # delivery of the finished task. Headless, small synthetics only.
+  import_async_test = executable('test_svg_import_async',
+    ['test_svg_import_async.cpp'],
+    dependencies : [pittore_ui_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('svg-import-async', import_async_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen'})
+
   # Canvas display pipeline: mode governor, crisp plan/painter, view cache,
   # tile content entries. Headless (offscreen platform), AppState harness.
   display_test = executable('test_canvas_display',
@@ -577,6 +587,22 @@ if has_qt6
     dependencies : [pittore_ai_dep, qt6dep],
     include_directories : [src_inc],
     cpp_args : ['-fPIC'])
+
+  executable('refine_probe',
+    ['refine_probe.cpp', '../src/ui/selection_mask.cpp'],
+    dependencies : [qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+
+  # Guided vs plain mask upsampling (hair staircase): compares bilinear and
+  # joint-bilateral upsampling against a ground-truth matte.
+  if pittore_onnx_enabled
+    executable('upsample_probe',
+      ['upsample_probe.cpp'],
+      dependencies : [pittore_ai_dep],
+      include_directories : [src_inc],
+      cpp_args : ['-fPIC', '-DPITTORE_HAS_ONNX=1'])
+  endif
 
   # Own-format projects: single-file IFP round trip, scanProjects, and the
   # full AppState create → save → open cycle.
@@ -909,6 +935,9 @@ if has_qt6
     dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
     include_directories : [src_inc],
     cpp_args : ['-fPIC'])
+
+  # Refine Lab — live tuning harness over the real pipeline (not a test).
+  subdir('Refine-app')
 
 
 endif

@@ -96,6 +96,42 @@ QImage MainWindow::maskedSelectionCopy(QRectF* docRectOut) {
 }
 
 
+bool MainWindow::runHeadlessCommand(const QString& id) {
+    // Headless-safe: these never open dialogs, switch task context, or need
+    // a cursor position. Everything else (refine dialogs, generative fill,
+    // transforms, menus) is refused — a modal dialog with no one to click it
+    // would hang the session.
+    static const char* kAllowed[] = {
+        "auto_refine",
+        "select_subject",
+        "select-subject",
+        "remove_background",
+        "remove-background",
+        "enhance_edges",
+        "enhance-edges",
+        "deselect",
+        "invert_selection",
+        "invert-selection",
+    };
+    const QString norm = id.toLower().trimmed();
+    bool allowed = false;
+    for (const char* a : kAllowed) {
+        if (norm == QString::fromLatin1(a)) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed) {
+        state_->setStatusHint(
+            tr("'%1' is not available headlessly.").arg(id));
+        updateStatus();
+        return false;
+    }
+    runCommand(norm);
+    return true;
+}
+
+
 void MainWindow::runCommand(const QString& id) {
     DocumentItem* doc = state_->activeDocument();
 
@@ -140,6 +176,8 @@ void MainWindow::runCommand(const QString& id) {
     } else if (id == QLatin1String("enhance-edges") ||
                id == QLatin1String("enhance_edges")) {
         runEnhanceEdges();
+    } else if (id == QLatin1String("auto_refine")) {
+        runAutoRefine();
     } else if (id == QLatin1String("refine") || id == QLatin1String("refine-selection") ||
                id == QLatin1String("refine_selection")) {
         // Options-bar Refine buttons sit on manual selection tools: open the

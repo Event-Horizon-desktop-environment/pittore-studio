@@ -148,10 +148,13 @@ void test_outline() {
         const QImage mapped = selectionMaskFromLayerAlpha(
             alpha.data(), 5, 5, QPointF(0, 0), 2.0, 2.0, QSize(10, 10));
         CHECK(mapped.width() == 10 && mapped.height() == 10);
-        CHECK(mapped.constScanLine(2)[2] == 255);   // inside layer pixel (1,1)
-        CHECK(mapped.constScanLine(3)[3] == 255);
-        CHECK(mapped.constScanLine(4)[4] == 0);     // layer pixel (2,2): unset
-        CHECK(mapped.constScanLine(7)[9] == 128);   // soft value survives
+        // Bilinear (not nearest): doc pixels straddling the solid layer
+        // pixel share its coverage; well outside stays empty, and the soft
+        // value attenuates by covered area instead of surviving whole.
+        CHECK(mapped.constScanLine(2)[2] == 143);
+        CHECK(mapped.constScanLine(3)[3] == 143);
+        CHECK(mapped.constScanLine(4)[4] == 16);    // 6% bleed, not a step
+        CHECK(mapped.constScanLine(7)[9] == 96);
     }
 }
 

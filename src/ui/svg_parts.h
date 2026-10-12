@@ -21,6 +21,8 @@
 #include <QVector>
 #include <QXmlStreamReader>
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -207,11 +209,27 @@ struct SvgImportResult {
     SvgImportDiag diag;            // what the log verdict is built from
 };
 
+// Cooperative progress/cancel for threaded import. All state is atomic: the
+// worker writes, the progress dialog polls, and tests observe through
+// onUpdate (invoked synchronously on the worker whenever percent advances;
+// may set cancelled). Percent is monotonic by construction (phase-weighted,
+// max-guarded); cancelled aborts at the next shape/job/phase boundary, and
+// a cancelled import returns false with *error left EMPTY (a quiet abort,
+// never a warning box). Null progress means legacy synchronous behavior.
+enum class SvgImportPhase { Parse = 0, Walk = 1, Raster = 2, Done = 3 };
+
+struct SvgImportProgress {
+    std::atomic<int> percent{0};
+    std::atomic<int> phase{0};  // SvgImportPhase, as int for atomicity
+    std::atomic<bool> cancelled{false};
+    std::function<void(int percent, int phase)> onUpdate;
+};
+
 // Parses + rasterizes an SVG into separate piece layers (group row per <g>,
 // pixel layer per shape), sized from width/height/viewBox or the content.
 // Returns false on a hard failure; *dpiOut defaults to 96.
 bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
-                    QString* error);
+                    QString* error, SvgImportProgress* progress = nullptr);
 
 // Whether a wxh canvas fits the flatten fallback's single raster under the
 // given pixel budget: degenerate and over-wide (>16384) canvases never do.

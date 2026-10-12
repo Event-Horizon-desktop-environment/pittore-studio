@@ -28,10 +28,16 @@ struct AutoTip {
     float sharpness = 0.0f;  // threshold 0 off .. 1 full cut
     float soften = 0.0f;     // threshold edge width 0 hard .. 1 soft
     bool autoSpacing = false;  // quadratic stride for fine low-end control
+    // Size-law stride coefficient (0 = legacy quadratic above). When > 0,
+    // auto spacing strides coeff*(d<1 ? d : sqrt(d)) on the dab diameter,
+    // ignoring the percentage: dense sub-pixel strides for large soft tips.
+    float spacingAutoCoeff = 0.0f;
 
     void sanitize() {
         ratio = std::clamp(ratio, 0.01f, 1.0f);
         spacingPct = std::clamp(spacingPct, 1.0f, 200.0f);
+        if (!(spacingAutoCoeff >= 0.0f) || spacingAutoCoeff > 8.0f)
+            spacingAutoCoeff = 0.0f;
         hardness = std::clamp(hardness, 0.0f, 1.0f);
         spikes = std::clamp(spikes, 0, 12);
         fadeAniso = std::clamp(fadeAniso, -1.0f, 1.0f);
@@ -46,10 +52,23 @@ struct AutoTip {
     }
 };
 
+// Size-law stride on a dab diameter: linear below one pixel, square-root
+// above, scaled by coeff. Gives large soft tips dense sub-pixel strides
+// where a fixed percentage would dot.
+inline float auto_spacing_stride(float diameter, float coeff) {
+    const float d = diameter < 0.0f ? 0.0f : diameter;
+    const float base = d < 1.0f ? d : std::sqrt(d);
+    return coeff * base;
+}
+
 // Spacing in doc units for a dab of `radius` under this tip. Auto spacing
-// squares the percentage (15% -> 2.25%) for fine low-end control.
+// squares the percentage (15% -> 2.25%) for fine low-end control, unless a
+// size-law coefficient is set (see above).
 inline float tip_spacing(float radius, const AutoTip& tip) {
     const float diameter = 2.0f * std::max(0.0f, radius);
+    if (tip.autoSpacing && tip.spacingAutoCoeff > 0.0f)
+        return std::max(0.5f, auto_spacing_stride(diameter,
+                                                 tip.spacingAutoCoeff));
     float pct = std::clamp(tip.spacingPct, 1.0f, 200.0f);
     if (tip.autoSpacing) pct = std::clamp(pct * pct / 100.0f, 0.5f, 400.0f);
     return std::max(0.5f, diameter * pct / 100.0f);

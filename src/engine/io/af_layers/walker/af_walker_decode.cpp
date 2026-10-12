@@ -310,11 +310,133 @@ void Walker::applyCommon(const Node* node, AfLayer& layer) {
     // layer's transform as well as its own, exactly like a clipped child.
     // Several masks multiply, as the format stacks them; only visible ones join
     // unless none is visible, in which case the first still does.
-std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm) {
+std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
+                                    const IntRect* pad) {
+    using namespace pittore::vector;
+    std::vector<Node*> crops;
+    for (Node* ch : g.children(node, "AdCh")) {
+        const std::uint32_t k = g.typeTag(ch);
+        if (k == tag4("ShpN") || k == tag4("PCrv")) crops.push_back(ch);
+    }
+    if (crops.empty()) return {};
+    std::vector<Node*> used;
+    for (Node* c : crops)
+        if (boolOf(g, c, "Visi").value_or(true)) used.push_back(c);
+    if (used.empty()) used.push_back(crops[0]);
+    std::vector<AfMask> out;
+    for (Node* c : used) {
+        const std::uint32_t k = g.typeTag(c);
+        const Mat lctm = nodeCtm(c, base);
+        VectorPath path;
+        bool evenOdd = true;
+        std::string why;
+        if (k == tag4("ShpN")) {
+            Node* shpe = g.child(c, "Shpe");
+            const std::vector<double>* b = f64s(g, c, "ShpB");
+            if (!shpe || !b || b->size() < 4) {
+                why = "crop shape has no geometry";
+            } else {
+                const float x0 = static_cast<float>(std::min((*b)[0], (*b)[2]));
+                const float y0 = static_cast<float>(std::min((*b)[1], (*b)[3]));
+                const float x1 = static_cast<float>(std::max((*b)[0], (*b)[2]));
+                const float y1 = static_cast<float>(std::max((*b)[1], (*b)[3]));
+                if (auto geo = shapeGeometry(g, shpe, x0, y0, x1, y1)) {
+                    evenOdd = geo->subpaths.size() > 1;
+                    for (auto& sp : geo->subpaths)
+                        path.subpaths.push_back(SubPath{std::move(sp.first), sp.second});
+                    transformAnchors(path, lctm);
+                } else {
+                    why = "crop shape geometry is not supported";
+                }
+            }
+        } else if (auto p = pathFromCurveRecords(g, c, lctm)) {
+            path = std::move(*p);
+        } else {
+            why = "crop path has no curve data";
+        }
+        if (path.isEmpty()) {
+            std::string display = strOf(g, node, "Desc");
+            if (display.empty()) display = tagName(g.typeTag(node));
+            doc.log.push_back("skip crop of '" + display + "': " +
+                              (why.empty() ? "no geometry" : why));
+            ++doc.skippedLayers;
+            continue;
+        }
+        VectorShape shape;
+        shape.path = std::move(path);
+        shape.fill = {255, 255, 255, 255};
+        shape.evenOdd = evenOdd;
+        auto img = rasterizeShape(shape, nullptr);
+        if (!img) {
+            std::string display = strOf(g, node, "Desc");
+            if (display.empty()) display = tagName(g.typeTag(node));
+            doc.log.push_back("skip crop of '" + display + "': raster is empty or too large");
+            ++doc.skippedLayers;
+            continue;
+        }
+        AfMask mb;
+        mb.left = img->rect.left;
+        mb.top = img->rect.top;
+        mb.width = static_cast<std::uint32_t>(img->rect.width());
+        mb.height = static_cast<std::uint32_t>(img->rect.height());
+        mb.px.resize(static_cast<std::size_t>(mb.width) * mb.height);
+        for (std::size_t i = 0, n = mb.px.size(); i < n; ++i)
+            mb.px[i] = img->rgba[i * 4 + 3];
+        // Masks reveal outside their own rect, so widen to the photo's
+        // footprint: covered inside the frame, hidden past it.
+        if (pad && !pad->empty() && pad->width() > 0 && pad->height() > 0 &&
+            (pad->x0 != mb.left || pad->y0 != mb.top ||
+             pad->width() != static_cast<int>(mb.width) ||
+             pad->height() != static_cast<int>(mb.height))) {
+            const std::uint32_t pw = static_cast<std::uint32_t>(pad->width());
+            const std::uint32_t ph = static_cast<std::uint32_t>(pad->height());
+            if (std::uint64_t(pw) * ph <= (1ull << 28)) {
+                std::vector<std::uint8_t> full(static_cast<std::size_t>(pw) * ph, 0);
+                const int ox0 = std::max(mb.left, pad->x0);
+                const int oy0 = std::max(mb.top, pad->y0);
+                const int ox1 =
+                    std::min(mb.left + static_cast<int>(mb.width), pad->x1);
+                const int oy1 =
+                    std::min(mb.top + static_cast<int>(mb.height), pad->y1);
+                for (int y = oy0; y < oy1; ++y)
+                    std::memcpy(&full[static_cast<std::size_t>(y - pad->y0) * pw +
+                                       static_cast<std::size_t>(ox0 - pad->x0)],
+                                &mb.px[static_cast<std::size_t>(y - mb.top) * mb.width +
+                                        static_cast<std::size_t>(ox0 - mb.left)],
+                                static_cast<std::size_t>(ox1 - ox0));
+                mb.left = pad->x0;
+                mb.top = pad->y0;
+                mb.width = pw;
+                mb.height = ph;
+                mb.px = std::move(full);
+            }
+        }
+        out.push_back(std::move(mb));
+    }
+    if (!out.empty()) {
+        std::string display = strOf(g, node, "Desc");
+        if (display.empty()) display = tagName(g.typeTag(node));
+        doc.log.push_back("crop '" + display + "': " + std::to_string(out.size()) +
+                          (out.size() == 1 ? " mask" : " masks"));
+    }
+    return out;
+}
+
+std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm,
+                                     const IntRect* pad) {
     std::vector<Node*> masks;
     for (Node* ch : g.children(node, "AdCh"))
         if (g.typeTag(ch) == tag4("MRst")) masks.push_back(ch);
     std::vector<AfMask> out;
+    const Mat base = nodeCtm(node, ctm);
+    // Vector-crop shapes ("ShpN") and free paths ("PCrv") nested in a
+    // layer's `AdCh` list: Affinity's vector crop. Rebuild the outline
+    // exactly like the shape emitter (same geometry helpers), rasterize
+    // its coverage, and keep it as a live mask — the photo shows cropped
+    // but stays editable. Invisible crops are skipped unless every crop
+    // is invisible (same policy as raster masks). Runs before the raster
+    // early-out below so crops apply with no MRst present.
+    for (const AfMask& cm : cropMasks(node, base, pad)) out.push_back(cm);
     if (masks.empty()) return out;
     std::vector<Node*> used;
     if (masks.size() == 1) {
@@ -324,7 +446,6 @@ std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm) {
             if (boolOf(g, m, "Visi").value_or(true)) used.push_back(m);
         if (used.empty()) used.push_back(masks[0]);
     }
-    const Mat base = nodeCtm(node, ctm);
     for (Node* m : used) {
         Node* bitm = g.child(m, "Bitm");
         std::string why = "mask has no bitmap";
@@ -428,7 +549,7 @@ void Walker::finishImageLayer(const Node* node, const Mat& ctm, int indent, bool
     // Group masks stay live on their group rows; this layer keeps its own
     // masks live instead of baking any of them into alpha. Either kind of
     // mask means vector geometry alone no longer reproduces the layer.
-    layer.masks = placeMasks(node, ctm);
+    layer.masks = placeMasks(node, ctm, &rect);
     if (maskedAncestors > 0 || !layer.masks.empty()) pixelsAltered = true;
     if (art && !pixelsAltered) layer.art = std::move(art);
     doc.layers.push_back(std::move(layer));

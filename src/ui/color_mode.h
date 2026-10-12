@@ -6,11 +6,13 @@
 // to transformDocumentImage.
 
 #include <QByteArray>
+#include <QRect>
 #include <QString>
 
 namespace pittore::ui {
 
 struct DocumentItem;
+struct LayerItem;
 
 // Destination CMYK profile bytes for `doc`, in resolution order: the
 // document's own separation (imported CMYK source or an earlier
@@ -27,5 +29,11 @@ QByteArray resolveCmykProfile(const DocumentItem& doc);
 // resolver above this never returns the document's embedded bytes — those
 // have no path to show.)
 QString defaultCmykProfilePath();
+
+// Refresh retained device inks from the layer's current appearance pixels.
+// Used at RGB processing boundaries in a CMYK document. `region` is in the
+// layer's own pixels; an empty rect requests a complete refresh.
+void refreshLayerCmyk(const DocumentItem& doc, LayerItem& layer,
+                      const QRect& region = QRect());
 
 }  // namespace pittore::ui

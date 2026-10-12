@@ -12,8 +12,12 @@
 #include "engine/compute/brushes/history/history_dab.h"
 #include "engine/compute/brushes/stamp/stamp.h"
 #include "engine/compute/brushes/loaders/loaders.h"
+#include "engine/compute/brushes/loaders/pat.h"
+#include "engine/compute/brushes/mix/mix.h"
 #include "engine/compute/brushes/stamp/stamp.h"
 #include "engine/compute/factory.h"
+#include "engine/compute/blend.h"
+#include "engine/color/icc_convert.h"
 #include "engine/compute/layer_mask.h"
 #include "engine/compute/paint.h"
 #include "engine/core/pixel.h"
@@ -138,6 +142,114 @@ void test_brush() {
             CHECK_NEAR(via_backend[i].r, direct[i].r, 1e-6f);
             CHECK_NEAR(via_backend[i].a, direct[i].a, 1e-6f);
         }
+    }
+
+    // Native CMYK dab updates the retained inks and derives its RGB preview
+    // from those exact device samples.
+    {
+        RGBAf pixel{0.5f, 0.5f, 0.5f, 1.0f};
+        std::array<std::uint16_t, 4> inks{1000, 2000, 3000, 4000};
+        pittore::color::CmykToSrgb preview(nullptr, 0);
+        pittore::compute::NativeCmykPaint native;
+        native.pixels = &inks;
+        native.source = {50000, 10000, 20000, 30000};
+        native.preview = &preview;
+        pittore::compute::paint_dab_host(
+            &pixel, 1, 1, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f,
+            RGBAf{1, 0, 0, 1}, nullptr, nullptr, nullptr, nullptr, nullptr,
+            pittore::compute::dabmix::DabMixOp::Normal, &native);
+        CHECK(inks == native.source);
+        float expected[3];
+        preview.convert(inks[0] / 65535.0f, inks[1] / 65535.0f,
+                        inks[2] / 65535.0f, inks[3] / 65535.0f, expected);
+        CHECK_NEAR(pixel.r, expected[0], 1e-6f);
+        CHECK_NEAR(pixel.g, expected[1], 1e-6f);
+        CHECK_NEAR(pixel.b, expected[2], 1e-6f);
+        CHECK_NEAR(pixel.a, 1.0f, 1e-6f);
+    }
+    {
+        RGBAf pixel{0.5f, 0.5f, 0.5f, 1.0f};
+        std::array<std::uint16_t, 4> inks{1000, 2000, 3000, 4000};
+        pittore::color::CmykToSrgb preview(nullptr, 0);
+        pittore::compute::NativeCmykPaint native;
+        native.pixels = &inks;
+        native.source = {50000, 10000, 20000, 30000};
+        native.preview = &preview;
+        pittore::compute::StampTip stamp;
+        stamp.w = stamp.h = 1;
+        stamp.alpha = {1.0f};
+        pittore::compute::stamp_dab_host(
+            &pixel, 1, 1, 0.5f, 0.5f, 1.0f, stamp,
+            pittore::compute::StampMode::AlphaMask, 1.0f,
+            RGBAf{1, 0, 0, 1}, 0.0f, nullptr, nullptr, nullptr, nullptr,
+            0, 1, nullptr, nullptr, nullptr, 0.0f,
+            pittore::compute::dabmix::DabMixOp::Normal, nullptr, nullptr,
+            &native);
+        CHECK(inks == native.source);
+        float expected[3];
+        preview.convert(inks[0] / 65535.0f, inks[1] / 65535.0f,
+                        inks[2] / 65535.0f, inks[3] / 65535.0f, expected);
+        CHECK_NEAR(pixel.r, expected[0], 1e-6f);
+        CHECK_NEAR(pixel.g, expected[1], 1e-6f);
+        CHECK_NEAR(pixel.b, expected[2], 1e-6f);
+    }
+    {
+        const RGBAf match{0, 0, 0, 1};
+        RGBAf pixel{0, 0, 0, 1};
+        std::array<std::uint16_t, 4> inks{1000, 2000, 3000, 4000};
+        pittore::color::CmykToSrgb preview(nullptr, 0);
+        pittore::compute::NativeCmykPaint native;
+        native.pixels = &inks;
+        native.source = {50000, 10000, 20000, 30000};
+        native.preview = &preview;
+        int bbox[4]{};
+        CHECK(pittore::compute::flood_fill_host(
+            &match, &pixel, 1, 1, 0, 0, 0.0f, true, false, 1.0f,
+            RGBAf{0, 1, 0, 1}, false, bbox, nullptr, &native));
+        CHECK(inks == native.source);
+        float expected[3];
+        preview.convert(inks[0] / 65535.0f, inks[1] / 65535.0f,
+                        inks[2] / 65535.0f, inks[3] / 65535.0f, expected);
+        CHECK_NEAR(pixel.r, expected[0], 1e-6f);
+        CHECK_NEAR(pixel.g, expected[1], 1e-6f);
+        CHECK_NEAR(pixel.b, expected[2], 1e-6f);
+    }
+    {
+        RGBAf pixel{1, 0, 0, 1};
+        const RGBAf target{1, 0, 0, 1};
+        std::array<std::uint16_t, 4> inks{};
+        pittore::color::SrgbToCmyk separation(nullptr, 0);
+        pittore::color::CmykToSrgb preview(nullptr, 0);
+        float originalInk[4];
+        separation.convert(1, 0, 0, originalInk);
+        for (int c = 0; c < 4; ++c)
+            inks[c] = static_cast<std::uint16_t>(
+                std::lround(originalInk[c] * 65535.0f));
+        pittore::compute::NativeCmykPaint native;
+        native.pixels = &inks;
+        native.preview = &preview;
+        native.separation = &separation;
+        int bbox[4]{};
+        CHECK(pittore::compute::replace_color_dab_host(
+            &pixel, 1, 1, 0.5f, 0.5f, 1.0f, 1.0f, &target, 1,
+            RGBAf{0, 0, 1, 1}, 0.0f,
+            pittore::compute::ReplaceMode::Color, 0, false, 0.0f, bbox,
+            nullptr, &native));
+        float nr, ng, nb;
+        pittore::compute::blend::stitch_color(
+            pittore::compute::BlendMode::Color, 1, 0, 0, 0, 0, 1,
+            nr, ng, nb);
+        float expected[4];
+        separation.convert(nr, ng, nb, expected);
+        for (int c = 0; c < 4; ++c)
+            CHECK(std::abs(int(inks[c]) -
+                           int(std::lround(expected[c] * 65535.0f))) <= 1);
+        float expectedRgb[3];
+        preview.convert(inks[0] / 65535.0f, inks[1] / 65535.0f,
+                        inks[2] / 65535.0f, inks[3] / 65535.0f, expectedRgb);
+        CHECK_NEAR(pixel.r, expectedRgb[0], 1e-6f);
+        CHECK_NEAR(pixel.g, expectedRgb[1], 1e-6f);
+        CHECK_NEAR(pixel.b, expectedRgb[2], 1e-6f);
     }
 
     // 7. Incremental region composite == full composite (Normal).
@@ -347,6 +459,42 @@ void test_brush() {
         CHECK_NEAR(pittore::compute::tip_spacing(10.0f, tip), 0.5f, 1e-6f);
         tip.spacingPct = 100.0f;
         CHECK_NEAR(pittore::compute::tip_spacing(10.0f, tip), 20.0f, 1e-6f);
+    }
+
+    // 17c. Size-law auto spacing: stride follows the dab diameter
+    // (linear sub-pixel, square-root above), ignoring the percentage.
+    {
+        using pittore::compute::auto_spacing_stride;
+        CHECK_NEAR(auto_spacing_stride(64.0f, 0.12f), 0.96f, 1e-5f);
+        CHECK_NEAR(auto_spacing_stride(0.5f, 0.12f), 0.06f, 1e-6f);
+        CHECK_NEAR(auto_spacing_stride(-4.0f, 0.12f), 0.0f, 1e-6f);
+        CHECK_NEAR(auto_spacing_stride(1.0f, 1.0f), 1.0f, 1e-6f);
+        pittore::compute::AutoTip tip;
+        tip.autoSpacing = true;
+        tip.spacingAutoCoeff = 0.12f;
+        tip.spacingPct = 10.0f;  // ignored under the size law
+        CHECK_NEAR(pittore::compute::tip_spacing(32.0f, tip), 0.96f, 1e-5f);
+        CHECK_NEAR(pittore::compute::tip_spacing(2.0f, tip), 0.5f, 1e-6f);
+        tip.spacingAutoCoeff = 0.0f;  // back to legacy quadratic
+        tip.spacingPct = 10.0f;
+        CHECK_NEAR(pittore::compute::tip_spacing(32.0f, tip), 0.64f, 1e-5f);
+        tip.autoSpacing = false;  // plain percentage
+        CHECK_NEAR(pittore::compute::tip_spacing(32.0f, tip), 6.4f, 1e-5f);
+        tip.spacingAutoCoeff = 99.0f;  // sanitize clamps to off
+        tip.sanitize();
+        CHECK_NEAR(tip.spacingAutoCoeff, 0.0f, 1e-6f);
+        pittore::compute::StampTip stamp;
+        stamp.w = 4;
+        stamp.h = 4;
+        stamp.alpha.assign(16, 1.0f);
+        stamp.spacingAuto = true;
+        stamp.spacingAutoCoeff = 0.12f;
+        CHECK_NEAR(pittore::compute::stamp_spacing(32.0f, stamp), 0.96f,
+                   1e-5f);
+        stamp.spacingAuto = false;
+        stamp.spacingPct = 10.0f;
+        CHECK_NEAR(pittore::compute::stamp_spacing(32.0f, stamp), 6.4f,
+                   1e-5f);
     }
 
     // 17b. New tip shapes: defaults off preserve legacy; each feature
@@ -1026,6 +1174,106 @@ void test_brush() {
         }
     }
 
+    // 27d. Pigment-mix dabs: mean-family ops glaze instead of covering.
+    // Mid-grey ink over white separates every mode at full and half alpha.
+    {
+        using pittore::compute::dabmix::DabMixOp;
+        constexpr std::uint32_t w = 8, h = 8;
+        auto dab = [&](DabMixOp mix, float opacity) {
+            std::vector<RGBAf> img(w * h, RGBAf{1, 1, 1, 1});
+            pittore::compute::StampTip tip;
+            tip.w = 4;
+            tip.h = 4;
+            tip.alpha.assign(16, 1.0f);
+            pittore::compute::stamp_dab_host(
+                img.data(), w, h, 4.0f, 4.0f, 2.0f, tip,
+                pittore::compute::StampMode::AlphaMask, opacity,
+                RGBAf{0.5f, 0.5f, 0.5f, 1}, 0.0f, nullptr, nullptr, nullptr,
+                nullptr, 0, 1, nullptr, nullptr, nullptr, 0.0f, mix);
+            return img[4 * w + 4];
+        };
+        const RGBAf n = dab(DabMixOp::Normal, 1.0f);
+        CHECK_NEAR(n.r, 0.5f, 1e-5f);
+        const RGBAf g = dab(DabMixOp::GeometricMean, 1.0f);
+        CHECK_NEAR(g.r, 0.70710678f, 1e-5f);
+        const RGBAf p = dab(DabMixOp::Parallel, 1.0f);
+        CHECK_NEAR(p.r, 0.6666667f, 1e-5f);
+        const RGBAf al = dab(DabMixOp::Allanon, 1.0f);
+        CHECK_NEAR(al.r, 0.75f, 1e-5f);
+        CHECK_NEAR(dab(DabMixOp::Normal, 0.5f).r, 0.75f, 1e-5f);
+        CHECK_NEAR(dab(DabMixOp::GeometricMean, 0.5f).r, 0.8535534f, 1e-5f);
+        CHECK_NEAR(dab(DabMixOp::Parallel, 0.5f).r, 0.8333333f, 1e-5f);
+        CHECK_NEAR(dab(DabMixOp::Allanon, 0.5f).r, 0.875f, 1e-5f);
+        // Id mapping round-trips; unknown ids stay Normal.
+        CHECK(pittore::compute::dabmix::mix_from_id("geometric_mean") ==
+              DabMixOp::GeometricMean);
+        CHECK(pittore::compute::dabmix::mix_from_id("parallel") ==
+              DabMixOp::Parallel);
+        CHECK(pittore::compute::dabmix::mix_from_id("allanon") ==
+              DabMixOp::Allanon);
+        CHECK(pittore::compute::dabmix::mix_from_id("bogus") ==
+              DabMixOp::Normal);
+        CHECK(pittore::compute::dabmix::mix_from_id(nullptr) ==
+              DabMixOp::Normal);
+    }
+
+    // 27e. Pigment-mix on auto dabs: round + tip paths agree with the
+    // stamp path per mode, and defaulted args stay bit-exact Normal.
+    {
+        using pittore::compute::dabmix::DabMixOp;
+        constexpr std::uint32_t w = 8, h = 8;
+        auto dabRound = [](DabMixOp mix, float opacity) {
+            constexpr std::uint32_t W = 8, H = 8;
+            std::vector<RGBAf> img(W * H, RGBAf{1, 1, 1, 1});
+            pittore::compute::paint_dab_host(
+                img.data(), W, H, 4.0f, 4.0f, 2.0f, 1.0f, opacity,
+                RGBAf{0.5f, 0.5f, 0.5f, 1}, nullptr, nullptr, nullptr,
+                nullptr, nullptr, mix);
+            return img[4 * W + 4];
+        };
+        auto dabTip = [](DabMixOp mix, float opacity) {
+            constexpr std::uint32_t W = 8, H = 8;
+            std::vector<RGBAf> img(W * H, RGBAf{1, 1, 1, 1});
+            pittore::compute::AutoTip tip;  // round, ratio 1, angle 0
+            tip.hardness = 1.0f;
+            pittore::compute::paint_tip_dab_host(
+                img.data(), W, H, 4.0f, 4.0f, 2.0f, tip, opacity,
+                RGBAf{0.5f, 0.5f, 0.5f, 1}, nullptr, nullptr, nullptr,
+                nullptr, nullptr, mix);
+            return img[4 * W + 4];
+        };
+        using DabFn = RGBAf (*)(DabMixOp, float);
+        const DabFn fns[] = {dabRound, dabTip};
+        for (DabFn dab : fns) {
+            CHECK_NEAR(dab(DabMixOp::Normal, 1.0f).r, 0.5f, 1e-5f);
+            CHECK_NEAR(dab(DabMixOp::GeometricMean, 1.0f).r, 0.70710678f,
+                       1e-5f);
+            CHECK_NEAR(dab(DabMixOp::Parallel, 1.0f).r, 0.6666667f, 1e-5f);
+            CHECK_NEAR(dab(DabMixOp::Allanon, 1.0f).r, 0.75f, 1e-5f);
+            CHECK_NEAR(dab(DabMixOp::Normal, 0.5f).r, 0.75f, 1e-5f);
+            CHECK_NEAR(dab(DabMixOp::GeometricMean, 0.5f).r, 0.8535534f,
+                       1e-5f);
+        }
+        // Defaulted tail args reproduce explicit Normal bit-exactly.
+        {
+            std::vector<RGBAf> a(w * h, RGBAf{1, 1, 1, 1}),
+                b(w * h, RGBAf{1, 1, 1, 1});
+            pittore::compute::AutoTip tip;
+            tip.hardness = 1.0f;
+            pittore::compute::paint_tip_dab_host(
+                a.data(), w, h, 4.0f, 4.0f, 2.0f, tip, 1.0f,
+                RGBAf{0, 0, 1, 0});
+            pittore::compute::paint_tip_dab_host(
+                b.data(), w, h, 4.0f, 4.0f, 2.0f, tip, 1.0f,
+                RGBAf{0, 0, 1, 0}, nullptr, nullptr, nullptr, nullptr,
+                nullptr, DabMixOp::Normal);
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                CHECK_NEAR(a[i].r, b[i].r, 1e-7f);
+                CHECK_NEAR(a[i].a, b[i].a, 1e-7f);
+            }
+        }
+    }
+
     // 27c. Relief: lightness dabs deposit scaled by thickness, pile up to
     // a max, erase carves, smudge transports, null planes stay legacy.
     {
@@ -1551,6 +1799,197 @@ void test_brush() {
         for (const auto& p : draft)
             if (p.r == 0.0f || p.r == 1.0f) hasExact = true;
         CHECK(hasExact);
+    }
+
+    // 35b. PAT patterns decode: depth1 gray, depth2 gray+alpha (clear
+    // reads white); bad magic and truncation fail cleanly.
+    {
+        namespace bl = pittore::compute::brushload;
+        auto be32 = [](std::vector<std::uint8_t>& v, std::uint32_t x) {
+            v.push_back((x >> 24) & 0xff);
+            v.push_back((x >> 16) & 0xff);
+            v.push_back((x >> 8) & 0xff);
+            v.push_back(x & 0xff);
+        };
+        auto patFile = [&](std::uint32_t w, std::uint32_t h,
+                            std::uint32_t bpp, const char* name,
+                            std::vector<std::uint8_t> body) {
+            std::vector<std::uint8_t> f;
+            be32(f, std::uint32_t(24 + std::strlen(name) + 1));
+            be32(f, 1);
+            be32(f, w);
+            be32(f, h);
+            be32(f, bpp);
+            f.insert(f.end(), {'G', 'P', 'A', 'T'});
+            for (const char* c = name; *c; ++c) f.push_back(*c);
+            f.push_back(0);
+            f.insert(f.end(), body.begin(), body.end());
+            return f;
+        };
+        {
+            bl::PatImage img;
+            auto f = patFile(2, 2, 1, "g", {0, 128, 255, 64});
+            CHECK(bl::decode_pat(f.data(), f.size(), &img));
+            CHECK(img.valid());
+            CHECK(img.w == 2 && img.h == 2);
+            CHECK(img.name == "g");
+            CHECK_NEAR(img.gray[0], 0.0f, 1e-6f);
+            CHECK_NEAR(img.gray[1], 128.0f / 255.0f, 1e-6f);
+            CHECK_NEAR(img.gray[2], 1.0f, 1e-6f);
+            CHECK_NEAR(img.gray[3], 64.0f / 255.0f, 1e-6f);
+        }
+        {
+            bl::PatImage img;
+            auto f = patFile(1, 2, 2, "n", {0, 0, 0, 255});
+            CHECK(bl::decode_pat(f.data(), f.size(), &img));
+            CHECK_NEAR(img.gray[0], 1.0f, 1e-6f);  // clear reads white
+            CHECK_NEAR(img.gray[1], 0.0f, 1e-6f);
+        }
+        {
+            bl::PatImage img;
+            auto f = patFile(2, 2, 1, "g", {0, 128, 255, 64});
+            f[20] = 'X';
+            CHECK(!bl::decode_pat(f.data(), f.size(), &img));  // magic
+            CHECK(!bl::decode_pat(f.data(), 10, &img));        // truncated
+            std::vector<std::uint8_t> tiny{1, 2, 3};
+            CHECK(!bl::decode_pat(tiny.data(), tiny.size(), &img));
+            CHECK(!bl::decode_pat(nullptr, 0, &img));
+        }
+    }
+
+    // 35c. Paper grain: levels pipeline order (invert, subtractive
+    // brightness, mid-pivot contrast, neutral remap, cutoff window),
+    // tiling wrap, and strength-exact combines.
+    {
+        using pittore::compute::papergrain::GrainMode;
+        using pittore::compute::papergrain::PaperGrain;
+        float tile[4] = {0.0f, 0.5f, 1.0f, 0.25f};
+        auto grain = [&] {
+            PaperGrain g;
+            g.gray = tile;
+            g.w = 2;
+            g.h = 2;
+            g.strength = 1.0f;
+            g.scale = 1.0f;
+            g.neutral = 0.5f;
+            return g;
+        };
+        using pittore::compute::papergrain::grain_sample;
+        {
+            PaperGrain g = grain();
+            CHECK_NEAR(grain_sample(&g, 0.0f, 0.0f), 0.0f, 1e-6f);
+            CHECK_NEAR(grain_sample(&g, 1.0f, 0.0f), 0.5f, 1e-6f);
+            CHECK_NEAR(grain_sample(&g, 0.0f, 1.0f), 1.0f, 1e-6f);
+        }
+        {
+            PaperGrain g = grain();
+            g.brightness = 0.3f;  // subtractive: larger darkens
+            CHECK_NEAR(grain_sample(&g, 1.0f, 0.0f), 0.2f, 1e-5f);
+            CHECK_NEAR(grain_sample(&g, 0.0f, 1.0f), 0.7f, 1e-5f);
+        }
+        {
+            PaperGrain g = grain();
+            g.contrast = 2.0f;  // pivots mid gray
+            CHECK_NEAR(grain_sample(&g, 1.0f, 0.0f), 0.5f, 1e-5f);
+            CHECK_NEAR(grain_sample(&g, 0.0f, 1.0f), 1.0f, 1e-5f);
+            CHECK_NEAR(grain_sample(&g, 1.0f, 1.0f), 0.0f, 1e-5f);
+        }
+        {
+            PaperGrain g = grain();
+            g.neutral = 0.25f;
+            CHECK_NEAR(grain_sample(&g, 0.0f, 1.0f), 1.0f, 1e-5f);
+            float dark[4] = {0.125f, 0.125f, 0.125f, 0.125f};
+            g.gray = dark;
+            CHECK_NEAR(grain_sample(&g, 0.0f, 0.0f), 0.25f, 1e-5f);
+        }
+        {
+            PaperGrain g = grain();
+            g.cutoffPolicy = 1;
+            g.cutLo = 0.4f;
+            g.cutHi = 0.9f;
+            CHECK_NEAR(grain_sample(&g, 0.0f, 0.0f), 0.0f, 1e-6f);
+            CHECK_NEAR(grain_sample(&g, 1.0f, 0.0f), 0.5f, 1e-6f);
+            g.cutoffPolicy = 2;
+            CHECK_NEAR(grain_sample(&g, 0.0f, 0.0f), 1.0f, 1e-6f);
+        }
+        {
+            PaperGrain g = grain();
+            g.scale = 2.0f;  // tile repeats every 2 target px
+            CHECK_NEAR(grain_sample(&g, 2.0f, 0.0f), 0.5f, 1e-5f);
+            CHECK_NEAR(grain_sample(&g, 4.0f, 0.0f), 0.0f, 1e-5f);
+        }
+        using pittore::compute::papergrain::grain_combine;
+        CHECK_NEAR(grain_combine(0.8f, 0.5f, 0.0f, GrainMode::Subtract), 0.8f,
+                   1e-6f);
+        CHECK_NEAR(grain_combine(0.8f, 0.5f, 1.0f, GrainMode::Subtract), 0.3f,
+                   1e-6f);
+        CHECK_NEAR(grain_combine(0.8f, 0.5f, 1.0f, GrainMode::Darken), 0.5f,
+                   1e-6f);
+        CHECK_NEAR(grain_combine(0.2f, 0.5f, 1.0f, GrainMode::Darken), 0.2f,
+                   1e-6f);
+        CHECK_NEAR(grain_combine(0.8f, 0.5f, 1.0f, GrainMode::Multiply), 0.4f,
+                   1e-6f);
+        using pittore::compute::papergrain::grain_mult;
+        CHECK_NEAR(grain_mult(nullptr, 0.7f, 0.0f, 0.0f), 0.7f, 1e-6f);
+        PaperGrain off = grain();
+        off.strength = 0.0f;
+        CHECK(!off.valid());
+        CHECK_NEAR(grain_mult(&off, 0.7f, 0.0f, 0.0f), 0.7f, 1e-6f);
+    }
+
+    // 35d. Stamp sharpness threshold + grain integration through the dab.
+    {
+        // Threshold: at/above 1-strength goes opaque, below scales by
+        // softness; off stays identical.
+        using pittore::compute::StampSharp;
+        using pittore::compute::sharpen_coverage;
+        CHECK_NEAR(sharpen_coverage(0.5f, nullptr), 0.5f, 1e-6f);
+        StampSharp off;
+        CHECK_NEAR(sharpen_coverage(0.5f, &off), 0.5f, 1e-6f);
+        StampSharp th;
+        th.strength = 0.6f;
+        th.softness = 1.0f;
+        CHECK_NEAR(sharpen_coverage(0.9f, &th), 1.0f, 1e-6f);
+        CHECK_NEAR(sharpen_coverage(0.2f, &th), 0.2f, 1e-6f);
+        th.softness = 0.0f;
+        CHECK_NEAR(sharpen_coverage(0.2f, &th), 0.0f, 1e-6f);
+        CHECK_NEAR(sharpen_coverage(1.0f, &th), 1.0f, 1e-6f);
+        // Uniform half grain halves a solid stamp dab (black -> mid gray
+        // over white); no grain stays black.
+        constexpr std::uint32_t w = 8, h = 8;
+        auto dabGray = [&](const pittore::compute::papergrain::PaperGrain* kg) {
+            std::vector<RGBAf> img(w * h, RGBAf{1, 1, 1, 1});
+            pittore::compute::StampTip tip;
+            tip.w = 4;
+            tip.h = 4;
+            tip.alpha.assign(16, 1.0f);
+            pittore::compute::StampSharp noSharp;
+            pittore::compute::stamp_dab_host(
+                img.data(), w, h, 4.0f, 4.0f, 2.0f, tip,
+                pittore::compute::StampMode::AlphaMask, 1.0f,
+                RGBAf{0, 0, 0, 1}, 0.0f, nullptr, nullptr, nullptr, nullptr,
+                0, 1, nullptr, nullptr, nullptr, 0.0f,
+                pittore::compute::dabmix::DabMixOp::Normal, kg, &noSharp);
+            return img[4 * w + 4].r;
+        };
+        CHECK_NEAR(dabGray(nullptr), 0.0f, 1e-5f);
+        float half[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+        pittore::compute::papergrain::PaperGrain g;
+        g.gray = half;
+        g.w = 2;
+        g.h = 2;
+        g.strength = 1.0f;
+        g.scale = 1.0f;
+        g.neutral = 0.5f;
+        CHECK_NEAR(dabGray(&g), 0.5f, 1e-4f);
+        // Auto dab honors the same grain path.
+        {
+            std::vector<RGBAf> img(w * h, RGBAf{1, 1, 1, 1});
+            pittore::compute::paint_dab_host(
+                img.data(), w, h, 4.0f, 4.0f, 2.0f, 1.0f, 1.0f,
+                RGBAf{0, 0, 0, 1}, nullptr, nullptr, nullptr, nullptr, &g);
+            CHECK_NEAR(img[4 * w + 4].r, 0.5f, 1e-4f);
+        }
     }
 
     // Blur / Sharpen dab core: flat no-ops, edge response, gates, determinism.

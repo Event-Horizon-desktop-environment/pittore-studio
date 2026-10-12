@@ -1088,6 +1088,64 @@ int main(int argc, char** argv) {
         state.setOption(ToolId::Brush, QStringLiteral("brush_stamp"), QString());
     }
 
+    // 13c. Wash stamp stroke is visible live: with the wash painting mode
+    // the stamp dabs land in the scratch buffer and each flush folds them
+    // into the composite, so the canvas shows ink BEFORE release (no zoom
+    // needed). Regression test for "painted but canvas doesn't update".
+    {
+        state.addDocument(QStringLiteral("washstamp"), QSize(200, 150), 300);
+        state.setForeground(QColor(0, 0, 0));
+        state.setOption(ToolId::Brush, QStringLiteral("brush_size"), 20);
+        state.setOption(ToolId::Brush, QStringLiteral("opacity"), 100);
+        state.setOption(ToolId::Brush, QStringLiteral("flow"), 100);
+        state.setOption(ToolId::Brush, QStringLiteral("brush_stamp"),
+                        QStringLiteral("test-square"));
+        state.setOption(ToolId::Brush, QStringLiteral("brush_painting_mode"),
+                        QStringLiteral("wash"));
+        QWidget window;
+        auto* canvas = new CanvasView(&state, &window);
+        window.resize(800, 600);
+        canvas->setGeometry(0, 0, 800, 600);
+        window.show();
+        canvas->zoomToFit();
+        canvas->setZoom(4.0);
+        app.processEvents();
+        state.setActiveTool(ToolId::Brush);
+        app.processEvents();
+        const QPointF a = canvas->documentToView(QPointF(20, 75));
+        const QPointF b = canvas->documentToView(QPointF(80, 75));
+        const QPointF global = canvas->viewport()->mapToGlobal(a.toPoint());
+        auto ink = [&]() {
+            DocumentItem* dd = state.activeDocument();
+            int n = 0;
+            for (int y = 0; y < dd->composite.height(); ++y)
+                for (int x = 0; x < dd->composite.width(); ++x) {
+                    const QColor c = dd->composite.pixelColor(x, y);
+                    if (c.alpha() > 128 &&
+                        (c.red() + c.green() + c.blue()) / 3 < 128)
+                        ++n;
+                }
+            return n;
+        };
+        CHECK(ink() == 0);
+        QMouseEvent press(QEvent::MouseButtonPress, a, global,
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(canvas->viewport(), &press);
+        QMouseEvent move(QEvent::MouseMove, b, global, Qt::NoButton,
+                         Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(canvas->viewport(), &move);
+        app.processEvents();
+        CHECK(ink() > 100);  // live, before release
+        QMouseEvent release(QEvent::MouseButtonRelease, b, global,
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(canvas->viewport(), &release);
+        app.processEvents();
+        CHECK(ink() > 100);  // baked, still there
+        state.setOption(ToolId::Brush, QStringLiteral("brush_painting_mode"),
+                        QStringLiteral("wash"));
+        state.setOption(ToolId::Brush, QStringLiteral("brush_stamp"), QString());
+    }
+
     // 14. Preset-bundle import (synthetic in-memory .bundle): auto preset
     // maps tip params + gates, predefined GBR resolves to a stamp, smudge
     // flags approximate, unreferenced tips surface as loose tips.
@@ -1132,7 +1190,8 @@ int main(int argc, char** argv) {
                            "0.9</param>"
                            "<param type=\"string\" name=\"brush_definition\">"
                            "<![CDATA[<Brush type=\"auto_brush\" angle=\"1.5708\" "
-                           "spacing=\"0.2\" density=\"0.5\">"
+                           "spacing=\"0.2\" density=\"0.5\" "
+                           "useAutoSpacing=\"1\" autoSpacingCoeff=\"0.5\">"
                            "<MaskGenerator type=\"rect\" diameter=\"20\" ratio=\"0.5\" "
                            "hfade=\"0.3\" vfade=\"0.3\"/></Brush>]]></param>"
                            "</Preset>");
@@ -1286,12 +1345,15 @@ int main(int argc, char** argv) {
         CHECK(pa.hasTexture);
         CHECK_NEAR(pa.textureStrength, 90.0, 1e-9);
         CHECK(!pa.texturePng.isEmpty());
+        CHECK(pa.useAutoSpacing);
+        CHECK_NEAR(pa.autoSpacingCoeff, 0.5, 1e-9);
         const bi::BundlePreset& pb = r.presets[1];
         CHECK(pb.isStamp);
         CHECK(pb.stampExt == QStringLiteral("gbr"));
         CHECK(pb.stampMode == 0);
         CHECK_NEAR(pb.spacingPct, 15.0, 1e-9);
         CHECK(!pb.stampPng.isEmpty());
+        CHECK(!pb.useAutoSpacing);  // absent attrs stay legacy
         const bi::BundlePreset& pc = r.presets[2];
         CHECK(pc.isSmudge);
         CHECK_NEAR(pc.smudgeRate, 76.0, 1e-9);
@@ -1410,6 +1472,162 @@ int main(int argc, char** argv) {
         for (const QString& note : pb.approximateNotes)
             if (note.contains(QStringLiteral("tilt size"))) foundTiltNote = true;
         CHECK(foundTiltNote);
+    }
+
+    // 20c. Sensor lists prefer the pressure block: a leading fuzzy/speed
+    // entry must not pose as the pressure response (PW-03 size grabbed the
+    // fuzzy curve, flow grabbed speed). Mask combine follows the authored
+    // MaskingCompositeOp and the mask ratio honors MasterSizeCoeff.
+    {
+        namespace bi = pittore::ui::bundleimport;
+        auto kppPng = [](const QString& xml) {
+            QImage icon(32, 32, QImage::Format_ARGB32);
+            icon.fill(Qt::white);
+            icon.setText(QStringLiteral("preset"), xml);
+            QByteArray out;
+            QBuffer buf(&out);
+            buf.open(QIODevice::WriteOnly);
+            QImageWriter w(&buf, "PNG");
+            CHECK(w.write(icon));
+            return out;
+        };
+        const QMap<QString, QByteArray> noFiles;
+        bool ok = false;
+        const QString listXml =
+            QStringLiteral("<Preset paintopid=\"paintbrush\" name=\"ListT\">"
+                           "<resources></resources>"
+                           "<param type=\"internal\" name=\"SizeUseCurve\">true</param>"
+                           "<param type=\"string\" name=\"SizeSensor\">"
+                           "<![CDATA[<params id=\"sensorslist\">"
+                           "<ChildSensor id=\"fuzzy\">"
+                           "<curve>0,0.7;1,1;</curve></ChildSensor>"
+                           "<ChildSensor id=\"pressure\">"
+                           "<curve>0,0;1,1;</curve></ChildSensor>"
+                           "</params>]]></param>"
+                           "<param type=\"internal\" name=\"SizeValue\">1</param>"
+                           "<param type=\"internal\" name=\"FlowUseCurve\">true</param>"
+                           "<param type=\"string\" name=\"FlowSensor\">"
+                           "<![CDATA[<params id=\"sensorslist\">"
+                           "<ChildSensor id=\"speed\">"
+                           "<curve>0,1;0.04,0.11;</curve></ChildSensor>"
+                           "<ChildSensor id=\"pressure\">"
+                           "<curve>0,0.06;1,1;</curve></ChildSensor>"
+                           "</params>]]></param>"
+                           "<param type=\"internal\" name=\"FlowValue\">0.81</param>"
+                           "<param type=\"internal\" name=\"CompositeOp\">geometric_mean</param>"
+                           "<param type=\"string\" name=\"brush_definition\">"
+                           "<![CDATA[<Brush type=\"auto_brush\" angle=\"0\" "
+                           "spacing=\"0.1\">"
+                           "<MaskGenerator type=\"circle\" diameter=\"30\" ratio=\"1\" "
+                           "hfade=\"0.5\" vfade=\"0.5\"/></Brush>]]></param>"
+                           "</Preset>");
+        const bi::BundlePreset pl =
+            bi::parseKpp(QStringLiteral("l.png"), kppPng(listXml), noFiles,
+                         &ok);
+        CHECK(ok);
+        // Pressure blocks win over the leading fuzzy/speed entries.
+        CHECK(pl.sizeCurve == QStringLiteral("1|0,0;1,1;"));
+        CHECK(pl.flowCurve == QStringLiteral("0.81|0,0.06;1,1;"));
+        // Multiplicative companions become -100 drives on inverted curves
+        // (exact multiply emulation through the additive drive machinery).
+        CHECK(pl.drives.size() == 2);
+        CHECK(pl.drives[0].prop == "size");
+        CHECK(pl.drives[0].sensor ==
+              pittore::ui::sensordrive::Sensor::FuzzyDab);
+        CHECK_NEAR(pl.drives[0].amount, -100.0, 1e-9);
+        CHECK(pl.drives[0].curve == "1|0,0.3;1,0;");
+        CHECK(pl.drives[1].prop == "flow");
+        CHECK(pl.drives[1].sensor ==
+              pittore::ui::sensordrive::Sensor::Speed);
+        CHECK(pl.drives[1].curve == "1|0,0;0.04,0.89;");
+        // Pigment-mix composite id transfers verbatim.
+        CHECK(pl.compositeOp == QStringLiteral("geometric_mean"));
+        // Masked twin with subtract combine + master-size coeff: the
+        // authored combine lands on the kernel mode and the ratio honors
+        // the coefficient (mask scale 0.5 x coeff 2 = full dab).
+        QByteArray gbr;
+        {
+            auto be32 = [&](std::uint32_t x) {
+                gbr.append(char(x >> 24));
+                gbr.append(char(x >> 16));
+                gbr.append(char(x >> 8));
+                gbr.append(char(x));
+            };
+            be32(28 + 2);
+            be32(2);
+            be32(4);
+            be32(4);
+            be32(1);
+            gbr.append("GIMP", 4);
+            be32(25);
+            gbr.append("t", 1);
+            gbr.append('\0');
+            for (int i = 0; i < 16; ++i) gbr.append(char(200));
+        }
+        QMap<QString, QByteArray> maskFiles;
+        maskFiles.insert(QStringLiteral("brushes/m.gbr"), gbr);
+        const QString maskXml =
+            QStringLiteral("<Preset paintopid=\"paintbrush\" name=\"MaskC\">"
+                           "<resources></resources>"
+                           "<param type=\"internal\" name=\"MaskingBrush/Enabled\">true</param>"
+                           "<param type=\"internal\" name=\"MaskingBrush/MaskingCompositeOp\">subtract</param>"
+                           "<param type=\"internal\" name=\"MaskingBrush/UseMasterSize\">true</param>"
+                           "<param type=\"internal\" name=\"MaskingBrush/MasterSizeCoeff\">2</param>"
+                           "<param type=\"string\" name=\"MaskingBrush/Preset/brush_definition\">"
+                           "<![CDATA[<Brush type=\"gbr_brush\" filename=\"m.gbr\" "
+                           "angle=\"0\" spacing=\"0.4\" scale=\"0.5\"/>]]></param>"
+                           "<param type=\"string\" name=\"brush_definition\">"
+                           "<![CDATA[<Brush type=\"auto_brush\" angle=\"0\" "
+                           "spacing=\"0.1\">"
+                           "<MaskGenerator type=\"circle\" diameter=\"30\" ratio=\"1\" "
+                           "hfade=\"0.5\" vfade=\"0.5\"/></Brush>]]></param>"
+                           "</Preset>");
+        const bi::BundlePreset pm =
+            bi::parseKpp(QStringLiteral("m.png"), kppPng(maskXml), maskFiles,
+                         &ok);
+        CHECK(ok);
+        CHECK(pm.hasMask);
+        CHECK(pm.maskMode == 1);
+        CHECK_NEAR(pm.maskRatio, 100.0, 1e-9);
+    }
+
+    // 20d. Texture notes fire only on failure: enabled-but-unresolvable
+    // paper notes "not transferred"; resolved paper stays note-free.
+    {
+        namespace bi = pittore::ui::bundleimport;
+        auto kppPng = [](const QString& xml) {
+            QImage icon(32, 32, QImage::Format_ARGB32);
+            icon.fill(Qt::white);
+            icon.setText(QStringLiteral("preset"), xml);
+            QByteArray out;
+            QBuffer buf(&out);
+            buf.open(QIODevice::WriteOnly);
+            QImageWriter w(&buf, "PNG");
+            CHECK(w.write(icon));
+            return out;
+        };
+        const QMap<QString, QByteArray> noFiles;
+        bool ok = false;
+        const QString lonelyXml =
+            QStringLiteral("<Preset paintopid=\"paintbrush\" name=\"LonelyT\">"
+                           "<resources></resources>"
+                           "<param type=\"internal\" name=\"Texture/Pattern/Enabled\">true</param>"
+                           "<param type=\"string\" name=\"brush_definition\">"
+                           "<![CDATA[<Brush type=\"auto_brush\" angle=\"0\" "
+                           "spacing=\"0.1\">"
+                           "<MaskGenerator type=\"circle\" diameter=\"30\" ratio=\"1\" "
+                           "hfade=\"0.5\" vfade=\"0.5\"/></Brush>]]></param>"
+                           "</Preset>");
+        const bi::BundlePreset pl =
+            bi::parseKpp(QStringLiteral("l.png"), kppPng(lonelyXml), noFiles,
+                         &ok);
+        CHECK(ok);
+        CHECK(!pl.hasTexture);
+        bool noted = false;
+        for (const QString& n : pl.approximateNotes)
+            if (n.contains(QStringLiteral("paper texture not transferred")))
+                noted = true;
+        CHECK(noted);
     }
 
     // 21. Pressure-curve parse + evaluation.

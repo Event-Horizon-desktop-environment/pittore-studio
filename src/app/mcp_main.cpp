@@ -42,7 +42,10 @@ QJsonObject bridgeCall(const QString& cmd, const QJsonObject& params,
     QByteArray buf;
     for (;;) {
         if (buf.contains('\n')) break;
-        if (!sock.waitForReadyRead(10000)) {
+        // Long poll: AI commands (Auto Refine) block the UI thread for tens
+        // of seconds up to minutes with no socket traffic. The loop still
+        // exits promptly on the newline — or on disconnect/crash.
+        if (!sock.waitForReadyRead(300000)) {
             *error = QStringLiteral("bridge read timed out");
             return {};
         }
@@ -383,6 +386,41 @@ QJsonObject listTools() {
                          {"minimum", 16},
                          {"maximum", 4096}}}},
         {"path"}));
+    tools.append(toolDef(
+        "run_command",
+        "Run a headless-safe MainWindow command by id in the live app "
+        "(auto_refine, select_subject, remove_background, enhance_edges, "
+        "deselect, invert_selection; both hyphen and underscore forms "
+        "work). Blocks the UI while it runs — AI commands take tens of "
+        "seconds. Dialog-opening commands are refused, never hung on.",
+        QJsonObject{
+            {"id",
+             QJsonObject{{"type", QStringLiteral("string")},
+                         {"description",
+                          QStringLiteral("command id, e.g. auto_refine")}}}},
+        {"id"}));
+    tools.append(toolDef(
+        "run_info",
+        "Last headless-capable AI run report from the live app: command, "
+        "outcome, model, timing, matte coverage, stages that ran, plus the "
+        "current status hint. The production equivalent of the refine lab's "
+        "state — read this after run_command, never log files.",
+        QJsonObject{}));
+    tools.append(toolDef(
+        "export_layer_png",
+        "Write the active pixel layer's straight RGBA pixels (alpha "
+        "preserved) to a PNG file — the matte as data, which the composited "
+        "view cannot show. maxDim optionally downscales first.",
+        QJsonObject{
+            {"path",
+             QJsonObject{{"type", QStringLiteral("string")},
+                         {"description",
+                          QStringLiteral("destination file path")}}},
+            {"maxDim",
+             QJsonObject{{"type", QStringLiteral("integer")},
+                         {"minimum", 16},
+                         {"maximum", 4096}}}},
+        {"path"}));
     return QJsonObject{{"tools", tools}};
 }
 
@@ -461,6 +499,12 @@ QJsonObject handleCall(const QString& name, const QJsonObject& args,
         cmd = QStringLiteral("add_shape");
     else if (name == QStringLiteral("export_png"))
         cmd = QStringLiteral("export_png");
+    else if (name == QStringLiteral("run_command"))
+        cmd = QStringLiteral("run_command");
+    else if (name == QStringLiteral("run_info"))
+        cmd = QStringLiteral("run_info");
+    else if (name == QStringLiteral("export_layer_png"))
+        cmd = QStringLiteral("export_layer_png");
     else if (name == QStringLiteral("apply_filter"))
         cmd = QStringLiteral("apply_filter");
     else {

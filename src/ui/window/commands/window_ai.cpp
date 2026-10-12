@@ -476,4 +476,275 @@ void MainWindow::runEnhanceEdges() {
     updateStatus();
 }
 
+// ---------------------------------------------------------------------------
+// Auto Refine — the full tuned hair pipeline with no dialog.
+//
+// Trimap-free matting (BiRefNet HR, 2048) already outputs soft full-res
+// alpha, so the classical stages only polish: speckles, decay, smooth, snap,
+// fill-holes, then decontamination. No proxy round-trip, no guided re-refine
+// (which bleeds skirt on good seeds). Parameters match the hair-tuned preset:
+//   segment(HR) → speckles(32) → decay(32·fs/8) → smooth(2) → snap(smart,
+//   border 10%) → fill holes(16) → decontam(bg 32·fs)
+// (fs = full/proxy scale.) The model is forced to BiRefNet HR Matting —
+// never the Preferences pick — the only seed this good.
+// The result replaces the active layer's pixels in place — the same
+// "background removed" delivery as Remove Background, but with the tuned hair
+// matte and spill-suppressed edge colour. One undo step, no dialog, no
+// sliders — one click, deterministic output. Requires an identity-placed
+// full-canvas pixel layer (mask and guide pixels must coincide).
+// ---------------------------------------------------------------------------
+void MainWindow::runAutoRefine() {
+    DocumentItem* doc = state_->activeDocument();
+    LayerItem* layer = state_->activeLayer();
+    // Report for the MCP bridge (production get_state): stamped now so even
+    // refused runs leave a coherent record; overwritten on completion. The
+    // live status hint always carries the freshest human message.
+    AppState::AiRunReport autoReport;
+    autoReport.command = QStringLiteral("auto_refine");
+    state_->setLastAiRun(autoReport);
+    if (!doc || !layer) {
+        state_->setStatusHint(tr("Open a document and select a pixel layer first."));
+        return;
+    }
+    if (layer->kind != LayerItem::Kind::Pixel || !layer->pixels) {
+        state_->setStatusHint(tr("The active layer has no pixels to segment."));
+        updateStatus();
+        return;
+    }
+    // Auto Refine solves in document space against the composite guide while
+    // the matte lives in the layer's native pixels: the two coincide only for
+    // an identity-placed full-canvas layer (same bar the reference-mask path
+    // uses). Anything else would misalign mask and guide — refuse with a hint
+    // instead of solving against the wrong pixels.
+    {
+        const bool identity =
+            layer->offset.x() == 0 && layer->offset.y() == 0 &&
+            qAbs(layer->scaleX - 1.0) < 1e-6 &&
+            qAbs(layer->scaleY - 1.0) < 1e-6 &&
+            layer->pixels->width() ==
+                static_cast<std::uint32_t>(doc->size.width()) &&
+            layer->pixels->height() ==
+                static_cast<std::uint32_t>(doc->size.height());
+        if (!identity) {
+            state_->setStatusHint(tr("Auto Refine needs a full-canvas, "
+                                     "untransformed pixel layer."));
+            updateStatus();
+            return;
+        }
+    }
+    // Auto Refine always uses the HR-matting model the pipeline was tuned
+    // against — never the Preferences pick. The tuned radii/bands/levels only
+    // match this model's seed character; a coarser model produces a visibly
+    // rougher matte through the identical stages.
+    const AiModel* model = aiModel(QStringLiteral("birefnet-hr-matting"));
+    if (!model) {
+        state_->setStatusHint(tr("No AI model selected — pick one in Preferences ▸ AI."));
+        return;
+    }
+    switch (aiModelStore().state(model->id)) {
+        case AiModelState::Downloading:
+            state_->setStatusHint(tr("Model \"%1\" is still downloading…").arg(model->name));
+            return;
+        case AiModelState::Present:
+            break;
+        default:
+            state_->setStatusHint(tr("Model \"%1\" is not downloaded — open "
+                                     "Preferences ▸ AI and download it.")
+                                      .arg(model->name));
+            return;
+    }
+    autoReport.model = model->name;
+    if (!pittore::ai::onnx_available()) {
+        state_->setStatusHint(tr("This build links no ONNX Runtime."));
+        return;
+    }
+    const int pw = static_cast<int>(layer->pixels->width());
+    const int ph = static_cast<int>(layer->pixels->height());
+    const QString modelFile = aiModelPath(model->id);
+
+    bool cursorSet = false;
+    try {
+        const std::size_t packedBytes = std::size_t(pw) * ph * 4u;
+        std::vector<std::uint8_t> rgba(packedBytes);
+        auto* img = layer->pixels.get();
+        for (int y = 0; y < ph; ++y) {
+            for (int x = 0; x < pw; ++x) {
+                const pittore::RGBAf& p = img->at(x, y);
+                const auto enc = [](float v) {
+                    return static_cast<std::uint8_t>(
+                        std::clamp(int(v * 255 + 0.5f), 0, 255));
+                };
+                std::uint8_t* d = &rgba[(std::size_t(y) * pw + x) * 4u];
+                d[0] = enc(p.r);
+                d[1] = enc(p.g);
+                d[2] = enc(p.b);
+                d[3] = enc(p.a);
+            }
+        }
+
+        state_->setStatusHint(tr("Auto Refine: segmenting with %1…").arg(model->name));
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        cursorSet = true;
+        QApplication::processEvents();
+        const auto t0 = std::chrono::steady_clock::now();
+        pittore::ai::SegmentResult seg =
+            !model->decoderFile.isEmpty()
+                ? pittore::ai::segment_rgba8_pair(
+                      rgba.data(), pw, ph, modelFile.toStdString(),
+                      aiModelDecoderPath(model->id).toStdString(),
+                      model->inputSize)
+                : pittore::ai::segment_rgba8(rgba.data(), pw, ph,
+                                              modelFile.toStdString(),
+                                              model->inputSize);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        QApplication::restoreOverrideCursor();
+        cursorSet = false;
+        if (!seg.ok || seg.alpha.size() != std::size_t(pw) * std::size_t(ph)) {
+            autoReport.ok = false;
+            autoReport.message = tr("Auto Refine: segmentation failed.");
+            autoReport.milliseconds = ms;
+            state_->setLastAiRun(autoReport);
+            state_->setStatusHint(autoReport.message);
+            updateStatus();
+            return;
+        }
+        PITTORE_LOG("[ui][ai] auto-refine segment ok in %.0f ms (%dx%d)",
+                     ms, pw, ph);
+
+        // Full-res photo (straight layer RGB) and seed. The matting model
+        // already outputs soft full-res alpha, so the classical stages below
+        // only polish: no proxy round-trip, no guided re-refine (which bleeds
+        // a skirt around solid edges on good seeds). Spatial radii preserve
+        // the proxy-1400 tune relatively via fullScale.
+        QImage photoFull =
+            QImage(rgba.data(), pw, ph, QImage::Format_RGBA8888).copy();
+        if (photoFull.isNull()) {
+            state_->setStatusHint(tr("Auto Refine needs image content."));
+            updateStatus();
+            return;
+        }
+        const double fullScale =
+            std::max(1.0, double(std::max(pw, ph)) / 1400.0);
+        QImage mask(pw, ph, QImage::Format_Grayscale8);
+        for (int y = 0; y < ph; ++y)
+            for (int x = 0; x < pw; ++x)
+                mask.scanLine(y)[x] = static_cast<uchar>(
+                    std::clamp(int(seg.alpha[std::size_t(y) * pw + x] * 255.0f + 0.5f), 0, 255));
+
+        // Full-res colour guide for the edge solve.
+        QImage comp = photoFull.convertToFormat(QImage::Format_ARGB32);
+        if (comp.isNull()) {
+            state_->setStatusHint(tr("Auto Refine needs image content."));
+            updateStatus();
+            return;
+        }
+
+        // Tuned pipeline (matches the hair-tuned preset):
+        //   speckles 32 · decay support 32·fs/8 · smooth 2 · snap smart
+        //   border 10% · fill holes 16 · decontam bg 32·fs
+        // (fs = full/proxy scale below; counts and the border % are
+        // scale-invariant.)
+        mask = pittore::ui::selectionMaskRemoveSpeckles(mask, 32);
+        // Decay support preserves the tuned proxy-32 relatively; tex tol 8.0
+        // is the header default.
+        mask = pittore::ui::selectionMaskDecayWash(
+            mask, comp, std::clamp(int(32.0 * fullScale + 0.5), 8, 128), 8.0);
+        const QRect bbox = pittore::ui::selectionMaskBbox(mask);
+        if (bbox.isEmpty()) {
+            state_->setStatusHint(tr("Auto Refine found nothing to refine."));
+            updateStatus();
+            return;
+        }
+        // No AI re-refine: on a matting seed the guided growth only bleeds
+        // skirt around solid edges, so snap runs on the decayed seed directly.
+        // Smooth slider 6 → (6+1)/3 = 2 passes, the same mapping the dialog
+        // and the lab use (lab_params documents it next to the default).
+        mask = pittore::ui::selectionMaskSmooth(mask, 2);
+        // Snap band: border 10% of the smoothed mask's smaller side — the exact
+        // lab/dialog border formula (percent/100*m/2, clamped 1..256), same
+        // smart-radius branch (narrow = band/2, 3 passes) and the same plain
+        // snap below band 4.
+        {
+            const QRect box = pittore::ui::selectionMaskBbox(mask);
+            const int m = std::min(box.width(), box.height());
+            const int bandPx = std::clamp(int(10 / 100.0 * m / 2.0 + 0.5), 1, 256);
+            if (bandPx >= 4)
+                mask = pittore::ui::selectionMaskSnapSmart(
+                    comp, mask, std::max(1, bandPx / 2), bandPx, 3);
+            else if (bandPx > 0)
+                mask = pittore::ui::selectionMaskSnapToEdges(comp, mask, bandPx,
+                                                             3);
+        }
+        // Fill snap-punched texture holes (small enclosed islands only —
+        // real see-through gaps and the exterior survive).
+        mask = pittore::ui::selectionMaskFillSmallHoles(mask, 16);
+
+        // Straight full-res cutout from the photo + refined matte, then
+        // decontaminate. bgRadius preserves the tuned proxy-32 relatively
+        // (32 * fullScale — small images get exactly 32).
+        QImage straight = photoFull;
+        for (int y = 0; y < ph; ++y) {
+            const uchar* mrow = mask.constScanLine(y);
+            uchar* srow = straight.scanLine(y);
+            for (int x = 0; x < pw; ++x) srow[x * 4 + 3] = mrow[x];
+        }
+        const int bgFull = std::clamp(int(32.0 * fullScale + 0.5), 2, 128);
+        pittore::ui::decontaminateStraightRgba(straight, mask, bgFull, 1.0);
+
+        // Write the decontaminated straight-alpha cutout directly into the
+        // active layer — the same "background removed" delivery as Remove
+        // Background, but with the tuned hair matte and spill-suppressed edge
+        // colour instead of the raw model alpha. One undo step.
+        if (!state_->replaceActiveLayerRgba(
+                straight, tr("Auto Refine"), QStringLiteral("sparkle"))) {
+            autoReport.ok = false;
+            autoReport.message =
+                tr("Auto Refine needs an unlocked pixel layer.");
+            state_->setLastAiRun(autoReport);
+            state_->setStatusHint(autoReport.message);
+            updateStatus();
+            return;
+        }
+        const double totalMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        long covered = 0;
+        for (int y = 0; y < ph; ++y) {
+            const uchar* arow = straight.constScanLine(y);
+            for (int x = 0; x < pw; ++x)
+                if (arow[x * 4 + 3] > 127) ++covered;
+        }
+        autoReport.ok = true;
+        autoReport.message =
+            tr("Auto Refine complete (%1, %2 ms).")
+                .arg(model->name)
+                .arg(QString::number(totalMs, 'f', 0));
+        autoReport.milliseconds = totalMs;
+        autoReport.coverage =
+            double(covered) / double(std::size_t(pw) * ph);
+        autoReport.stages = QStringList{
+            QStringLiteral("segment"), QStringLiteral("remove-speckles"),
+            QStringLiteral("decay-wash"), QStringLiteral("smooth"),
+            QStringLiteral("snap-smart"), QStringLiteral("fill-small-holes"),
+            QStringLiteral("decontaminate"), QStringLiteral("write-layer")};
+        state_->setLastAiRun(autoReport);
+        state_->setStatusHint(autoReport.message);
+        PITTORE_LOG("[ui][ai] auto-refine done in %.0f ms model=%s",
+                     totalMs, model->id.toUtf8().constData());
+    } catch (const std::bad_alloc&) {
+        if (cursorSet) QApplication::restoreOverrideCursor();
+        state_->setStatusHint(tr("Not enough memory for Auto Refine."));
+    } catch (const std::exception& e) {
+        if (cursorSet) QApplication::restoreOverrideCursor();
+        state_->setStatusHint(tr("Auto Refine failed: %1").arg(QString::fromUtf8(e.what())));
+    } catch (...) {
+        if (cursorSet) QApplication::restoreOverrideCursor();
+        state_->setStatusHint(tr("Auto Refine failed with an unknown error."));
+    }
+    updateStatus();
+}
+
 }  // namespace pittore::ui

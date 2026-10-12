@@ -21,10 +21,12 @@
 #include <vector>
 
 #include "engine/compute/layer_mask.h"
+#include "engine/color/cmyk_image.h"
 #include "engine/core/log.h"
 #include "engine/io/psd.h"
 #include "test_util.h"
 #include "ui/app_state.h"
+#include "ui/color_mode.h"
 #include "ui/psd_export.h"
 
 using namespace pittore::ui;
@@ -284,6 +286,45 @@ static void test_layered_export() {
     }
 }
 
+static void test_cmyk_profile_guard() {
+    AppState state;
+    DocumentItem* doc =
+        state.addDocument(QStringLiteral("inks"), QSize(2, 1), 300);
+    CHECK(doc != nullptr);
+    if (!doc) return;
+    doc->colorMode = QStringLiteral("CMYK/16");
+    LayerItem layer = pixelLayer(QStringLiteral("inks"),
+                                 solidImg(2, 1, 0.2f, 0.4f, 0.6f));
+    auto inks = std::make_shared<pittore::color::CmykImage>();
+    inks->width = 2;
+    inks->height = 1;
+    inks->pixels = {{{1000, 2000, 3000, 4000}},
+                    {{5000, 6000, 7000, 8000}}};
+    inks->appearanceFingerprint =
+        pittore::color::CmykImage::fingerprint(*layer.pixels);
+    const QByteArray profile = resolveCmykProfile(*doc);
+    inks->profileFingerprint = pittore::color::CmykImage::fingerprint(
+        reinterpret_cast<const std::uint8_t*>(profile.constData()),
+        static_cast<std::size_t>(profile.size()));
+    layer.cmykPixels = inks;
+    doc->layers = {layer};
+
+    const auto preserved = buildLayeredPsdDoc(*doc);
+    CHECK_EQ(preserved.layers.size(), 1u);
+    if (preserved.layers.size() == 1)
+        CHECK(preserved.layers[0].cmyk ==
+              std::vector<std::uint16_t>({1000, 2000, 3000, 4000,
+                                          5000, 6000, 7000, 8000}));
+
+    layer.cmykPixels = std::make_shared<pittore::color::CmykImage>(*inks);
+    layer.cmykPixels->profileFingerprint ^= 0x1u;
+    doc->layers = {layer};
+    const auto separated = buildLayeredPsdDoc(*doc);
+    CHECK_EQ(separated.layers.size(), 1u);
+    if (separated.layers.size() == 1)
+        CHECK(separated.layers[0].cmyk.empty());
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const QString logDir =
@@ -292,6 +333,7 @@ int main(int argc, char** argv) {
     ::pittore::core::log::set_log_dir(logDir.toStdString().c_str());
     test_layered_export();
     test_rawblock_carry();
+    test_cmyk_profile_guard();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\\n", pittore_test::checks(),
                 pittore_test::failures());

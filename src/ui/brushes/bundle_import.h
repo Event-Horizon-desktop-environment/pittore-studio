@@ -60,6 +60,8 @@ struct BundlePreset {
     double angleDeg = 0.0;
     double roundness = 100.0;
     double spacingPct = 15.0;
+    bool useAutoSpacing = false;
+    double autoSpacingCoeff = 1.0;
     double opacity = 100.0;
     bool pressureSize = true;
     bool pressureOpacity = true;
@@ -89,6 +91,16 @@ struct BundlePreset {
     // Painting mode: "wash" (opacity caps the whole stroke) or "buildup"
     // (opacity works per dab). Missing or other values mean wash.
     QString paintingMode = QStringLiteral("wash");
+    // Dab composite op: "normal" or one of the pigment-mix ids
+    // ("geometric_mean", "parallel", "allanon"). Anything else paints as
+    // normal with an approximate note.
+    QString compositeOp = QStringLiteral("normal");
+    // Darken dynamics amount 0..100 (pressure-driven pull toward black).
+    double darkenPct = 0.0;
+    // Sharpness threshold + soft fringe 0..100 (static transfer; sensor
+    // response noted approximate when a curve drives them).
+    double sharpness = 0.0;
+    double softness = 0.0;
     int textureMode = 0;          // 0 multiply, 1 subtract, 2 darken
     int textureCutoffPolicy = 0;  // 0 off, else window the grain
     double textureCutLo = 0.0;    // 0..1
@@ -217,6 +229,111 @@ inline QString sensorCurveFor(const QString& sensorXml, const char* needle) {
     return QString();
 }
 
+// First non-empty curve inside a <ChildSensor id="...pressure..."> block
+// (case-insensitive). Sensor lists (<params id="sensorslist">) carry one
+// block per driver (fuzzy, speed, pressure, ...); the plain first-<curve>
+// scan would grab whichever driver comes first. Empty when no pressure
+// block carries a curve.
+inline QString pressureChildCurve(const QString& sensorXml) {
+    int at = 0;
+    while (true) {
+        const int tag =
+            sensorXml.indexOf(QLatin1String("<ChildSensor"), at,
+                              Qt::CaseInsensitive);
+        if (tag < 0) break;
+        const int headEnd = sensorXml.indexOf(QLatin1Char('>'), tag);
+        if (headEnd < 0) break;
+        const QString head =
+            sensorXml.mid(tag, headEnd - tag).toLower();
+        const int next =
+            sensorXml.indexOf(QLatin1String("<ChildSensor"), headEnd,
+                              Qt::CaseInsensitive);
+        const int scopeEnd = next >= 0 ? next : sensorXml.size();
+        if (head.contains(QLatin1String("pressure"))) {
+            const int curveAt = sensorXml.indexOf(QLatin1String("<curve>"),
+                                                  headEnd);
+            if (curveAt >= 0 && curveAt < scopeEnd) {
+                const int curveTo = sensorXml.indexOf(
+                    QLatin1String("</curve>"), curveAt);
+                if (curveTo >= 0 && curveTo < scopeEnd) {
+                    const QString pts =
+                        sensorXml.mid(curveAt + 7, curveTo - (curveAt + 7))
+                            .trimmed();
+                    if (!pts.isEmpty()) return pts;
+                }
+            }
+            return QString();
+        }
+        at = headEnd + 1;
+    }
+    return QString();
+}
+
+// All <ChildSensor id="..."> blocks in a sensor list, in order: id plus
+// the first <curve> body inside the block (empty when the block carries
+// no curve).
+inline std::vector<SensorEntry> childSensorEntries(
+    const QString& sensorXml) {
+    std::vector<SensorEntry> out;
+    int at = 0;
+    while (true) {
+        const int tag =
+            sensorXml.indexOf(QLatin1String("<ChildSensor"), at,
+                              Qt::CaseInsensitive);
+        if (tag < 0) break;
+        const int headEnd = sensorXml.indexOf(QLatin1Char('>'), tag);
+        if (headEnd < 0) break;
+        const QString head = sensorXml.mid(tag, headEnd - tag);
+        const int idAt = head.indexOf(QLatin1String("id=\""), 0,
+                                      Qt::CaseInsensitive);
+        QString id;
+        if (idAt >= 0) {
+            const int vs = idAt + 4;
+            const int ve = head.indexOf(QLatin1Char('"'), vs);
+            if (ve > vs) id = head.mid(vs, ve - vs);
+        }
+        SensorEntry e;
+        e.id = id;
+        const int next =
+            sensorXml.indexOf(QLatin1String("<ChildSensor"), headEnd,
+                              Qt::CaseInsensitive);
+        const int scopeEnd = next >= 0 ? next : sensorXml.size();
+        const int curveAt =
+            sensorXml.indexOf(QLatin1String("<curve>"), headEnd);
+        if (curveAt >= 0 && curveAt < scopeEnd) {
+            const int curveTo = sensorXml.indexOf(QLatin1String("</curve>"),
+                                                  curveAt);
+            if (curveTo >= 0 && curveTo < scopeEnd)
+                e.curve = sensorXml.mid(curveAt + 7, curveTo - (curveAt + 7))
+                              .trimmed();
+        }
+        out.push_back(e);
+        at = headEnd + 1;
+    }
+    return out;
+}
+
+// Invert authored curve points ("x,y;..." -> "x,1-y;...") so an additive
+// drive with amount -100 reproduces a multiplicative companion exactly
+// (factor = 1 - (1-S) = S). Items that do not parse are dropped, matching
+// the response parser.
+inline QString invertCurvePts(const QString& pts) {
+    QStringList items;
+    for (const QString& item :
+         pts.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+        const int comma = item.indexOf(QLatin1Char(','));
+        if (comma < 0) continue;
+        bool okY = false;
+        const double y = item.mid(comma + 1).toDouble(&okY);
+        if (!okY) continue;
+        items.push_back(item.left(comma + 1) +
+                        QString::number(std::clamp(1.0 - y, 0.0, 1.0), 'g',
+                                        12));
+    }
+    if (items.isEmpty()) return QString();
+    return items.join(QLatin1Char(';')) + QLatin1Char(';');
+}
+
 inline double normDeg(double deg) {
     while (deg > 180.0) deg -= 360.0;
     while (deg <= -180.0) deg += 360.0;
@@ -234,6 +351,8 @@ struct BrushTag {
     double angleRad = 0.0;
     double spacing = 0.1;  // fraction of diameter
     double scale = 1.0;
+    bool useAutoSpacing = false;
+    double autoSpacingCoeff = 1.0;
     bool colorAsMask = true;
     QString maskType;  // circle, rect
     double diameter = 64.0;
@@ -257,6 +376,14 @@ inline BrushTag firstBrushTag(const QString& brushDefXml) {
             tag.angleRad = attrDouble(a, "angle", 0.0);
             tag.spacing = attrDouble(a, "spacing", 0.1);
             tag.scale = attrDouble(a, "scale", 1.0);
+            const QString autoSpacing =
+                a.value(QLatin1String("useAutoSpacing")).toString();
+            tag.useAutoSpacing =
+                autoSpacing.compare(QLatin1String("1"),
+                                    Qt::CaseSensitive) == 0 ||
+                autoSpacing.compare(QLatin1String("true"),
+                                    Qt::CaseInsensitive) == 0;
+            tag.autoSpacingCoeff = attrDouble(a, "autoSpacingCoeff", 1.0);
             tag.colorAsMask =
                 a.value(QLatin1String("ColorAsMask")).toString() !=
                 QLatin1String("0");
@@ -409,13 +536,6 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
     }
     if (ok) *ok = !p.name.isEmpty();
     const auto resources = detail::resourceEntries(xml);
-    for (const auto& res : resources) {
-        if (res.type == QLatin1String("patterns")) {
-            p.approximateNotes.push_back(
-                QStringLiteral("paper texture not transferred"));
-            break;
-        }
-    }
     const bool eraser =
         params.value(QLatin1String("EraserMode")).trimmed() ==
         QLatin1String("true");
@@ -440,19 +560,24 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
     // Authored pressure curves: an enabled curve with an explicit sensor
     // curve transfers shape ("value|points"); anything else keeps the
     // built-in response. Explicit sensor curves win over shared defaults.
+    // Sensor lists carry one <ChildSensor> block per driver: prefer the
+    // pressure block so a leading fuzzy/speed entry cannot pose as the
+    // pressure response (PW-03 size grabbed fuzzy, flow grabbed speed).
     auto takeCurve = [&](const char* useKey, const char* sensorKey,
                          const char* valueKey) {
         if (params.value(QLatin1String(useKey)).trimmed() ==
             QLatin1String("false"))
             return QString();
         const QString sensor = params.value(QLatin1String(sensorKey));
-        const int at = sensor.indexOf(QLatin1String("<curve>"));
-        if (at < 0) return QString();
-        const int to = sensor.indexOf(QLatin1String("</curve>"), at);
-        if (to < 0) return QString();
-        const QString pts =
-            sensor.mid(at + 7, to - (at + 7)).trimmed();
-        if (pts.isEmpty()) return QString();
+        QString pts = detail::pressureChildCurve(sensor);
+        if (pts.isEmpty()) {
+            const int at = sensor.indexOf(QLatin1String("<curve>"));
+            if (at < 0) return QString();
+            const int to = sensor.indexOf(QLatin1String("</curve>"), at);
+            if (to < 0) return QString();
+            pts = sensor.mid(at + 7, to - (at + 7)).trimmed();
+            if (pts.isEmpty()) return QString();
+        }
         return QString::number(
                    detail::paramDouble(params, valueKey, 1.0)) +
                QLatin1Char('|') + pts;
@@ -461,6 +586,101 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
     p.opacityCurve =
         takeCurve("OpacityUseCurve", "OpacitySensor", "OpacityValue");
     p.flowCurve = takeCurve("FlowUseCurve", "FlowSensor", "FlowValue");
+
+    // Multiplicative sensor companions (curveMode 0): non-pressure drivers
+    // in a sensor list (fuzzy jitter, speed, ...) scale the main response
+    // in Krita. An additive drive with amount -100 and the inverted curve
+    // reproduces that product exactly (factor = 1 - (1-S) = S), so each
+    // companion becomes one drive on the same property. Other combine
+    // modes, and sensors with no engine counterpart, are noted + skipped.
+    // (Caveats, all noted at the mapping: fuzzy reads as per-dab uniform
+    // jitter, curves evaluate piecewise-linear, and speed normalizes to
+    // our 0..1 scale rather than Krita's.)
+    auto takeCompanions = [&](const char* useKey, const char* sensorKey,
+                              const char* modeKey, const char* sameKey,
+                              const char* commonKey, const char* prop) {
+        if (params.value(QLatin1String(useKey)).trimmed() ==
+            QLatin1String("false"))
+            return;
+        const QString sensor = params.value(QLatin1String(sensorKey));
+        const int mode = int(detail::paramDouble(params, modeKey, 0.0));
+        if (mode != 0) {
+            if (sensor.contains(QLatin1String("<ChildSensor")))
+                p.approximateNotes.push_back(
+                    QStringLiteral("curve combine mode %1 not transferred "
+                                   "for %2")
+                        .arg(mode)
+                        .arg(QString::fromUtf8(prop)));
+            return;
+        }
+        QString commonPts;
+        if (params.value(QLatin1String(sameKey)).trimmed() ==
+            QLatin1String("true")) {
+            const QString common =
+                params.value(QLatin1String(commonKey)).trimmed();
+            const int at = common.indexOf(QLatin1String("<curve>"));
+            if (at >= 0) {
+                const int to = common.indexOf(QLatin1String("</curve>"), at);
+                if (to > at)
+                    commonPts =
+                        common.mid(at + 7, to - (at + 7)).trimmed();
+            } else {
+                commonPts = common;
+            }
+        }
+        for (const detail::SensorEntry& e :
+             detail::childSensorEntries(sensor)) {
+            const QString low = e.id.toLower();
+            if (low.contains(QLatin1String("pressure"))) continue;  // main
+            const QString pts =
+                commonPts.isEmpty() ? e.curve : commonPts;
+            if (pts.isEmpty()) continue;
+            sensordrive::Sensor target = sensordrive::Sensor::Pressure;
+            bool known = true;
+            if (low.contains(QLatin1String("fuzzy")))
+                target = sensordrive::Sensor::FuzzyDab;
+            else if (low.contains(QLatin1String("speed")))
+                target = sensordrive::Sensor::Speed;
+            else if (low.contains(QLatin1String("tiltx")))
+                target = sensordrive::Sensor::TiltX;
+            else if (low.contains(QLatin1String("tilty")))
+                target = sensordrive::Sensor::TiltY;
+            else if (low.contains(QLatin1String("tilt")))
+                target = sensordrive::Sensor::Lean;
+            else if (low.contains(QLatin1String("tangent")))
+                target = sensordrive::Sensor::Tangential;
+            else if (low.contains(QLatin1String("rotation")) ||
+                     low.contains(QLatin1String("barrel")))
+                target = sensordrive::Sensor::Barrel;
+            else if (low.contains(QLatin1String("distance")))
+                target = sensordrive::Sensor::Distance;
+            else if (low.contains(QLatin1String("time")))
+                target = sensordrive::Sensor::Time;
+            else
+                known = false;
+            if (!known) {
+                p.approximateNotes.push_back(
+                    QStringLiteral("sensor '%1' not transferred for %2")
+                        .arg(e.id.isEmpty() ? QStringLiteral("?") : e.id)
+                        .arg(QString::fromUtf8(prop)));
+                continue;
+            }
+            const QString inv = detail::invertCurvePts(pts);
+            if (inv.isEmpty()) continue;
+            sensordrive::SensorDrive d;
+            d.prop = prop;
+            d.sensor = target;
+            d.amount = -100.0;
+            d.curve = (QStringLiteral("1|") + inv).toStdString();
+            p.drives.push_back(d);
+        }
+    };
+    takeCompanions("SizeUseCurve", "SizeSensor", "SizecurveMode",
+                   "SizeUseSameCurve", "SizecommonCurve", "size");
+    takeCompanions("OpacityUseCurve", "OpacitySensor", "OpacitycurveMode",
+                   "OpacityUseSameCurve", "OpacitycommonCurve", "opacity");
+    takeCompanions("FlowUseCurve", "FlowSensor", "FlowcurveMode",
+                   "FlowUseSameCurve", "FlowcommonCurve", "flow");
 
     // Tip rotation source. The sensor XML names the driver: a drawing-angle
     // entry aligns the tip with the stroke, pressure spins around the
@@ -553,15 +773,60 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
                 QStringLiteral("mirror dynamics not transferred"));
     }
 
-    // Per-brush blending other than normal paints here as normal.
+    // Per-brush blending: the pigment-mix ids transfer to our dab mix
+    // ops; anything else paints as normal with a note.
     {
         const QString cop =
             params.value(QLatin1String("CompositeOp")).trimmed().toLower();
-        if (!cop.isEmpty() && cop != QLatin1String("normal") &&
-            cop != QLatin1String("over") &&
-            cop != QLatin1String("svg:src-over"))
+        if (cop == QLatin1String("geometric_mean") ||
+            cop == QLatin1String("parallel") ||
+            cop == QLatin1String("allanon")) {
+            p.compositeOp = cop;
+        } else if (!cop.isEmpty() && cop != QLatin1String("normal") &&
+                   cop != QLatin1String("over") &&
+                   cop != QLatin1String("svg:src-over")) {
             p.approximateNotes.push_back(
                 QStringLiteral("blend mode not transferred: ") + cop);
+        }
+    }
+
+    // Darken dynamics: the authored strength scales a pressure-driven pull
+    // toward black (approximated by our brush_darken option).
+    {
+        const double dv =
+            detail::paramDouble(params, "DarkenValue", 0.0);
+        if (dv > 0.0 &&
+            params.value(QLatin1String("DarkenUseCurve")).trimmed() !=
+                QLatin1String("false")) {
+            p.darkenPct = std::clamp(dv * 100.0, 0.0, 100.0);
+            p.approximateNotes.push_back(
+                QStringLiteral("darken dynamics approximated"));
+        }
+    }
+
+    // Sharpness/softness: authored strengths transfer statically; an
+    // enabled sensor curve behind them is approximated.
+    {
+        const double sh =
+            detail::paramDouble(params, "SharpnessValue", 0.0);
+        const double so =
+            detail::paramDouble(params, "SoftnessValue", 0.0);
+        if (sh > 0.0 || so > 0.0) {
+            p.sharpness = std::clamp(sh * 100.0, 0.0, 100.0);
+            p.softness = std::clamp(so * 100.0, 0.0, 100.0);
+            const QString shS =
+                params.value(QLatin1String("SharpnessSensor"));
+            const QString soS =
+                params.value(QLatin1String("SoftnessSensor"));
+            if ((params.value(QLatin1String("SharpnessUseCurve")).trimmed() !=
+                     QLatin1String("false") &&
+                 shS.contains(QLatin1String("<curve>"))) ||
+                (params.value(QLatin1String("SoftnessUseCurve")).trimmed() !=
+                     QLatin1String("false") &&
+                 soS.contains(QLatin1String("<curve>"))))
+                p.approximateNotes.push_back(
+                    QStringLiteral("sharpness dynamics approximated"));
+        }
     }
 
     // Stylus lean + wheel: a sensor entry carrying an explicit curve
@@ -789,12 +1054,16 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
         } else if (!texFile.isEmpty()) {
             p.approximateNotes.push_back(QStringLiteral("pattern file missing: ") +
                                          texFile);
+        } else {
+            p.approximateNotes.push_back(
+                QStringLiteral("paper texture not transferred"));
         }
     }
 
     // Masked second tip: when the twin brush is on and its tip resolves to
-    // a bitmap, it becomes our per-dab mask (multiply combine). Anything
-    // else keeps the "not transferred" note.
+    // a bitmap, it becomes our per-dab mask (authored combine mode when the
+    // kernel has it, else multiply with a note). Anything else keeps the
+    // "not transferred" note.
     if (maskEnabled) {
         const detail::BrushTag maskTag = detail::firstBrushTag(
             params.value(QLatin1String("MaskingBrush/Preset/brush_definition")));
@@ -854,12 +1123,46 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
                     QStringLiteral("mask tip file missing: ") + wantFile);
             }
             if (p.hasMask) {
-                p.maskMode = 0;  // multiply; the file carries no combine mode
-                p.maskRatio = std::clamp(maskTag.scale * 100.0, 5.0, 400.0);
+                // Mask combine follows the authored MaskingCompositeOp when
+                // our kernel has the same mode (multiply/subtract/darken/
+                // lighten); anything else falls back to multiply with a note.
+                const QString cop =
+                    params.value(QLatin1String("MaskingBrush/MaskingCompositeOp"))
+                        .trimmed()
+                        .toLower();
+                if (cop == QLatin1String("subtract")) {
+                    p.maskMode = 1;
+                } else if (cop == QLatin1String("darken") ||
+                           cop == QLatin1String("darkest")) {
+                    p.maskMode = 2;
+                } else if (cop == QLatin1String("lighten") ||
+                           cop == QLatin1String("lightest")) {
+                    p.maskMode = 3;
+                } else {
+                    p.maskMode = 0;
+                    if (!cop.isEmpty() &&
+                        cop != QLatin1String("multiply"))
+                        p.approximateNotes.push_back(
+                            QStringLiteral("mask combine approximated as multiply: ") +
+                            cop);
+                }
+                // Mask size tracks the main dab: the Brush scale gives the
+                // base ratio, times MasterSizeCoeff when the preset follows
+                // the master size (documented relative sizing).
+                double ratio = maskTag.scale * 100.0;
+                if (params.value(QLatin1String("MaskingBrush/UseMasterSize"))
+                        .trimmed()
+                        .compare(QLatin1String("true"),
+                                 Qt::CaseInsensitive) == 0) {
+                    bool ok = false;
+                    const double coeff =
+                        params.value(QLatin1String("MaskingBrush/MasterSizeCoeff"))
+                            .toDouble(&ok);
+                    if (ok && coeff > 0.0 && coeff <= 10.0) ratio *= coeff;
+                }
+                p.maskRatio = std::clamp(ratio, 5.0, 400.0);
                 p.maskAngle = detail::normDeg(maskTag.angleRad * 180.0 /
                                               3.141592653589793);
-                p.approximateNotes.push_back(
-                    QStringLiteral("mask combine approximated as multiply"));
             }
         }
     }
@@ -872,6 +1175,9 @@ inline BundlePreset parseKpp(const QString& kppName, const QByteArray& kppBytes,
 
     p.spacingPct =
         std::clamp(brush.spacing * 100.0, 1.0, 200.0);
+    p.useAutoSpacing = brush.useAutoSpacing;
+    p.autoSpacingCoeff =
+        std::clamp(brush.autoSpacingCoeff, 0.05, 8.0);
     p.angleDeg = detail::normDeg(brush.angleRad * 180.0 / 3.141592653589793);
 
     const bool predefined = brush.type != QLatin1String("auto_brush");

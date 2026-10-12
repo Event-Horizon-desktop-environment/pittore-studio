@@ -7,14 +7,19 @@
 //                  pivot (dark tip shades FG, bright tip tints it).
 //   GradientMap  – tip lightness blends background to foreground.
 // Stored coverage is a paint mask: 1 = full paint.
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
 #include "engine/compute/brushes/selection_mask/selection_mask.h"
 #include "engine/compute/brushes/stamp/pattern.h"
 #include "engine/compute/brushes/mask/mask.h"
+#include "engine/compute/brushes/mix/mix.h"
+#include "engine/compute/brushes/texture/paper_grain.h"
 #include "engine/compute/brushes/texture/texture.h"
+#include "engine/compute/brushes/tip/tip.h"
 #include "engine/core/pixel.h"
+#include "engine/compute/brushes/dab/native_cmyk.h"
 
 namespace pittore::compute {
 
@@ -40,6 +45,9 @@ struct StampTip {
     std::vector<float> red, green, blue;
     bool color = false;
     float spacingPct = 15.0f;  // % of dab diameter between dabs
+    // Size-law auto spacing (see tip.h): false/0 keeps the percentage.
+    bool spacingAuto = false;
+    float spacingAutoCoeff = 0.0f;
 
     bool valid() const {
         return w > 0 && h > 0 && w <= 1024 && h <= 1024 &&
@@ -50,12 +58,38 @@ struct StampTip {
     }
     void sanitize() {
         if (spacingPct < 1.0f || !(spacingPct <= 200.0f)) spacingPct = 15.0f;
+        if (!(spacingAutoCoeff >= 0.0f) || spacingAutoCoeff > 8.0f)
+            spacingAutoCoeff = 0.0f;
     }
 };
 
-// Spacing in doc units for a dab of `radius` under this tip.
+// Sharpness threshold for stamp dabs: coverage at/above 1-strength goes
+// fully opaque; below that it is scaled by softness (1 keeps the soft
+// fringe, 0 cuts it). Strength 0 disables. Approximation of the
+// threshold-plus-fringe response for imported presets.
+struct StampSharp {
+    float strength = 0.0f;  // 0..1
+    float softness = 1.0f;  // 0..1 fringe kept below the threshold
+};
+
+inline float sharpen_coverage(float cov, const StampSharp* s) {
+    if (s == nullptr || cov <= 0.0f) return cov;
+    const float st =
+        s->strength < 0.0f ? 0.0f : (s->strength > 1.0f ? 1.0f : s->strength);
+    if (st <= 0.0f || cov >= 1.0f) return cov;
+    if (cov >= 1.0f - st) return 1.0f;
+    const float soft =
+        s->softness < 0.0f ? 0.0f : (s->softness > 1.0f ? 1.0f : s->softness);
+    return cov * soft;
+}
+
+// Spacing in doc units for a dab of `radius` under this tip. Size-law
+// auto spacing (see tip.h) strides the dab diameter directly.
 inline float stamp_spacing(float radius, const StampTip& tip) {
     const float diameter = 2.0f * (radius < 0.0f ? 0.0f : radius);
+    if (tip.spacingAuto && tip.spacingAutoCoeff > 0.0f)
+        return std::max(0.5f, auto_spacing_stride(diameter,
+                                                 tip.spacingAutoCoeff));
     const float pct = (tip.spacingPct < 1.0f || tip.spacingPct > 200.0f)
                           ? 15.0f
                           : tip.spacingPct;
@@ -80,7 +114,11 @@ void stamp_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     int flip = 0, int filter = 1,
                     const StampLevels* levels = nullptr,
                     const RGBAf* bg = nullptr,
-                    float* height = nullptr, float heightAmt = 0.0f);
+                    float* height = nullptr, float heightAmt = 0.0f,
+                    dabmix::DabMixOp mix = dabmix::DabMixOp::Normal,
+                    const papergrain::PaperGrain* kgrain = nullptr,
+                    const StampSharp* sharp = nullptr,
+                    NativeCmykPaint* nativeCmyk = nullptr);
 
 // Eraser twin: stamp coverage multiplies alpha down, RGB untouched.
 // Carves relief too when a height plane is given (same mask).
@@ -92,7 +130,8 @@ void stamp_erase_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
                           const DabDensity* den = nullptr,
                           const MaskTip* mask = nullptr,
                           int flip = 0, int filter = 1,
-                          float* height = nullptr);
+                          float* height = nullptr,
+                          const papergrain::PaperGrain* kgrain = nullptr);
 
 // Pattern stamp dab: source-over the procedural tile (pattern.h) under the
 // dab mask. Tile pixel = ((x - ox) mod 64, (y - oy) mod 64) in layer space;

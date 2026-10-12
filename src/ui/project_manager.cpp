@@ -48,6 +48,7 @@
 #include "engine/io/webp.h"
 #include "engine/io/xcf.h"
 #include "engine/io/zip.h"
+#include "engine/color/icc_convert.h"
 #include "engine/core/log.h"
 
 #include "ui/app_state.h"
@@ -319,7 +320,9 @@ bool saveProjectFile(const QString& path, const ProjectFileData& data,
     doc.height = static_cast<std::uint32_t>(qMax(1, data.size.height()));
     doc.dpi = static_cast<std::uint16_t>(qBound(1, data.dpi, 65535));
     doc.colorMode =
-        data.colorMode.startsWith(QStringLiteral("Grayscale"), Qt::CaseInsensitive) ? 1 : 3;
+        data.colorMode.startsWith(QStringLiteral("Grayscale"), Qt::CaseInsensitive) ? 1
+        : data.colorMode.startsWith(QStringLiteral("CMYK"), Qt::CaseInsensitive) ? 4
+                                                                                : 3;
     doc.name = toStd(data.name);
     doc.colorModeName = toStd(data.colorMode);
     doc.background = toStd(data.background);
@@ -449,6 +452,26 @@ bool saveProjectFile(const QString& path, const ProjectFileData& data,
             layer.width = static_cast<std::uint32_t>(m.pixels.width());
             layer.height = static_cast<std::uint32_t>(m.pixels.height());
             layer.rgba = rgba16FromQImage(m.pixels);
+            if (data.colorMode.startsWith(QStringLiteral("CMYK"),
+                                          Qt::CaseInsensitive)) {
+                const std::size_t n =
+                    static_cast<std::size_t>(layer.width) * layer.height;
+                if (m.cmyk.size() == n * 4) {
+                    layer.cmyk = m.cmyk;
+                } else {
+                    std::vector<std::uint16_t> rgb(n * 3);
+                    for (std::size_t i = 0; i < n; ++i) {
+                        rgb[i * 3 + 0] = layer.rgba[i * 4 + 0];
+                        rgb[i * 3 + 1] = layer.rgba[i * 4 + 1];
+                        rgb[i * 3 + 2] = layer.rgba[i * 4 + 2];
+                    }
+                    layer.cmyk.resize(n * 4);
+                    const pittore::color::SrgbToCmyk sep(
+                        reinterpret_cast<const std::uint8_t*>(data.iccProfile.constData()),
+                        static_cast<std::size_t>(data.iccProfile.size()));
+                    sep.convert16(rgb.data(), layer.cmyk.data(), n);
+                }
+            }
         }
         doc.layers.push_back(std::move(layer));
     }
@@ -628,6 +651,7 @@ bool loadProjectFile(const QString& path, ProjectFileData* out, QString* error) 
             o.padding = rb.padding;
             m.psdRawBlocks.push_back(std::move(o));
         }
+        m.cmyk = l.cmyk;
         if (l.width != 0 && l.height != 0)
             m.pixels = qimageFromRgba16(l.rgba, static_cast<int>(l.width),
                                         static_cast<int>(l.height));
@@ -1477,7 +1501,8 @@ QWidget* ProjectManagerDialog::buildNewProjectPage() {
 
     mode_ = new QComboBox(page);
     mode_->addItems({QStringLiteral("RGB/8"), QStringLiteral("RGB/16"), QStringLiteral("RGB/32"),
-                     QStringLiteral("Grayscale/8"), QStringLiteral("CMYK/8")});
+                     QStringLiteral("Grayscale/8"), QStringLiteral("CMYK/8"),
+                     QStringLiteral("CMYK/16")});
     {
         const int mi = mode_->findData(state_->settings().newDocColorMode);
         mode_->setCurrentIndex(mi >= 0 ? mi : 0);

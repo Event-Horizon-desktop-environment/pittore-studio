@@ -246,27 +246,17 @@ inline std::mutex& mutex() {
     return m;
 }
 
-// Per-dab trace gate: dab-rate logging (mutex + timestamp + file write per
-// call) dominates fast strokes, so the two per-dab call sites check this
-// first. Off unless PITTORE_STROKE_TRACE=1; per-event logs stay always-on.
+// Per-dab trace gate: REMOVED — all stroke/dab/flush/region logs write
+// unconditionally. Per-call cost (mutex + timestamp + file write) applies
+// to fast strokes; reintroduce a gate here if paint profiling shows it.
 inline bool strokeTrace() {
-    static const bool on = [] {
-        const char* e = pittoreEnv("PITTORE_STROKE_TRACE", "INFINITY_STROKE_TRACE");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    return on;
+    return true;
 }
 
-// Transfer-trace gate: per-upload logging (format + mutex + file write per
-// call) costs more than small transfers and floods the log on huge
-// documents (hundreds of thousands of lines). Off unless
-// PITTORE_TRANSFER_TRACE=1.
+// Transfer-trace gate: REMOVED — all GPU upload/download logs write
+// unconditionally (same cost caveat as strokeTrace above).
 inline bool transferTrace() {
-    static const bool on = [] {
-        const char* e = pittoreEnv("PITTORE_TRANSFER_TRACE", "INFINITY_TRANSFER_TRACE");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    return on;
+    return true;
 }
 
 // Slow-event threshold (ms): region/rebuild logs are trace-gated above, but

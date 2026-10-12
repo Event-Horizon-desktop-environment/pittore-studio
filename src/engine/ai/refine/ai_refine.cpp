@@ -68,8 +68,11 @@ void guided_refine_alpha(const std::uint8_t* rgba, int width, int height,
     if (!rgba || width <= 0 || height <= 0 || alpha.size() != n) return;
     const int r = std::clamp(radius, 1, 64);
     const float e = eps > 0.0f ? eps : 1e-3f;
-    const float kLevelLo = levelLo > 0.0f ? levelLo : 0.35f;
-    const float kLevelHi = levelHi > 0.0f ? levelHi : 0.65f;
+    // Gentle by design: the remap only zeroes the faint low-alpha tail AI
+    // masks leave across background (a few percent). Anything steeper
+    // compresses real hair gradation into stair-steps before Refine opens.
+    const float kLevelLo = levelLo > 0.0f ? levelLo : 0.15f;
+    const float kLevelHi = levelHi > 0.0f ? levelHi : 0.85f;
     const auto t0 = std::chrono::steady_clock::now();
 
     // Luminance guide (Rec.601 luma of the straight-alpha RGB).
@@ -108,7 +111,8 @@ void guided_refine_alpha(const std::uint8_t* rgba, int width, int height,
 
     // Grow-only merge: the guided estimate may round an edge or pull a low
     // contrast boundary outward by a pixel or two; only ever ADD to the mask
-    // so an already-correct silhouette is never disturbed.
+    // so an already-correct silhouette is never disturbed. Growth is what
+    // recovers fine hair wisps the model under-scores, so it is kept generous.
     std::size_t grown = 0;
     for (std::size_t i = 0; i < n; ++i)
         if (q[i] > alpha[i]) {
@@ -118,12 +122,12 @@ void guided_refine_alpha(const std::uint8_t* rgba, int width, int height,
 
     // Final level. The guided estimate leaves a faint low-alpha tail across
     // background (a few percent) that would read as a soft halo when the mask
-    // is used as layer alpha; a 0.35..0.65 remap zeroes that tail and
-    // saturates the core. The band is centred on 0.5, so it leaves the binary
-    // boundary (and therefore the selection) exactly as-is while retaining a
-    // graded 0.35..0.65 band for hair / soft edges. The band is parameterized
-    // so diagnostics can probe wider/narrower bands without recompiling the
-    // pipeline; the shipped default centres on 0.5.
+    // is used as layer alpha; the default 0.15..0.85 remap zeroes that tail
+    // and saturates the core while retaining most of the graded band for
+    // hair / soft edges. The band is centred on 0.5, so it leaves the binary
+    // boundary (and therefore the selection) exactly as-is. The band is
+    // parameterized so diagnostics can probe wider/narrower bands without
+    // recompiling the pipeline; the shipped default centres on 0.5.
     const float invSpan = 1.0f / (kLevelHi - kLevelLo);
     for (std::size_t i = 0; i < n; ++i) {
         const float v = (alpha[i] - kLevelLo) * invSpan;

@@ -193,64 +193,48 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
             path.subpaths.push_back(SubPath{std::move(sp.first), sp.second});
         transformAnchors(path, lctm);
     } else {
-        Node* crvs = g.child(node, "Crvs");
-        Node* data = crvs ? g.child(crvs, "Data") : nullptr;
-        if (!data || data->fields.empty()) {
+        auto path = pathFromCurveRecords(g, node, lctm);
+        if (!path) {
             noteSkip(node, "path has no curve data");
             return;
         }
-        const auto toDoc = [&](double x, double y) {
-            const auto p = matApply(lctm, x, y);
-            return std::make_pair(static_cast<float>(p.first),
-                                  static_cast<float>(p.second));
-        };
-        // Records run: a closed flag, then per subpath an 18-byte stream
-        // (two f64s and a marker pair). The flag resets for the next one.
-        bool closed = true;
-        for (const auto& fld : data->fields) {
-            const Value& v = fld.second;
-            if (v.k == Value::K::Bool) {
-                closed = v.u != 0;
-                continue;
-            }
-            if (v.k != Value::K::Array) continue;
-            bool hasCurve = false;
-            for (const Value& item : v.arr)
-                if (item.k == Value::K::Struct) {
-                    hasCurve = true;
-                    break;
-                }
-            if (!hasCurve) continue;
-            std::vector<PathRecord> records;
-            bool malformed = false;
-            for (const Value& item : v.arr) {
-                if (item.k != Value::K::Struct) continue;
-                if (item.bytes.size() != 18) {
-                    malformed = true;
-                    break;
-                }
-                double x = 0.0, y = 0.0;
-                std::memcpy(&x, item.bytes.data(), 8);
-                std::memcpy(&y, item.bytes.data() + 8, 8);
-                const auto p = toDoc(x, y);
-                records.push_back(
-                    PathRecord{p.first, p.second, item.bytes[16], item.bytes[17]});
-            }
-            if (malformed) {
-                noteSkip(node, "path record is malformed");
-                return;
-            }
-            if (auto sub = subpathFromRecords(records, closed))
-                path.subpaths.push_back(std::move(*sub));
-            closed = true;
-        }
-        if (path.isEmpty()) {
-            noteSkip(node, "path has no geometry");
+        // Even-odd, so a path layer's nested contours punch holes — unless
+        // the curve asks for winding fill: `CvWi` 1 fills same-direction
+        // double coverage (stroke crossings, retraced spikes) instead of
+        // punching it out. Observed on files Affinity renders hole-free.
+        bool curveEvenOdd = true;
+        if (const auto wi = enumOf(g, node, "CvWi"))
+            curveEvenOdd = *wi != 1;
+        evenOdd = curveEvenOdd;
+        if (displayName.empty()) displayName = "Curve";
+        // pathFromCurveRecords folds "no data" and "no geometry" together;
+        // both mean there is nothing to draw here.
+        VectorPath draw = std::move(*path);
+        std::optional<GradientFill> gradient;
+        auto shape = vectorPaint(g, node, lctm, std::move(draw), evenOdd, gradient);
+        if (!shape) {
+            noteSkip(node, "vector layer is invisible");
             return;
         }
-        // Even-odd, so a path layer's nested contours punch holes.
-        evenOdd = true;
-        if (displayName.empty()) displayName = "Curve";
+        auto img = rasterizeShape(*shape, gradient ? &*gradient : nullptr);
+        if (!img) {
+            noteSkip(node, "vector shape is empty or too large");
+            return;
+        }
+        const IntRect rect{img->rect.left, img->rect.top, img->rect.right, img->rect.bottom};
+        // Keep the true geometry: shift document-space anchors into the layer's
+        // source space, matching the raster's origin, so later moves/scales of
+        // the layer carry the vector with the pixels.
+        auto art = pittore::vector::artNodeFromShape(
+            *shape, gradient ? &*gradient : nullptr,
+            -static_cast<double>(rect.x0), -static_cast<double>(rect.y0));
+        render::Rgba8Image rimg;
+        rimg.w = static_cast<std::uint32_t>(img->rect.width());
+        rimg.h = static_cast<std::uint32_t>(img->rect.height());
+        rimg.px = std::move(img->rgba);
+        finishImageLayer(node, ctm, indent, clipped, displayName, "", std::move(rimg), rect,
+                         false, nullptr, std::move(art));
+        return;
     }
 
     std::optional<GradientFill> gradient;

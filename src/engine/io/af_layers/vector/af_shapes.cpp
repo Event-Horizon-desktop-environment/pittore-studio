@@ -462,6 +462,58 @@ void transformAnchors(pittore::vector::VectorPath& path, const Mat& m) {
 }
 
 
+std::optional<pittore::vector::VectorPath> pathFromCurveRecords(const Graph& g, const Node* node,
+                                                                const Mat& lctm) {
+    using namespace pittore::vector;
+    Node* crvs = g.child(node, "Crvs");
+    Node* data = crvs ? g.child(crvs, "Data") : nullptr;
+    if (!data || data->fields.empty()) return std::nullopt;
+    const auto toDoc = [&](double x, double y) {
+        const auto p = matApply(lctm, x, y);
+        return std::make_pair(static_cast<float>(p.first), static_cast<float>(p.second));
+    };
+    // Records run: a closed flag, then per subpath an 18-byte stream
+    // (two f64s and a marker pair). The flag resets for the next one.
+    VectorPath path;
+    bool closed = true;
+    for (const auto& fld : data->fields) {
+        const Value& v = fld.second;
+        if (v.k == Value::K::Bool) {
+            closed = v.u != 0;
+            continue;
+        }
+        if (v.k != Value::K::Array) continue;
+        bool hasCurve = false;
+        for (const Value& item : v.arr)
+            if (item.k == Value::K::Struct) {
+                hasCurve = true;
+                break;
+            }
+        if (!hasCurve) continue;
+        std::vector<PathRecord> records;
+        bool malformed = false;
+        for (const Value& item : v.arr) {
+            if (item.k != Value::K::Struct) continue;
+            if (item.bytes.size() != 18) {
+                malformed = true;
+                break;
+            }
+            double x = 0.0, y = 0.0;
+            std::memcpy(&x, item.bytes.data(), 8);
+            std::memcpy(&y, item.bytes.data() + 8, 8);
+            const auto p = toDoc(x, y);
+            records.push_back(PathRecord{p.first, p.second, item.bytes[16], item.bytes[17]});
+        }
+        if (malformed) return std::nullopt;
+        if (auto sub = subpathFromRecords(records, closed))
+            path.subpaths.push_back(std::move(*sub));
+        closed = true;
+    }
+    if (path.isEmpty()) return std::nullopt;
+    return path;
+}
+
+
 // Resolve a shape/path node's paint: solid fill or gradient, then stroke.
 // Returns nullopt for a layer with nothing to paint. A gradient's axis is
 // transformed into document space alongside the path.

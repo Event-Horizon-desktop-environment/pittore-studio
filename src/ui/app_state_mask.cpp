@@ -19,6 +19,11 @@ bool AppState::copyOnWriteActiveLayer() {
     // New Image pointer → the engine's placed-source cache re-uploads once;
     // past snapshots keep the original object untouched.
     l->pixels = std::make_shared<pittore::Image>(l->pixels->clone());
+    // CMYK samples participate in the same undo snapshots and must detach
+    // before an edit can refresh their ink values.
+    if (l->cmykPixels)
+        l->cmykPixels = std::make_shared<pittore::color::CmykImage>(
+            *l->cmykPixels);
     return true;
 }
 

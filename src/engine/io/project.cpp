@@ -212,13 +212,12 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     if (p.width == 0 || p.height == 0 || q > kMaxPixels)
         return fail(error, "project dimensions out of range");
 
-    // v2 when any layer needs it; v3 when any adjustment layer uses params
-    // beyond the original 8 (params[8..15] nonzero); v4 when any layer
-    // carries foreign PSD blocks. Plain documents stay v1-readable, and
-    // each version is a strict superset of the last.
+    // v2 when any layer needs it; v3 for widened adjustment params; v4 for
+    // foreign PSD blocks; v5 for native CMYK layer samples.
     bool v2 = false;
     bool v3 = false;
     bool v4 = false;
+    bool v5 = false;
     std::uint64_t psdBlockBytes = 0;
     for (const ProjectLayerFile& l : p.layers) {
         if (l.hasMask || l.clipped || l.lockTransparency || l.indent != 0 ||
@@ -248,15 +247,17 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
             }
             v4 = true;
         }
-        if (v2 && v3 && v4) break;
+        if (!l.cmyk.empty()) v5 = true;
+        if (v2 && v3 && v4 && v5) break;
     }
+    v4 = v4 || v5;
     v3 = v3 || v4;  // v4 is a strict superset of v3 below.
     v2 = v2 || v3;  // v3 is a strict superset of v2 below.
 
     std::vector<std::uint8_t> out;
     // ── header ──────────────────────────────────────────────────────────────
     putBytes(out, "INFIPROJ", 8);
-    putU32(out, v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1)));  // version
+    putU32(out, v5 ? 5 : (v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1))));  // version
     putU32(out, p.width);
     putU32(out, p.height);
     putU16(out, 4);                  // channels (RGBA)
@@ -283,6 +284,7 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     struct LayerComp {
         std::vector<std::uint8_t> pix;
         std::vector<std::uint8_t> mask;
+        std::vector<std::uint8_t> cmyk;
     };
     std::vector<LayerComp> comps(p.layers.size());
     {
@@ -305,6 +307,8 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
                     // whatever bytes are present (never crashes on mismatch).
                     if (px <= kMaxPixels && l.rgba.size() == px * 4)
                         c.pix = deflate(samplesToBytes(l.rgba));
+                    if (v5 && px <= kMaxPixels && l.cmyk.size() == px * 4)
+                        c.cmyk = deflate(samplesToBytes(l.cmyk));
                 }
                 if (v2 && l.hasMask) {
                     const std::uint64_t mp =
@@ -504,6 +508,24 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
                               b.padding.end());
             }
         }
+        if (v5) {
+            const std::uint64_t cmykSamples =
+                static_cast<std::uint64_t>(l.width) * l.height * 4;
+            if (!l.cmyk.empty() && l.cmyk.size() != cmykSamples)
+                return fail(error, "layer CMYK buffer size mismatch");
+            if (!l.cmyk.empty() && comps[li].cmyk.empty())
+                return fail(error, "layer CMYK compression failed");
+            if (l.cmyk.empty()) {
+                layers.push_back(0);
+                putU32(layers, 0);
+            } else {
+                layers.push_back(1);
+                putU32(layers,
+                       static_cast<std::uint32_t>(comps[li].cmyk.size()));
+                layers.insert(layers.end(), comps[li].cmyk.begin(),
+                              comps[li].cmyk.end());
+            }
+        }
         ++li;
     }
 
@@ -559,7 +581,7 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version != 1 && version != 2 && version != 3 && version != 4)
+    if (version < 1 || version > 5)
         return fail(error, "unsupported project version");
     if (channels != 4 || depth != 16)
         return fail(error, "unsupported project channel layout");
@@ -799,6 +821,14 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
                     layer.psdBlocks.push_back(std::move(b));
                 }
             }
+            if (version >= 5) {
+                const std::uint64_t cp =
+                    static_cast<std::uint64_t>(layer.width) * layer.height;
+                if (cp > kMaxPixels ||
+                    !readPixelBlock(l, cp * 4, &layer.cmyk,
+                                    "corrupt layer CMYK data", error))
+                    return std::nullopt;
+            }
             layers.push_back(std::move(layer));
         }
         if (!l.ok) return fail(error, "corrupt layer table");
@@ -847,7 +877,7 @@ std::optional<ProjectScanInfo> projectScan(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version != 1 && version != 2 && version != 3 && version != 4)
+    if (version < 1 || version > 5)
         return fail(error, "unsupported project version");
     if (in.remaining() < static_cast<std::size_t>(metaLen) + layersLen + previewLen)
         return fail(error, "truncated project sections");

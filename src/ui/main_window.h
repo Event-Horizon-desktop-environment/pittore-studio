@@ -58,6 +58,12 @@ class MainWindow final : public QMainWindow {
     void showPanel(const QString& id, bool show = true);
     bool panelVisible(const QString& id) const;
 
+    // Headless-safe command entry for the MCP bridge and tests. Only
+    // commands that never open dialogs, change task context, or need a
+    // cursor position run; everything else is refused with a status hint.
+    // Returns true when the command executed.
+    bool runHeadlessCommand(const QString& id);
+
   protected:
     void closeEvent(QCloseEvent* event) override;
     void showEvent(QShowEvent* event) override;
@@ -115,6 +121,8 @@ class MainWindow final : public QMainWindow {
     void runAiBackgroundRemoval(const QString& id);  // select-subject / remove-background / select-and-mask
     void runEnhanceEdges();  // task-bar + Select menu: AI hair-edge enhance of
                              // the live selection (falls back to colour snap)
+    void runAutoRefine();    // task-bar: full tuned pipeline (segment + refine
+                             // + decontam) applied directly, no dialog
     // Copy the active pixel layer (optionally clipped to the live selection)
     // into a cropped QImage whose top-left lands at `docRectOut`; used by
     // Copy / Paste and Layer via Copy. Returns a null image when refused.

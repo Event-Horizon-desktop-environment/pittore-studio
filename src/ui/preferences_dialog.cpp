@@ -791,7 +791,7 @@ QWidget* PreferencesDialog::buildDocumentsPage() {
     newDocColorMode_ = new QComboBox(page);
     for (const QString& m : {QStringLiteral("RGB/8"), QStringLiteral("RGB/16"),
                              QStringLiteral("RGB/32"), QStringLiteral("Grayscale/8"),
-                             QStringLiteral("CMYK/8")})
+                             QStringLiteral("CMYK/8"), QStringLiteral("CMYK/16")})
         newDocColorMode_->addItem(m, m);
     column->addWidget(cardRow(tr("Color mode"), newDocColorMode_, page));
     newDocBackground_ = new QComboBox(page);

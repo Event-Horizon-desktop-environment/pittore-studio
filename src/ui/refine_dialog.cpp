@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
@@ -48,8 +49,10 @@ RefineDialog::RefineDialog(AppState* state, DocumentItem* doc, QWidget* parent)
     baseCrop_ = inputMask_.copy(workRect_);
     QImage comp = compositeFull_.convertToFormat(QImage::Format_ARGB32);
     // Interactive proxy: longest side capped so every live pass is instant.
-    // Full resolution is only ever computed once, on Apply.
-    static constexpr int kProxyMax = 800;
+    // Full resolution is only ever computed once, on Apply. The cap sits
+    // above typical hair-strand scale so zoomed previews don't turn to
+    // blocks before Apply re-solves at full resolution.
+    static constexpr int kProxyMax = 1024;
     proxyScale_ = std::min(1.0, kProxyMax / double(std::max(
                                         1, std::max(workRect_.width(),
                                                     workRect_.height()))));
@@ -93,6 +96,13 @@ RefineDialog::RefineDialog(AppState* state, DocumentItem* doc, QWidget* parent)
         tr("Snap the matte to detected image edges inside the border band."));
     col->addWidget(matteEdgesCheck_);
 
+    smartRadiusCheck_ = new QCheckBox(tr("Smart radius"), side);
+    smartRadiusCheck_->setChecked(true);
+    smartRadiusCheck_->setToolTip(
+        tr("Adapt the border band to each edge: tight on hard boundaries, "
+           "wide on soft hair and fur, so one border value serves both."));
+    col->addWidget(smartRadiusCheck_);
+
     enhanceButton_ = new QPushButton(tr("Enhance Edges (AI)"), side);
     enhanceButton_->setObjectName(QStringLiteral("refine.enhance"));
     enhanceButton_->setToolTip(
@@ -131,9 +141,15 @@ RefineDialog::RefineDialog(AppState* state, DocumentItem* doc, QWidget* parent)
     sliderRow(tr("Smooth"), 100,
               tr("Even out the outline (~1 px per pass)."), smoothSlider_,
               smoothValue_);
+    smoothSlider_->setValue(6);
     sliderRow(tr("Feather"), 100,
               tr("Soften the transition, in pixels."), featherSlider_,
               featherValue_);
+    sliderRow(tr("Shift"), 100,
+              tr("Displace the edge after feathering (contract -, expand +)."),
+              shiftSlider_, shiftValue_);
+    shiftSlider_->setRange(-100, 100);
+    shiftSlider_->setValue(0);
     sliderRow(tr("Ramp"), 100, tr("Harden the edge contrast (+), or choke "
                                 "the edge outward (−)."),
               rampSlider_, rampValue_);
@@ -192,6 +208,7 @@ RefineDialog::RefineDialog(AppState* state, DocumentItem* doc, QWidget* parent)
     connect(previewCombo_, &QComboBox::currentIndexChanged, this,
             [this](int) { refreshPreview(); });
     connect(matteEdgesCheck_, &QCheckBox::toggled, this, touch);
+    connect(smartRadiusCheck_, &QCheckBox::toggled, this, touch);
     auto sliderTouch = [this](QSlider* s, QLabel* v, const QString& suffix) {
         connect(s, &QSlider::valueChanged, this, [this, s, v, suffix] {
             v->setText(QStringLiteral("%1 %2").arg(s->value()).arg(suffix));
@@ -207,6 +224,7 @@ RefineDialog::RefineDialog(AppState* state, DocumentItem* doc, QWidget* parent)
     sliderTouch(borderSlider_, borderValue_, QStringLiteral("%"));
     sliderTouch(smoothSlider_, smoothValue_, QStringLiteral("px"));
     sliderTouch(featherSlider_, featherValue_, QStringLiteral("px"));
+    sliderTouch(shiftSlider_, shiftValue_, QStringLiteral("%"));
     sliderTouch(rampSlider_, rampValue_, QStringLiteral("%"));
     connect(brushSizeCombo_, &QComboBox::currentIndexChanged, this,
             [this](int) { refreshPreview(); });
@@ -288,8 +306,11 @@ void RefineDialog::recompute() {
         featherSlider_->value() > 0
             ? std::max(1, int(featherSlider_->value() * proxyScale_ + 0.5))
             : 0;
+    const int shift =
+        int(shiftSlider_->value() / 100.0 * 24 * proxyScale_);
     refinedProxy_ = runPipeline(baseProxy_, compProxy_, band, passes, feather,
-                                rampSlider_->value(), strokes_, proxyScale_);
+                                shift, rampSlider_->value(), strokes_,
+                                smartRadiusCheck_->isChecked(), proxyScale_);
 }
 
 
@@ -304,24 +325,43 @@ QImage RefineDialog::recomputeFull() const {
             : 0;
     const int passes = std::clamp((smoothSlider_->value() + 1) / 3, 0, 10);
     const int feather = featherSlider_->value();
+    const int shift = int(shiftSlider_->value() / 100.0 * 24);
     const QImage compFull = compositeFull_.copy(workRect_).convertToFormat(
         QImage::Format_ARGB32);
-    return runPipeline(baseCrop_, compFull, band, passes, feather,
-                       rampSlider_->value(), strokes_, 1.0);
+    return runPipeline(baseCrop_, compFull, band, passes, feather, shift,
+                       rampSlider_->value(), strokes_,
+                       smartRadiusCheck_->isChecked(), 1.0);
 }
 
 
 QImage RefineDialog::runPipeline(const QImage& base, const QImage& comp,
                                  int bandPx, int smoothPasses, int featherPx,
-                                 int rampPct, const QVector<Stroke>& strokes,
-                                 double coordScale) const {
+                                 int shiftPx, int rampPct,
+                                 const QVector<Stroke>& strokes,
+                                 bool smartRadius, double coordScale) const {
     if (base.isNull()) return base;
-    QImage work = base;
+    QImage work = selectionMaskRemoveSpeckles(
+        base, std::max(8, int(32 * coordScale * coordScale + 0.5)));
+    // Decay broad AI wash far from the subject before solving: grow-only
+    // rules otherwise preserve a ghost band in empty backdrop. Support is
+    // clamped tight so a wide border band can't protect distant wash: only
+    // the immediate edge transition is exempt.
+    work = selectionMaskDecayWash(work, comp,
+                                  std::clamp(bandPx, 8, 48));
     // Edge snap solves against the colour guide: hair vs backdrop separates
-    // on colour, not just tone.
-    if (bandPx > 0) work = selectionMaskSnapToEdges(comp, work, bandPx, 3);
+    // on colour, not just tone. Smart radius runs a half-width band too and
+    // lets the wide result through only where the mask edge is soft — but
+    // needs room for two bands, so a tiny border (narrow < 2px) takes the
+    // plain snap instead (a half-width pass there is too tight to reach
+    // anything, and a hard edge is all it would ever see anyway).
+    if (bandPx > 0) {
+        work = (smartRadius && bandPx >= 4)
+                   ? selectionMaskSnapSmart(comp, work, bandPx / 2, bandPx, 3)
+                   : selectionMaskSnapToEdges(comp, work, bandPx, 3);
+    }
     if (smoothPasses > 0) work = selectionMaskSmooth(work, smoothPasses);
     if (featherPx > 0) work = selectionMaskFeather(work, featherPx);
+    if (shiftPx != 0) work = selectionMaskGrow(work, shiftPx);
     if (rampPct > 0) {
         work = selectionMaskRamp(work, 1.0 + 3.0 * rampPct / 100.0);
     } else if (rampPct < 0) {
@@ -372,10 +412,12 @@ void RefineDialog::enhanceEdgesWithAi() {
         state_ ? state_->settings().enhanceModel : QString());
 
     // No local AI available: classical colour-snap fallback so the button
-    // never dead-ends (same affinity model as Matte edges, wider band).
+    // never dead-ends (same affinity model as Matte edges, wider band — but
+    // still tight on hard edges via the smart blend).
     if (modelId.isEmpty() || !pittore::ai::onnx_available()) {
         const QImage snapped =
-            selectionMaskSnapToEdges(compFull, baseCrop_, hairBand, 3);
+            selectionMaskSnapSmart(compFull, baseCrop_, std::max(1, hairBand / 2),
+                                   hairBand, 3);
         baseCrop_ = snapped;
         const QSize proxySize(qMax(1, int(workRect_.width() * proxyScale_ + 0.5)),
                               qMax(1, int(workRect_.height() * proxyScale_ + 0.5)));
@@ -570,6 +612,7 @@ void RefineDialog::paintAt(const QPointF& labelPos) {
     stampOne(pp);
     haveLastDab_ = true;
     lastDab_ = pp;
+    pressDots_.append({pp, radius});
     refreshPreview();
 }
 
@@ -618,6 +661,7 @@ bool RefineDialog::eventFilter(QObject* watched, QEvent* event) {
                 }
                 if (painting_ && e->button() == Qt::LeftButton) {
                     painting_ = false;
+                    pressDots_.clear();
                     // conventional: the stroke lands, then the pipeline
                     // re-solves once (snapped/smoothed/feathered/ramped over
                     // the new paint) instead of once per mousemove.
@@ -763,6 +807,39 @@ void RefineDialog::refreshPreview() {
             bp.drawEllipse(hoverLabel_, r, r);
             bp.setPen(QPen(Qt::black, 1));
             bp.drawEllipse(hoverLabel_, r + 1.0, r + 1.0);
+        }
+        if (!pressDots_.isEmpty()) {
+            // In-progress stroke footprint: one translucent stroked path at
+            // true brush diameter (Affinity-style). Per-dab discs are NOT
+            // drawn: overlapping translucent fills accumulate into opaque
+            // globs wherever the pointer lingers.
+            const double kx =
+                pm.width() / double(std::max(1, img.width()));
+            const double ky =
+                pm.height() / double(std::max(1, img.height()));
+            auto toBoard = [&](const QPointF& p) {
+                return QPointF(previewOff_.x() + p.x() * kx,
+                               previewOff_.y() + p.y() * ky);
+            };
+            const double dia =
+                2.0 * std::max(1.0, pressDots_.first().radius * kx);
+            QPen pen(QColor(150, 0, 12, 115), dia, Qt::SolidLine,
+                     Qt::RoundCap, Qt::RoundJoin);
+            bp.setPen(pen);
+            if (pressDots_.size() == 1) {
+                bp.setBrush(QColor(150, 0, 12, 115));
+                const QPointF c = toBoard(pressDots_.first().pos);
+                const double rx = std::max(1.0, pressDots_.first().radius * kx);
+                const double ry = std::max(1.0, pressDots_.first().radius * ky);
+                bp.drawEllipse(c, rx, ry);
+                bp.setBrush(Qt::NoBrush);
+            } else {
+                QPainterPath path;
+                path.moveTo(toBoard(pressDots_.first().pos));
+                for (int i = 1; i < pressDots_.size(); ++i)
+                    path.lineTo(toBoard(pressDots_[i].pos));
+                bp.drawPath(path);
+            }
         }
     }
     preview_->setPixmap(board);

@@ -34,6 +34,23 @@ std::unordered_map<std::string, std::unique_ptr<OrtSession>>& sessionCache() {
     static std::unordered_map<std::string, std::unique_ptr<OrtSession>> cache;
     return cache;
 }
+
+// One shared CPU arena for all inference sessions: extend-by-exact-need
+// instead of power-of-two doubling, so transient spikes stay near true use
+// and the retained high-water does not overshoot far above it. Sessions
+// opt in at creation; any failure here keeps the default allocators.
+void registerBoundedCpuArena() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        try {
+            Ort::MemoryInfo cpuArena = Ort::MemoryInfo::CreateCpu(
+                OrtArenaAllocator, OrtMemTypeDefault);
+            Ort::ArenaCfg cfg(0, 1, -1, -1);
+            ortEnv().CreateAndRegisterAllocator(cpuArena, cfg);
+        } catch (...) {
+        }
+    });
+}
 OrtSession* getOrLoadSessionLocked(const std::string& path, const char* label,
                                    std::string& err, double msNow) {
     auto iter = sessionCache().find(path);
@@ -41,6 +58,13 @@ OrtSession* getOrLoadSessionLocked(const std::string& path, const char* label,
     try {
         Ort::SessionOptions opts;
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        registerBoundedCpuArena();
+        try {
+            opts.AddConfigEntry("session.use_env_allocators", "1");
+        } catch (...) {
+            // Unknown key on this ORT build: sessions fall back to
+            // their own default allocators.
+        }
         std::string provider = "CPU";
         try {
             // Works when the linked ORT build ships a CUDA execution

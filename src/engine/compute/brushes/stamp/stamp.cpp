@@ -8,6 +8,7 @@
 
 #include "engine/core/parallel.h"
 #include "engine/core/pixel.h"
+#include "engine/color/icc_convert.h"
 
 namespace pittore::compute {
 namespace {
@@ -60,7 +61,11 @@ void stamp_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     const PatternTex* tex, const DabDensity* den,
                     const MaskTip* mask, int flip,
                     int filter, const StampLevels* levels,
-                    const RGBAf* bg, float* height, float heightAmt) {
+                    const RGBAf* bg, float* height, float heightAmt,
+                    dabmix::DabMixOp mix,
+                    const papergrain::PaperGrain* kgrain,
+                    const StampSharp* sharp,
+                    NativeCmykPaint* nativeCmyk) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
     if (!tip.valid()) return;
     const float op = std::clamp(opacity, 0.0f, 1.0f);
@@ -102,7 +107,13 @@ void stamp_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
             cov = combine_mask(cov, mask, dx, dy, radius);
             if (cov <= 0.0f) continue;
             if (selection) cov *= selection->coverage(x, y);
-            if (tex) cov *= texture_mult(tex, float(x), float(y));
+            // Sharpness threshold runs before grain (imported-behavior
+            // order); grain replaces the legacy texture when present.
+            cov = sharpen_coverage(cov, sharp);
+            if (kgrain)
+                cov = papergrain::grain_mult(kgrain, cov, float(x), float(y));
+            else if (tex)
+                cov *= texture_mult(tex, float(x), float(y));
             if (!density_keep(den, x, y)) continue;
             const float a = cov * op;
             if (a <= 0.0f) continue;
@@ -153,13 +164,43 @@ void stamp_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                 }
             }
             RGBAf& d = dst[idx];
-            const float inv_a = 1.0f - a;
-            const float out_a = a + d.a * inv_a;
-            if (out_a > 0.0f) {
-                d.r = (a * cr + d.r * d.a * inv_a) / out_a;
-                d.g = (a * cg + d.g * d.a * inv_a) / out_a;
-                d.b = (a * cb + d.b * d.a * inv_a) / out_a;
-                d.a = out_a;
+            if (mix == dabmix::DabMixOp::Normal) {
+                const float inv_a = 1.0f - a;
+                const float out_a = a + d.a * inv_a;
+                if (out_a > 0.0f) {
+                    if (nativeCmyk && nativeCmyk->pixels && nativeCmyk->preview) {
+                        auto& ink = nativeCmyk->pixels[idx];
+                        std::array<std::uint16_t, 4> source = nativeCmyk->source;
+                        if (nativeCmyk->sourceFromRgb && nativeCmyk->separation) {
+                            float separated[4];
+                            nativeCmyk->separation->convert(cr, cg, cb, separated);
+                            for (int c = 0; c < 4; ++c)
+                                source[c] = static_cast<std::uint16_t>(std::clamp(
+                                    std::lround(separated[c] * 65535.0f), 0L, 65535L));
+                        }
+                        float values[4];
+                        for (int c = 0; c < 4; ++c) {
+                            const float mixed =
+                                (a * (source[c] / 65535.0f) +
+                                 d.a * (ink[c] / 65535.0f) * inv_a) / out_a;
+                            ink[c] = static_cast<std::uint16_t>(std::clamp(
+                                std::lround(mixed * 65535.0f), 0L, 65535L));
+                            values[c] = ink[c] / 65535.0f;
+                        }
+                        float rgb[3];
+                        nativeCmyk->preview->convert(values[0], values[1],
+                                                     values[2], values[3], rgb);
+                        d.r = rgb[0]; d.g = rgb[1]; d.b = rgb[2];
+                    } else {
+                        d.r = (a * cr + d.r * d.a * inv_a) / out_a;
+                        d.g = (a * cg + d.g * d.a * inv_a) / out_a;
+                        d.b = (a * cb + d.b * d.a * inv_a) / out_a;
+                    }
+                    d.a = out_a;
+                }
+            } else {
+                dabmix::mix_pixel(mix, cr, cg, cb, a, d.r, d.g, d.b, d.a,
+                                  d.r, d.g, d.b, d.a);
             }
             // Relief deposition (lightness mode only): relief builds toward
             // the tip lightness scaled by thickness, weighted by coverage —
@@ -179,7 +220,8 @@ void stamp_erase_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
                           const SelectionMask* selection,
                           const PatternTex* tex, const DabDensity* den,
                     const MaskTip* mask, int flip,
-                    int filter, float* height) {
+                    int filter, float* height,
+                    const papergrain::PaperGrain* kgrain) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
     if (!tip.valid()) return;
     const float op = std::clamp(opacity, 0.0f, 1.0f);
@@ -210,7 +252,10 @@ void stamp_erase_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h,
             cov = combine_mask(cov, mask, dx, dy, radius);
             if (cov <= 0.0f) continue;
             if (selection) cov *= selection->coverage(x, y);
-            if (tex) cov *= texture_mult(tex, float(x), float(y));
+            if (kgrain)
+                cov = papergrain::grain_mult(kgrain, cov, float(x), float(y));
+            else if (tex)
+                cov *= texture_mult(tex, float(x), float(y));
             if (!density_keep(den, x, y)) continue;
             const float a = cov * op;
             if (a <= 0.0f) continue;

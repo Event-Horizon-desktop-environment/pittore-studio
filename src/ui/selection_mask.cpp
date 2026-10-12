@@ -1,6 +1,7 @@
 #include "ui/selection_mask.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
@@ -82,6 +83,99 @@ QImage selectionMaskLargestComponent(const QImage& mask) {
         kept.scanLine(best[i + 1])[best[i]] = 255;
     return kept;
 }
+
+QImage selectionMaskRemoveSpeckles(const QImage& mask, int minPixels) {
+    if (mask.isNull() || minPixels <= 0) return mask;
+    const int w = mask.width(), h = mask.height();
+    // A tiny selection may legitimately be all small islands: only clean
+    // when the mask holds substantially more than the threshold, so there
+    // is a clear main mass for specks to contrast against.
+    long selected = 0;
+    for (int y = 0; y < h; ++y) {
+        const uchar* row = mask.constScanLine(y);
+        for (int x = 0; x < w; ++x)
+            if (row[x]) ++selected;
+    }
+    if (selected < 16L * minPixels) return mask;
+    QImage visited(w, h, QImage::Format_Grayscale8);
+    visited.fill(0);
+    QImage out = mask.copy();
+    std::vector<int> comp;
+    std::vector<int> stack;
+    for (int y0 = 0; y0 < h; ++y0) {
+        for (int x0 = 0; x0 < w; ++x0) {
+            if (mask.constScanLine(y0)[x0] == 0 ||
+                visited.constScanLine(y0)[x0])
+                continue;
+            comp.clear();
+            stack.clear();
+            stack.push_back(x0);
+            stack.push_back(y0);
+            visited.scanLine(y0)[x0] = 1;
+            while (!stack.empty()) {
+                const int y = stack.back();
+                stack.pop_back();
+                const int x = stack.back();
+                stack.pop_back();
+                comp.push_back(x);
+                comp.push_back(y);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int ny = y + dy;
+                    if (ny < 0 || ny >= h) continue;
+                    uchar* vrow = visited.scanLine(ny);
+                    const uchar* mrow = mask.constScanLine(ny);
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        const int nx = x + dx;
+                        if (nx < 0 || nx >= w || vrow[nx]) continue;
+                        if (mrow[nx] == 0) continue;
+                        vrow[nx] = 1;
+                        stack.push_back(nx);
+                        stack.push_back(ny);
+                    }
+                }
+            }
+            if (comp.size() / 2 < std::size_t(minPixels)) {
+                for (std::size_t i = 0; i + 1 < comp.size(); i += 2)
+                    out.scanLine(comp[i + 1])[comp[i]] = 0;
+            }
+        }
+    }
+    return out;
+}
+
+// Fill small enclosed background holes via invert → RemoveSpeckles → invert
+// (see the header for the contract). RemoveSpeckles drops small foreground
+// islands; on the inverted matte the "foreground" is exactly the original
+// background, so small enclosed background islands are dropped (→ 0) while
+// the border-connected exterior survives, and inverting back turns the
+// dropped islands to solid. Strands and the soft skirt are connected to the
+// exterior through the inversion and are never touched.
+QImage selectionMaskFillSmallHoles(const QImage& mask, int maxPixels) {
+    if (mask.isNull() || maxPixels <= 0) return mask;
+    const int w = mask.width(), h = mask.height();
+    const QImage g = mask.format() == QImage::Format_Grayscale8
+                         ? mask
+                         : mask.convertToFormat(QImage::Format_Grayscale8);
+    if (g.isNull()) return mask;
+    QImage inv(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = g.constScanLine(y);
+        uchar* drow = inv.scanLine(y);
+        for (int x = 0; x < w; ++x)
+            drow[x] = static_cast<uchar>(255 - srow[x]);
+    }
+    inv = selectionMaskRemoveSpeckles(inv, maxPixels);
+    QImage out(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = inv.constScanLine(y);
+        uchar* drow = out.scanLine(y);
+        for (int x = 0; x < w; ++x)
+            drow[x] = static_cast<uchar>(255 - srow[x]);
+    }
+    return out;
+}
+
 
 namespace {
 
@@ -214,15 +308,28 @@ QImage selectionMaskFromLayerAlpha(const float* alpha, int pw, int ph,
     const double sx = std::max(scaleX, 1e-6);
     const double sy = std::max(scaleY, 1e-6);
     const int dw = docSize.width(), dh = docSize.height();
+    // Bilinear resample: nearest-neighbour here imprints stair-steps on hair
+    // strands whenever the layer scale differs from 1:1. At exactly 1:1 with
+    // integer offset this collapses to an exact copy.
     for (int y = 0; y < dh; ++y) {
         uchar* row = smask.scanLine(y);
         for (int x = 0; x < dw; ++x) {
             const double lxf = (x + 0.5 - offset.x()) / sx - 0.5;
             const double lyf = (y + 0.5 - offset.y()) / sy - 0.5;
-            const int lx = std::clamp(int(std::lround(lxf)), 0, pw - 1);
-            const int ly = std::clamp(int(std::lround(lyf)), 0, ph - 1);
-            row[x] = static_cast<uchar>(std::clamp(
-                int(alpha[std::size_t(ly) * pw + lx] * 255.0f + 0.5f), 0, 255));
+            const int x0 = std::clamp(int(std::floor(lxf)), 0, pw - 1);
+            const int y0 = std::clamp(int(std::floor(lyf)), 0, ph - 1);
+            const int x1 = std::clamp(x0 + 1, 0, pw - 1);
+            const int y1 = std::clamp(y0 + 1, 0, ph - 1);
+            const float wx = std::clamp(float(lxf - x0), 0.0f, 1.0f);
+            const float wy = std::clamp(float(lyf - y0), 0.0f, 1.0f);
+            const float v00 = alpha[std::size_t(y0) * pw + x0];
+            const float v10 = alpha[std::size_t(y0) * pw + x1];
+            const float v01 = alpha[std::size_t(y1) * pw + x0];
+            const float v11 = alpha[std::size_t(y1) * pw + x1];
+            const float v = v00 * (1 - wx) * (1 - wy) + v10 * wx * (1 - wy) +
+                            v01 * (1 - wx) * wy + v11 * wx * wy;
+            row[x] = static_cast<uchar>(
+                std::clamp(int(v * 255.0f + 0.5f), 0, 255));
         }
     }
     return smask;
@@ -566,26 +673,21 @@ QImage morphRegion(const QImage& mask, int r, bool dilate) {
                            .intersected(QRect(0, 0, w, h));
     if (bbox.isEmpty()) return mask;
 
-    QImage bin(w, h, QImage::Format_Grayscale8);
-    bin.fill(0);
-    for (int y = bbox.top(); y <= bbox.bottom(); ++y) {
-        const uchar* srow = mask.constScanLine(y);
-        uchar* brow = bin.scanLine(y);
-        for (int x = bbox.left(); x <= bbox.right(); ++x)
-            brow[x] = srow[x] > 127 ? 255 : 0;
-    }
-
+    // Grayscale morphology (local max for dilate, local min for erode):
+    // unlike a binarise-then-morph, this displaces soft gradation intact
+    // instead of imprinting a hard rim that later stages must sand off.
     QImage tmp(w, h, QImage::Format_Grayscale8);
     tmp.fill(0);
     for (int y = bbox.top(); y <= bbox.bottom(); ++y) {
-        const uchar* brow = bin.constScanLine(y);
+        const uchar* srow = mask.constScanLine(y);
         uchar* trow = tmp.scanLine(y);
         for (int x = bbox.left(); x <= bbox.right(); ++x) {
             const int x0 = std::max(0, x - r), x1 = std::min(w - 1, x + r);
-            bool hit = false;
-            for (int i = x0; i <= x1 && !hit; ++i)
-                if (brow[i]) hit = true;
-            trow[x] = (dilate ? hit : !hit) ? 255 : 0;
+            int v = dilate ? 0 : 255;
+            for (int i = x0; i <= x1; ++i)
+                v = dilate ? std::max(v, int(srow[i]))
+                           : std::min(v, int(srow[i]));
+            trow[x] = static_cast<uchar>(v);
         }
     }
     QImage out(w, h, QImage::Format_Grayscale8);
@@ -594,10 +696,12 @@ QImage morphRegion(const QImage& mask, int r, bool dilate) {
         uchar* orow = out.scanLine(y);
         for (int x = bbox.left(); x <= bbox.right(); ++x) {
             const int y0 = std::max(0, y - r), y1 = std::min(h - 1, y + r);
-            bool hit = false;
-            for (int yy = y0; yy <= y1 && !hit; ++yy)
-                if (tmp.constScanLine(yy)[x]) hit = true;
-            orow[x] = (dilate ? hit : !hit) ? 255 : 0;
+            int v = dilate ? 0 : 255;
+            for (int yy = y0; yy <= y1; ++yy) {
+                const int t = tmp.constScanLine(yy)[x];
+                v = dilate ? std::max(v, t) : std::min(v, t);
+            }
+            orow[x] = static_cast<uchar>(v);
         }
     }
     return out;
@@ -608,7 +712,12 @@ QImage morphRegion(const QImage& mask, int r, bool dilate) {
 QImage selectionMaskGrow(const QImage& mask, int radius) {
     if (mask.isNull() || radius == 0) return mask;
     QImage out = morphRegion(mask, std::abs(radius), radius > 0);
-    return boxBlurPass(out, 1);  // re-soften the boundary for later stages
+    // Re-soften proportionally to the displacement: a fixed 1px blur after a
+    // multi-px morph leaves a hard rim (a visible contour where the edge
+    // landed). The boundary stays approximately as soft as it was moved.
+    const int soften =
+        std::clamp((std::abs(radius) + 1) / 2, 1, 8);
+    return boxBlurPass(out, soften);
 }
 
 QImage selectionMaskSmooth(const QImage& mask, int passes) {
@@ -756,6 +865,96 @@ QImage invertBinary(const QImage& bin) {
 
 }  // namespace
 
+QImage selectionMaskDecayWash(const QImage& mask, const QImage& guide,
+                              int supportPx, double texTol) {
+    if (mask.isNull() || guide.isNull() || mask.size() != guide.size())
+        return mask;
+    if (supportPx <= 0) return mask;
+    const int w = mask.width(), h = mask.height();
+    QImage fg(w, h, QImage::Format_Grayscale8);
+    fg.fill(0);
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = mask.constScanLine(y);
+        uchar* frow = fg.scanLine(y);
+        for (int x = 0; x < w; ++x)
+            if (srow[x] >= 200) frow[x] = 255;
+    }
+    if (selectionMaskBbox(fg).isEmpty()) return mask;  // nothing confident
+    const QImage support = dilateBinary(fg, supportPx);
+    // Distance outside the support (capped): wash fades over falloffPx
+    // instead of zeroing outright, so no hard contour appears where the
+    // decay ends. Same chamfer pattern as the edge snap.
+    constexpr int kFall = 8;
+    QVector<int> dist(w * h, INT_MAX);
+    for (int y = 0; y < h; ++y) {
+        const uchar* prow = support.constScanLine(y);
+        for (int x = 0; x < w; ++x)
+            if (prow[x]) dist[y * w + x] = 0;
+    }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            int d = dist[y * w + x];
+            if (x > 0) d = std::min(d, dist[y * w + x - 1] + 1);
+            if (y > 0) d = std::min(d, dist[(y - 1) * w + x] + 1);
+            dist[y * w + x] = std::min(d, kFall + 1);
+        }
+    for (int y = h - 1; y >= 0; --y)
+        for (int x = w - 1; x >= 0; --x) {
+            int d = dist[y * w + x];
+            if (x + 1 < w) d = std::min(d, dist[y * w + x + 1] + 1);
+            if (y + 1 < h) d = std::min(d, dist[(y + 1) * w + x] + 1);
+            dist[y * w + x] = std::min(d, kFall + 1);
+        }
+    QImage lum(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        const QRgb* grow =
+            reinterpret_cast<const QRgb*>(guide.constScanLine(y));
+        uchar* lrow = lum.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const QRgb px = grow[x];
+            lrow[x] = static_cast<uchar>(
+                (77 * qRed(px) + 150 * qGreen(px) + 29 * qBlue(px)) >> 8);
+        }
+    }
+    QImage out = mask;
+    // Radius-2 Laplacian of luma: hair strands and hard edges carry large
+    // second-order energy; smooth glow wash and bilinear-upsample grid
+    // plateaus sit near zero even where their first-order slope is not.
+    const int R = 2;
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = mask.constScanLine(y);
+        uchar* orow = out.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int v = srow[x];
+            if (v <= 0 || v >= 255) continue;
+            const double keep = dist[y * w + x] <= 0
+                                    ? 1.0
+                                    : std::max(
+                                          0.0, 1.0 - dist[y * w + x] /
+                                                         double(kFall));
+            if (keep >= 1.0) continue;
+            const int xm = x - R >= 0 ? x - R : 0;
+            const int xp = x + R < w ? x + R : w - 1;
+            const int ym = y - R >= 0 ? y - R : 0;
+            const int yp = y + R < h ? y + R : h - 1;
+            const uchar* lxm = lum.constScanLine(y);
+            const uchar* lym = lum.constScanLine(ym);
+            const uchar* lyc = lum.constScanLine(y);
+            const uchar* lyp = lum.constScanLine(yp);
+            const double lap =
+                (double(lxm[xp]) + double(lxm[xm]) + double(lym[x]) +
+                 double(lyp[x]) - 4.0 * double(lyc[x])) *
+                0.25;
+            if (lap < texTol && lap > -texTol) {
+                // Featureless wash: attenuate with distance instead of
+                // zeroing, so no contour appears where the decay ends.
+                orow[x] = static_cast<uchar>(v * keep + 0.5);
+            }
+        }
+    }
+    return out;
+}
+
 QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
                                 int bandPx, int passes) {
     if (guide.isNull() || mask.isNull() || bandPx <= 0 || passes <= 0)
@@ -868,11 +1067,42 @@ QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
     }
     if (zx1 < zx0) return mask;  // nothing inside the band
     // Foreground/background models from confident pixels inside the loop
-    // bounds (same >=200 / <=55 honesty bar as the matte brush solve).
+    // bounds (foreground >= 200 as in the matte brush solve; background <= 8
+    // so only truly clear pixels vote — faint wisps would otherwise tint the
+    // backdrop model toward hair).
     // A colour guide models all three channels, a tone guide models luma.
+    // Distance-to-gate field (capped chamfer over the zone): model sampling
+    // stays near the boundary it solves, so one subject region's colours
+    // (coat, skin, hair) don't muddy another's. modelR tracks the band; if
+    // nothing confident sits that close, the pass falls back to zone-wide
+    // sampling below, so tight bands never starve outright.
+    const int modelR = bandPx;
+    QVector<int> dist((zy1 - zy0 + 1) * (zx1 - zx0 + 1), INT_MAX);
+    auto distAt = [&](int x, int y) -> int& {
+        return dist[(y - zy0) * (zx1 - zx0 + 1) + (x - zx0)];
+    };
+    for (int y = zy0; y <= zy1; ++y) {
+        const uchar* grow = gate.constScanLine(y);
+        for (int x = zx0; x <= zx1; ++x)
+            if (grow[x]) distAt(x, y) = 0;
+    }
+    for (int y = zy0; y <= zy1; ++y)
+        for (int x = zx0; x <= zx1; ++x) {
+            int d = distAt(x, y);
+            if (x > zx0) d = std::min(d, distAt(x - 1, y) + 1);
+            if (y > zy0) d = std::min(d, distAt(x, y - 1) + 1);
+            distAt(x, y) = std::min(d, modelR + 1);
+        }
+    for (int y = zy1; y >= zy0; --y)
+        for (int x = zx1; x >= zx0; --x) {
+            int d = distAt(x, y);
+            if (x < zx1) d = std::min(d, distAt(x + 1, y) + 1);
+            if (y < zy1) d = std::min(d, distAt(x, y + 1) + 1);
+            distAt(x, y) = std::min(d, modelR + 1);
+        }
     double fcr = 0, fcg = 0, fcb = 0, bcr = 0, bcg = 0, bcb = 0;
     auto models = [&](const QImage& m, double& fg, double& bg, int& fn,
-                      int& bn) {
+                      int& bn, int maxDist) {
         double fs = 0, bs = 0;
         fcr = fcg = fcb = bcr = bcg = bcb = 0.0;
         fn = 0;
@@ -885,6 +1115,7 @@ QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
                                          argb.constScanLine(y))
                                    : nullptr;
             for (int x = zx0; x <= zx1; ++x) {
+                if (maxDist >= 0 && distAt(x, y) > maxDist) continue;
                 const uchar v = mrow[x];
                 if (v >= 200) {
                     if (isColor) {
@@ -896,7 +1127,15 @@ QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
                         fs += lrow[x];
                     }
                     ++fn;
-                } else if (v <= 55) {
+                } else if (v <= 8) {
+                    // Background samples must be truly clear: the old <=55 bar
+                    // admitted faint wisps and skirt pixels (coverage 9..55),
+                    // whose hair-mixed colours polluted the backdrop model and
+                    // made real background read "far from bg" — arming the
+                    // bg-proof that then protected wash, skirts and
+                    // hallucinated domes from ever being solved down. Clear
+                    // pixels keep the model honest; starvation falls back to
+                    // the zone-wide/global means below as before.
                     if (isColor) {
                         const QRgb px = crow[x];
                         bcr += qRed(px);
@@ -923,11 +1162,79 @@ QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
         }
     };
     QImage work = mask;
+    // Global fallback models: soft AI masks often hold too few confident
+    // (fg >= 200 / truly-clear bg) samples inside the zone for the local
+    // means, in which case every pass used to bail out and the dialog visibly
+    // did nothing.
+    // Project against whole-image means instead; only a fully soft mask
+    // keeps its input.
+    double gfg[3] = {}, gbg[3] = {};
+    long gfn = 0, gbn = 0;
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = mask.constScanLine(y);
+        const QRgb* crow = isColor
+                               ? reinterpret_cast<const QRgb*>(
+                                     argb.constScanLine(y))
+                               : nullptr;
+        const uchar* lrow =
+            isColor ? nullptr : luma.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const uchar v = srow[x];
+            if (v >= 200) {
+                if (isColor) {
+                    const QRgb px = crow[x];
+                    gfg[0] += qRed(px);
+                    gfg[1] += qGreen(px);
+                    gfg[2] += qBlue(px);
+                } else {
+                    gfg[0] += lrow[x];
+                    gfg[1] += lrow[x];
+                    gfg[2] += lrow[x];
+                }
+                ++gfn;
+            } else if (v <= 8) {
+                // Same truly-clear bar as the local models above: faint wisps
+                // must not vote in the global backdrop mean either.
+                if (isColor) {
+                    const QRgb px = crow[x];
+                    gbg[0] += qRed(px);
+                    gbg[1] += qGreen(px);
+                    gbg[2] += qBlue(px);
+                } else {
+                    gbg[0] += lrow[x];
+                    gbg[1] += lrow[x];
+                    gbg[2] += lrow[x];
+                }
+                ++gbn;
+            }
+        }
+    }
+    const bool gHaveBoth = gfn >= 8 && gbn >= 8;
+    if (gHaveBoth) {
+        for (int c = 0; c < 3; ++c) {
+            gfg[c] /= gfn;
+            gbg[c] /= gbn;
+        }
+    }
     for (int pass = 0; pass < passes; ++pass) {
         double fg = 0, bg = 0;
         int fn = 0, bn = 0;
-        models(work, fg, bg, fn, bn);
-        if (fn < 8 || bn < 8) return work;  // cannot model both sides
+        // Near-gate models first: boundary colours, not zone averages.
+        models(work, fg, bg, fn, bn, modelR);
+        if (fn < 8 || bn < 8)
+            models(work, fg, bg, fn, bn, -1);  // whole zone, then global
+        if (fn < 8 || bn < 8) {
+            if (!gHaveBoth) return work;  // cannot model either side
+            fcr = gfg[0];
+            fcg = gfg[1];
+            fcb = gfg[2];
+            bcr = gbg[0];
+            bcg = gbg[1];
+            bcb = gbg[2];
+            fg = 0.299 * gfg[0] + 0.587 * gfg[1] + 0.114 * gfg[2];
+            bg = 0.299 * gbg[0] + 0.587 * gbg[1] + 0.114 * gbg[2];
+            fn = bn = 8;
+        }
         // Degenerate guide: foreground and background read the same colour
         // (flat paper under the edge, same-tone subject/background). There
         // is nothing to solve against, and dividing it out would erase the
@@ -1086,62 +1393,111 @@ QImage selectionMaskBlendAiHair(const QImage& base, const QImage& aiMask,
 }
 
 
+// Separable running-sum box mean over a w*h float plane (declared here so the
+// decontamination below can reuse it for its colour diffusion).
+static void boxMeanPlane(QVector<float>& data, int w, int h, int r);
+
+// Decontaminate a straight (unpremultiplied) RGBA cutout: remove the background
+// colour that bleeds into the semi-transparent edge / hair-wisp band.
+//
+// Follows the industry approach (Photoshop/Affinity "decontaminate colours"):
+// edge pixels take the colour of NEARBY CONFIDENT FOREGROUND instead of trying
+// to unmix the background out. Unmixing (fg = (observed - bg*(1-a))/a) is
+// ill-conditioned where alpha is small (1/a noise gain → rainbow speckle) and
+// wrong wherever alpha itself is overstated (it then faithfully preserves the
+// contaminant); replacement needs no division and no background estimate, so
+// neither failure mode exists. A weighted colour diffusion (push-pull
+// inpainting) propagates confident subject colour outward; each edge pixel
+// blends toward it by `amount` — full blend through most of the band, fading
+// to zero at the confident interior so solid detail is untouched and no seam
+// appears. Alpha is never modified; only colour is corrected.
 bool decontaminateStraightRgba(QImage& straight, const QImage& coverage,
-                               int bgRadius) {
+                               int radius, double amount) {
     if (straight.isNull() || coverage.isNull()) return false;
     if (straight.size() != coverage.size()) return false;
     if (straight.format() != QImage::Format_RGBA8888)
         straight = straight.convertToFormat(QImage::Format_RGBA8888);
     if (straight.isNull()) return false;
-    bgRadius = std::clamp(bgRadius, 2, 64);
+    // Clamp generously: callers pass proxy-relative radii (tuned at proxyCap,
+    // scaled by 1/proxyScale for full-res delivery), so the ceiling must clear
+    // ~3x the tuned proxy value. Cost is radius-independent (running sums).
+    radius = std::clamp(radius, 2, 128);
+    amount = std::clamp(amount, 0.0, 1.0);
     const int w = straight.width(), h = straight.height();
     const QImage cov =
         coverage.format() == QImage::Format_Grayscale8
             ? coverage
             : coverage.convertToFormat(QImage::Format_Grayscale8);
+
+    const int n = w * h;
+    constexpr int kKnown = 230;  // confident-foreground coverage threshold
+    // Foreground estimate sources (confident subject) for the edge fill.
+    QVector<float> wr(n), rr(n), gr(n), br(n);
+    bool anyKnown = false;
+    bool anyEdge = false;
+    for (int y = 0; y < h; ++y) {
+        const uchar* crow = cov.constScanLine(y);
+        const uchar* srow = straight.constScanLine(y);
+        const int row = y * w;
+        for (int x = 0; x < w; ++x) {
+            const int i = row + x;
+            const int c = crow[x];
+            if (c >= kKnown) {
+                wr[i] = 1.0f;
+                rr[i] = static_cast<float>(srow[x * 4 + 0]);
+                gr[i] = static_cast<float>(srow[x * 4 + 1]);
+                br[i] = static_cast<float>(srow[x * 4 + 2]);
+                anyKnown = true;
+            } else if (c > 0) {
+                anyEdge = true;
+            }
+        }
+    }
+    if (!anyKnown || !anyEdge) return false;
+
+    // Diffuse the known colours outward. Two blur scales: a small radius for
+    // fine strands and a larger one to carry colour across wider gaps, summed
+    // so short strands keep detail while isolated wisps still get filled.
+    const int r1 = std::clamp(radius / 2, 2, 12);
+    const int r2 = std::clamp(radius, 6, 32);
+    // Blur weight and each colour channel by r1, accumulate, then by r2.
+    boxMeanPlane(wr, w, h, r1);
+    boxMeanPlane(rr, w, h, r1);
+    boxMeanPlane(gr, w, h, r1);
+    boxMeanPlane(br, w, h, r1);
+    // (boxMeanPlane is a plain mean; wr now holds mean-weight in [0,1].)
+    // Second, wider pass on top for robustness across broader wisps.
+    boxMeanPlane(wr, w, h, r2 - r1 > 0 ? r2 - r1 : 1);
+    boxMeanPlane(rr, w, h, r2 - r1 > 0 ? r2 - r1 : 1);
+    boxMeanPlane(gr, w, h, r2 - r1 > 0 ? r2 - r1 : 1);
+    boxMeanPlane(br, w, h, r2 - r1 > 0 ? r2 - r1 : 1);
+
+    // Write back: recolour the edge band from the diffused foreground.
+    // Full `amount` blend through most of the band, fading linearly to zero
+    // at the confident interior — solid detail is never touched and no seam
+    // appears where the correction ends.
+    constexpr int kFull = 190;  // full blend at/below this coverage
     bool touched = false;
     for (int y = 0; y < h; ++y) {
         const uchar* crow = cov.constScanLine(y);
         uchar* srow = straight.scanLine(y);
+        const int row = y * w;
         for (int x = 0; x < w; ++x) {
             const int c = crow[x];
-            if (c <= 0 || c >= 255) continue;
-            // Background estimate: mean of nearby pixels that read as clear.
-            long br = 0, bg = 0, bb = 0;
-            int n = 0;
-            for (int yy = std::max(0, y - bgRadius);
-                 yy <= std::min(h - 1, y + bgRadius) && n < 64; ++yy) {
-                const uchar* brow = cov.constScanLine(yy);
-                const uchar* sprow = straight.constScanLine(yy);
-                for (int xx = std::max(0, x - bgRadius);
-                     xx <= std::min(w - 1, x + bgRadius) && n < 64; ++xx) {
-                    if (brow[xx] < 16) {
-                        br += sprow[xx * 4 + 0];
-                        bg += sprow[xx * 4 + 1];
-                        bb += sprow[xx * 4 + 2];
-                        ++n;
-                    }
-                }
-            }
-            if (n == 0) continue;
-            const double covF = c / 255.0;
-            // Unmixing divides by coverage: quantization and background-
-            // mean error get amplified by 1/a, which turns near-empty edge
-            // pixels into colored garbage. Floor the divisor — the visible
-            // result is unaffected because the output alpha really is the
-            // low coverage, so those pixels contribute almost nothing.
-            const double aUse = std::max(0.05, covF);
-            const double inv = 1.0 / aUse;
+            if (c <= 0 || c >= kKnown) continue;  // background or confident fg
+            const int i = row + x;
+            const float wv = wr[i];
+            if (wv <= 1e-3f) continue;  // no known colour reached here
+            double t = amount;
+            if (c > kFull)
+                t *= double(kKnown - c) / double(kKnown - kFull);
             uchar* px = srow + x * 4;
             px[0] = static_cast<uchar>(std::clamp(
-                int((px[0] - (br / double(n)) * (1.0 - aUse)) * inv + 0.5), 0,
-                255));
+                int(px[0] + t * (rr[i] / wv - px[0]) + 0.5), 0, 255));
             px[1] = static_cast<uchar>(std::clamp(
-                int((px[1] - (bg / double(n)) * (1.0 - aUse)) * inv + 0.5), 0,
-                255));
+                int(px[1] + t * (gr[i] / wv - px[1]) + 0.5), 0, 255));
             px[2] = static_cast<uchar>(std::clamp(
-                int((px[2] - (bb / double(n)) * (1.0 - aUse)) * inv + 0.5), 0,
-                255));
+                int(px[2] + t * (br[i] / wv - px[2]) + 0.5), 0, 255));
             touched = true;
         }
     }
@@ -1250,6 +1606,52 @@ QImage selectionMaskMatteSolve(const QImage& color, const QImage& mask,
     // trustworthy model the honest result is the seed itself, never an
     // uncertainty stamp.
     QImage trial = mask;
+    // Nearest-confident search: when the local box starves, walk square
+    // rings outward to the closest >=200 / <=55 samples instead of projecting
+    // against whole-image averages (which smear coat, skin, hair and backdrop
+    // into mud). Bounded so vast soft regions bail out and keep their seed.
+    auto nearestModels = [&](int x, int y, int rMax, double f[3],
+                             double b[3]) {
+        double fs[3] = {}, bs[3] = {};
+        int fn = 0, bn = 0;
+        const int w = mask.width(), h = mask.height();
+        auto visit = [&](int nx, int ny) {
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) return;
+            const QRgb px = reinterpret_cast<const QRgb*>(
+                argb.constScanLine(ny))[nx];
+            if (qAlpha(px) < 16) return;
+            const uchar m = trial.constScanLine(ny)[nx];
+            if (m >= 200 && fn < 16) {
+                fs[0] += qRed(px);
+                fs[1] += qGreen(px);
+                fs[2] += qBlue(px);
+                ++fn;
+            } else if (m <= 55 && bn < 16) {
+                bs[0] += qRed(px);
+                bs[1] += qGreen(px);
+                bs[2] += qBlue(px);
+                ++bn;
+            }
+        };
+        for (int r = 1; r <= rMax && (fn < 8 || bn < 8); ++r) {
+            for (int dx = -r; dx <= r && (fn < 8 || bn < 8); ++dx) {
+                visit(x + dx, y - r);
+                visit(x + dx, y + r);
+            }
+            for (int dy = -r + 1; dy <= r - 1 && (fn < 8 || bn < 8);
+                 ++dy) {
+                visit(x - r, y + dy);
+                visit(x + r, y + dy);
+            }
+        }
+        if (fn < 8 || bn < 8) return false;
+        for (int c = 0; c < 3; ++c) {
+            f[c] = fs[c] / fn;
+            b[c] = bs[c] / bn;
+        }
+        return true;
+    };
+    const int rMaxSeek = std::max(16, std::min(int(radius * 2 + 16), 64));
     auto solve = [&](const QVector<float> p[8]) {
         for (int y = y0; y <= y1; ++y) {
             const QRgb* crow =
@@ -1261,14 +1663,25 @@ QImage selectionMaskMatteSolve(const QImage& color, const QImage& mask,
                 if (dx * dx + dy * dy > radius * radius) continue;
                 const int i = (y - ry0) * rw + (x - rx0);
                 const double fn = p[0][i], bn = p[1][i];
-                if (fn * window < 8.0 || bn * window < 8.0) continue;
+                double fR, fG, fB, bR, bG, bB;
+                if (fn * window >= 8.0 && bn * window >= 8.0) {
+                    fR = p[2][i] / fn;
+                    fG = p[3][i] / fn;
+                    fB = p[4][i] / fn;
+                    bR = p[5][i] / bn;
+                    bG = p[6][i] / bn;
+                    bB = p[7][i] / bn;
+                } else {
+                    double nf[3], nb[3];
+                    if (!nearestModels(x, y, rMaxSeek, nf, nb)) continue;
+                    fR = nf[0];
+                    fG = nf[1];
+                    fB = nf[2];
+                    bR = nb[0];
+                    bG = nb[1];
+                    bB = nb[2];
+                }
                 const QRgb px = crow[x];
-                const double fR = p[2][i] / fn;
-                const double fG = p[3][i] / fn;
-                const double fB = p[4][i] / fn;
-                const double bR = p[5][i] / bn;
-                const double bG = p[6][i] / bn;
-                const double bB = p[7][i] / bn;
                 const double lR = fR - bR, lG = fG - bG, lB = fB - bB;
                 const double sep = lR * lR + lG * lG + lB * lB;
                 if (sep < 12.0 * 12.0) continue;  // colours too close to tell
@@ -1317,6 +1730,113 @@ QImage selectionMaskMatteSolve(const QImage& color, const QImage& mask,
             const double fall = std::clamp(1.0 - d / radius, 0.0, 1.0);
             row[x] = static_cast<uchar>(std::clamp(
                 int(trow[x] * fall + row[x] * (1.0 - fall) + 0.5), 0, 255));
+        }
+    }
+    return out;
+}
+
+namespace {
+
+// Softness of the mask's edge for the smart-radius blend. Transition pixels
+// (0 < v < 255) score the local width of their ramp — the fraction of
+// mid-tones in a small box, high over hair/fur, ~0 at a hard step. The best
+// score propagates outward up to `reach` px (plateau, then a linear fade at
+// the end), so the wide treatment is licensed near a soft edge and never
+// near a hard one. (A purely local score dies a few px past the narrow gate
+// and the wide band would never fire; propagation is the same chamfer
+// pattern the wash decay uses.)
+QImage edgeSoftnessMap(const QImage& mask, int reach) {
+    constexpr int kRampBox = 4;
+    const int w = mask.width(), h = mask.height();
+    QVector<float> f(w * h, 0.0f);
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = mask.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int v = srow[x];
+            f[y * w + x] = (v > 8 && v < 247) ? 1.0f : 0.0f;
+        }
+    }
+    boxMeanPlane(f, w, h, kRampBox);
+    // Seeds are the ramp's own mid-tone pixels; the box density scores how
+    // wide the ramp is (a 1px-antialiased step → ~0 → stays hard; a real
+    // hair ramp → 1). Seeding non-ramp pixels instead would let their low
+    // local density cap the score right where the ramp ends — precisely
+    // where the wide band is needed.
+    const int cap = reach + 1;
+    QVector<int> dist(w * h, cap);
+    QVector<float> src(w * h, 0.0f);
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = mask.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            if (srow[x] <= 8 || srow[x] >= 247) continue;
+            const int i = y * w + x;
+            dist[i] = 0;
+            src[i] = static_cast<float>(
+                std::clamp((f[i] - 0.1) / 0.4, 0.0, 1.0));
+        }
+    }
+    // Chamfer propagation of (distance to the nearest ramp pixel, that
+    // pixel's score), capped at reach + 1.
+    auto relax = [&](int cur, int nb) {
+        const int nd = dist[nb] + 1;
+        if (nd < dist[cur]) {
+            dist[cur] = nd;
+            src[cur] = src[nb];
+        }
+    };
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int i = y * w + x;
+            if (x > 0) relax(i, i - 1);
+            if (y > 0) relax(i, i - w);
+        }
+    for (int y = h - 1; y >= 0; --y)
+        for (int x = w - 1; x >= 0; --x) {
+            const int i = y * w + x;
+            if (x + 1 < w) relax(i, i + 1);
+            if (y + 1 < h) relax(i, i + w);
+        }
+    QImage out(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        uchar* orow = out.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int i = y * w + x;
+            // Plateau then fade: full score across the first 2/3 of the
+            // reach (the wide band must actually fire just past the ramp,
+            // where the narrow gate stops), linear fade over the last third
+            // so no step appears where the influence ends.
+            const double fall =
+                std::clamp(3.0 * (reach - dist[i]) / reach, 0.0, 1.0);
+            orow[x] = static_cast<uchar>(
+                std::clamp(double(src[i]) * fall, 0.0, 1.0) * 255.0 + 0.5);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+QImage selectionMaskSnapSmart(const QImage& guide, const QImage& mask,
+                              int narrowPx, int widePx, int passes) {
+    if (guide.isNull() || mask.isNull() || guide.size() != mask.size())
+        return mask;
+    if (narrowPx <= 0) return mask;
+    if (widePx <= narrowPx)
+        return selectionMaskSnapToEdges(guide, mask, narrowPx, passes);
+    const QImage narrow = selectionMaskSnapToEdges(guide, mask, narrowPx, passes);
+    const QImage wide = selectionMaskSnapToEdges(guide, mask, widePx, passes);
+    const QImage soft = edgeSoftnessMap(mask, widePx);
+    const int w = mask.width(), h = mask.height();
+    QImage out = narrow;
+    for (int y = 0; y < h; ++y) {
+        const uchar* srow = soft.constScanLine(y);
+        const uchar* wrow = wide.constScanLine(y);
+        const uchar* nrow = narrow.constScanLine(y);
+        uchar* orow = out.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            const int s = srow[x];
+            orow[x] = static_cast<uchar>(
+                (wrow[x] * s + nrow[x] * (255 - s) + 127) / 255);
         }
     }
     return out;

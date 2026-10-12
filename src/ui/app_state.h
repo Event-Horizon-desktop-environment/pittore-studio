@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "engine/core/image.h"
+#include "engine/color/cmyk_image.h"
 #include "engine/core/tonal_ops.h"
 #include "engine/compute/brushes/loaders/loaders.h"
 #include "engine/compute/brushes/smudge/smudge.h"
@@ -210,6 +211,11 @@ struct LayerItem {
     // document-sized pixels) is the classic pixel layer. The compositor
     // resamples on the fly — bilinear on upscale, box-averaged on downscale.
     std::shared_ptr<pittore::Image> pixels;
+    // Device CMYK ink samples retained for a CMYK document. RGB `pixels`
+    // remain the display/render representation; native brush strokes update
+    // both, while RGB-boundary operations refresh the sidecar from appearance.
+    std::shared_ptr<pittore::color::CmykImage> cmykPixels;
+    std::uint64_t cmykSourceStamp = 0;
     QPointF offset{0, 0};   // document coords of source pixel (0,0)
     double scaleX = 1.0;    // document pixels per source pixel (always > 0)
     double scaleY = 1.0;
@@ -604,6 +610,14 @@ class DocumentItem {
     // the .cpp). Empty = nothing pending.
     QRect paintDirty;
 
+    // Wash-stroke overlay footprint (document space): union of the regions
+    // folded from the wash scratch into the live composite. The tile
+    // cache's simple tier blits own layer pixels (which a wash stroke
+    // never touches until bake), so layers intersecting this rect must
+    // fall back to the composite tier or the stroke flickers under ready
+    // tiles. Set by flushPaint's fold, cleared by bake/endStrokeState.
+    QRect washOverlayDirty;
+
     // The compute backend this document composites on. Set by AppState when the
     // document is created and when preferences change; nullptr until then (the
     // CPU reference backend is created lazily inside the .cpp).
@@ -733,7 +747,8 @@ class DocumentItem {
     // (lcx,lcy)+lradius in a lw×lh target, then drop the panel thumbnail.
     // Replaces the stamp-bump + thumbnail-clear pair at every dab site.
     void touchPixelsAfterDab(LayerItem& l, float lcx, float lcy, float lradius,
-                             std::uint32_t lw, std::uint32_t lh);
+                             std::uint32_t lw, std::uint32_t lh,
+                             bool preserveInkColor = false);
 
     DocumentSnapshot captureSnapshot() const;
     void restoreSnapshot(const DocumentSnapshot& s);
@@ -2099,6 +2114,22 @@ class AppState : public QObject {
     void endLiquifySession();
     void cancelLiquifySession();
 
+    // Last headless-capable AI command report (Auto Refine today), readable
+    // over the MCP bridge without touching log files — the production
+    // equivalent of the refine lab's get_state (command, outcome, model,
+    // timing, matte coverage, stages that ran).
+    struct AiRunReport {
+        QString command;
+        bool ok = false;
+        QString message = QStringLiteral("did not complete");
+        QString model;
+        double milliseconds = 0.0;
+        double coverage = 0.0;  // fraction of layer pixels with alpha > 127
+        QStringList stages;
+    };
+    const AiRunReport& lastAiRun() const { return lastAiRun_; }
+    void setLastAiRun(AiRunReport report) { lastAiRun_ = std::move(report); }
+
     // Multiply the active pixel layer's alpha by an external soft mask laid over
     // the layer's NATIVE pixels (AI background removal). `mask` is width×height
     // floats in [0,1], row-major, in the layer's pixel space. Commits the edit
@@ -2107,6 +2138,15 @@ class AppState : public QObject {
     // there is no paint-capable active layer or the mask size mismatches.
     bool applyActiveLayerAlpha(const float* mask, int width, int height,
                                const QString& historyName, const QString& iconKey);
+
+    // Replace the active pixel layer's full RGBA content from a straight-alpha
+    // RGBA8888 image (width×height must match the layer's native pixels).
+    // Commits the edit (sourceStamp++, thumbnail + composite invalidation,
+    // history entry). Returns false when there is no paint-capable active
+    // layer or the size mismatches.
+    bool replaceActiveLayerRgba(const QImage& rgba,
+                                const QString& historyName,
+                                const QString& iconKey);
 
     // Delete: when the document holds an arbitrary-shape (mask) selection,
     // erase just the selected pixels from the active pixel layer (soft edges
@@ -2195,6 +2235,12 @@ class AppState : public QObject {
     void liquifyLoadMeshRequested();
 
   private:
+    // Ensure a layer's native CMYK samples match its current RGB appearance
+    // and profile, then resolve the foreground into this document's inks.
+    bool prepareNativeCmykPaint(DocumentItem& doc, LayerItem& layer,
+                                const QColor& color,
+                                pittore::compute::NativeCmykPaint& paint,
+                                bool trackStroke = true);
     // Shared Paint Bucket / Magic Eraser flood. `erase` picks the operation
     // (paint the foreground vs multiply alpha down).
     bool floodEdit(const QPointF& docPos, bool erase);
@@ -2214,6 +2260,11 @@ class AppState : public QObject {
     // Paper grain for a dab's target space (invalid/disabled when none).
     // pressure01 scales strength when the texture-pressure toggle is on.
     pittore::compute::PatternTex resolveTexture(
+        ToolId tool, double lsx, double lsy, const QPointF& targetOffset,
+        double pressure01 = 1.0) const;
+    // Paper-grain evaluator for imported-bundle textures (invalid/disabled
+    // when the preset keeps the legacy combine or no pattern applies).
+    pittore::compute::papergrain::PaperGrain resolvePaperGrain(
         ToolId tool, double lsx, double lsy, const QPointF& targetOffset,
         double pressure01 = 1.0) const;
     // Masked second tip for a tool (invalid/disabled when none set).
@@ -2248,6 +2299,7 @@ class AppState : public QObject {
     // them into the layer on release. Armed per stroke for paint tools.
     bool washArmed_ = false;
     pittore::Image washScratch_{1, 1};
+    std::vector<std::array<std::uint16_t, 4>> washScratchCmyk_;
     QRect washDirty_;
     pittore::ui::brushcurve::Curve strokeSizeCurve_;
     pittore::ui::brushcurve::Curve strokeOpacityCurve_;
@@ -2300,6 +2352,10 @@ class AppState : public QObject {
         double sx, double sy);
     // Live dab pressure for the texture/mask resolvers above.
     double dabPressure01_ = 1.0;
+    // Native CMYK dabs keep the ink sidecar authoritative through a stroke;
+    // the RGB appearance fingerprint is refreshed once on pointer-up.
+    DocumentItem* nativeCmykStrokeDoc_ = nullptr;
+    LayerItem* nativeCmykStrokeLayer_ = nullptr;
 
     // Depth of nested begin/commit undo gestures. A Character-panel edit inside
     // a live Type session joins the session's step instead of starting its own.
@@ -2352,6 +2408,7 @@ class AppState : public QObject {
     // by beginTonalEdit covers the accepted edit.
     bool tonalEditActive_ = false;
     std::shared_ptr<pittore::Image> tonalEditPre_;
+    std::shared_ptr<pittore::color::CmykImage> tonalEditCmykPre_;
 
     // Momentary adjustment preview (begin/endAdjustmentPreview): stashed row
     // index + its prior visibility while hidden. -1 when idle.
@@ -2397,6 +2454,7 @@ class AppState : public QObject {
     // pre-stroke image the warp samples from; the buffers are w×h RGBAf staging
     // pairs reused across strokes and grown when the layer size changes.
     std::shared_ptr<pittore::Image> liquifySrc_;
+    std::shared_ptr<pittore::color::CmykImage> liquifyCmykSrc_;
     std::unique_ptr<pittore::compute::Buffer> liquifySrcBuf_;
     std::unique_ptr<pittore::compute::Buffer> liquifyDstBuf_;
     std::uint32_t liquifyBufW_ = 0;
@@ -2413,6 +2471,7 @@ class AppState : public QObject {
 
     TaskContext context_ = TaskContext::None;
     QString statusHint_;
+    AiRunReport lastAiRun_;
 
     // Last pointer position + sampled colour (see setCursorInfo).
     QPointF cursorPos_{0, 0};

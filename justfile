@@ -8,21 +8,23 @@ set shell := ["bash", "-o", "pipefail", "-c"]
 # and failing. Prepend the standard locations so user-shell builds resolve.
 export PATH := "/opt/cuda/bin:/opt/rocm/bin:" + env_var("PATH")
 
-# Build parallelism cap: ninja defaults to core-count jobs, but the test
-# tree compiles app_state.cpp (~1GB RSS with debug info) into ~60 test
-# binaries, so uncapped parallelism OOMs ordinary desktops. Budget ~3GB
-# per job from MemAvailable, clamped to [1, nproc]; PITTORE_JOBS overrides
-# outright. (The per-test recompilation itself is the deeper cost — see
-# tests/meson.build ui_core_sources; unifying that into one static lib is
-# the follow-up if build times still hurt.)
+# Build parallelism cap: ninja defaults to core-count jobs, but big TUs
+# (app_state.cpp runs ~1GB RSS with debug info) make uncapped parallelism
+# OOM ordinary desktops. Budget ~3GB per job from MemAvailable, clamped to
+# [1, nproc]; PITTORE_JOBS overrides outright. The same budget caps test
+# runtime parallelism below (meson test defaults to core-count processes,
+# and GPU/Qt test binaries are far heavier per process than the 3GB/job
+# compile budget assumes — never raise one without the other).
+# UI tests link the single pittore_ui_dep static lib (only two probe
+# harnesses still compile UI sources directly); the remaining per-job cost
+# is debug info + parallel links, which is what the cap bounds.
 JOBS := env_var_or_default("PITTORE_JOBS", `n=$(nproc); j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo); [ "${j:-0}" -lt 1 ] && j=1; [ "$j" -gt "$n" ] && j=$n; echo "$j"`)
 
 # Configure (first run only) + build only what changed into ./build.
 # Plain ninja tracks header/source mtimes, so repeat runs are no-ops when
 # nothing changed. Do NOT reconfigure here: `meson setup --reconfigure`
 # re-probes Qt/CUDA/HIP and regenerates the manifest on every run, which
-# needlessly widens multi-hundred-target rebuilds (app_state.cpp is also
-# compiled into ~60 test binaries by design, see tests/meson.build).
+# needlessly widens multi-hundred-target rebuilds.
 # GPU backends are auto-detected: CUDA when nvcc exists, HIP when hipcc exists.
 # Override with:  meson configure build -Dbackend-cuda=disabled
 build:
@@ -36,15 +38,17 @@ reconf:
 	meson setup --reconfigure build
 	ninja -C build -j{{JOBS}}
 
-# Build and run the full test suite (engine + kernel parity).
+# Build and run the full test suite (engine + kernel parity). Test
+# processes are capped by the same JOBS budget as the build: meson test
+# otherwise runs one process per core, and concurrent GPU/Qt test binaries
+# spike RAM far past what the desktops this cap protects can absorb.
 test: build
-	meson test -C build --print-errorlogs
+	meson test -C build --print-errorlogs --num-processes {{JOBS}}
 
-# Build ONLY the application, skipping the ~40 test binaries (each recompiles
-# the UI sources, so a full `build` after touching a central header looks like
-# "rebuilding everything"). This is the fast edit-run loop: with no changes
-# it is a no-op, with changes it compiles just those TUs and relinks one
-# binary. Use `build` when you need the tests too.
+# Build ONLY the application, skipping the test binaries. This is the fast
+# edit-run loop: with no changes it is a no-op, with changes it compiles
+# just those TUs and relinks one binary. Use `build` when you need the
+# tests too.
 #
 # Configures for release, because `just install` ships this and a debug binary
 # is only useful while you are actively working on it. Switch back to debug

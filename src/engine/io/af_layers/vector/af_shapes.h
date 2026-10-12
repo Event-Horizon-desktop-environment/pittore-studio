@@ -33,6 +33,11 @@ struct ShapeGeometry {
 std::optional<ShapeGeometry> shapeGeometry(const Graph& g, const Node* shpe,
                                            float x0, float y0, float x1, float y1);
 void transformAnchors(pittore::vector::VectorPath& path, const Mat& m);
+// Free-path curve records ("PCrv" Crvs→Data, 18-byte f64/f64/marker records
+// with a closed flag per subpath) as a transformed path. Shared by the shape
+// emitter and vector-crop masks so both read the records identically.
+std::optional<pittore::vector::VectorPath> pathFromCurveRecords(const Graph& g, const Node* node,
+                                                                const Mat& lctm);
 std::optional<pittore::vector::VectorShape> vectorPaint(
     const Graph& g, const Node* node, const Mat& ctm,
     pittore::vector::VectorPath path, bool evenOdd,

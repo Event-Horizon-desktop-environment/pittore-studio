@@ -28,6 +28,34 @@ QRect selectionMaskBbox(const QImage& mask);
 // Keep only the biggest 8-connected blob; clears stray specks. Null passes through.
 QImage selectionMaskLargestComponent(const QImage& mask);
 
+// Drop isolated 8-connected islands smaller than `minPixels`, keeping every
+// other pixel byte-identical. Refine input from AI masks is often sprinkled
+// with detached specks that no edge-band solver reaches (they sit outside
+// any boundary band); without this they survive to the committed result.
+// Connected soft edges are one mass with the subject, so only truly
+// detached islands go. Null passes through.
+QImage selectionMaskRemoveSpeckles(const QImage& mask, int minPixels = 32);
+
+// Fill small enclosed background holes: non-solid regions (coverage < 255)
+// fully enclosed by solid coverage (255) and smaller than `maxPixels` are set
+// to 255. This cleans snap-punched texture dots and sub-strand specks when
+// the edge solve runs last. Implemented as invert → RemoveSpeckles → invert:
+// exterior background and the soft edge skirt stay connected through the
+// inversion (kept); only truly enclosed islands are removed, so larger
+// enclosed gaps (real see-through hair) and floating strands survive. Edges
+// never move — only enclosed interiors change, and only upward.
+QImage selectionMaskFillSmallHoles(const QImage& mask, int maxPixels = 16);
+
+// Decay broad low-confidence wash far from the subject: partial coverage
+// (0 < v < 255) outside `supportPx` of any confident (>=200) pixel, in a
+// low-TEXTURE image region, is AI haze rather than hair — hair and strands
+// carry fine-scale Laplacian energy while glow wash is smooth second-order
+// flat (a plain gradient gate is fooled by the glow's own slope). Solid and
+// near-edge coverage is untouched. `guide` is an ARGB32 image the same size
+// (luma texture used). Null passes through.
+QImage selectionMaskDecayWash(const QImage& mask, const QImage& guide,
+                              int supportPx = 32, double texTol = 8.0);
+
 // Fill interior holes (background the flood from the border can't reach).
 // `bridgeRadius` seals narrow gaps first (scratch-only, edges never move).
 // Null passes through.
@@ -85,6 +113,13 @@ QImage selectionMaskMatteSolve(const QImage& color, const QImage& mask,
 // alone. Passes run the attraction repeatedly; 0 disables.
 QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
                                 int bandPx, int passes = 3);
+// Smart-radius snap: a narrow band pass everywhere plus a wide band pass
+// accepted only where the mask edge is soft (high local alpha variance, i.e.
+// hair/fur ramps rather than hard boundaries). Mirrors Photoshop's Smart
+// Radius: hard edges keep a tight treatment while soft zones get the wide
+// one, in a single run. `widePx` should exceed `narrowPx`; 0 disables.
+QImage selectionMaskSnapSmart(const QImage& guide, const QImage& mask,
+                              int narrowPx, int widePx, int passes = 3);
 // AI hair enhance blend (the Refine dialog's Enhance Edges button): take the
 // portrait-matting AI's soft `aiMask` only inside `bandPx` of the current
 // `base` edge, keep `base` everywhere else. `aiMask` polarity is auto-fixed
@@ -94,14 +129,18 @@ QImage selectionMaskSnapToEdges(const QImage& guide, const QImage& mask,
 // unchanged (nothing to enhance).
 QImage selectionMaskBlendAiHair(const QImage& base, const QImage& aiMask,
                                 int bandPx);
-// Foreground decontamination for straight-alpha RGBA8888 `straight`: edge
-// pixels (0 < coverage < 255 from `coverage`) are unmixed against a
-// background estimated from nearby pixels with coverage < 16 (spiral search
-// up to `bgRadius`). The unmix divisor is floored at 0.05 coverage so
-// near-empty pixels can't amplify noise into colored garbage. Alpha is
-// preserved; fully covered/empty pixels and the rest of the image are
-// untouched. Returns false when sizes mismatch.
+// Foreground decontamination for straight-alpha RGBA8888 `straight`: removes
+// the backdrop colour that bleeds into the semi-transparent edge / hair-wisp
+// band (0 < coverage < 255 from `coverage`). Industry approach
+// (Photoshop/Affinity "decontaminate colours"): edge pixels take the colour
+// of nearby confident foreground instead of unmixing the background out —
+// unmixing is ill-conditioned at low alpha and wrong wherever alpha itself is
+// overstated. Confident subject colour is propagated outward by weighted
+// diffusion; each edge pixel blends toward it by `amount` (full blend through
+// most of the band, fading to zero at the confident interior). `radius`
+// sets the diffusion reach. Alpha is preserved; fully covered/empty pixels
+// and the rest of the image are untouched. Returns false when sizes mismatch.
 bool decontaminateStraightRgba(QImage& straight, const QImage& coverage,
-                               int bgRadius = 12);
+                               int radius = 12, double amount = 0.85);
 
 }  // namespace pittore::ui

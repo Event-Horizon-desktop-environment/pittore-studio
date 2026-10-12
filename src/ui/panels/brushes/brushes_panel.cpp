@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "engine/compute/brushes/loaders/loaders.h"
+#include "engine/compute/brushes/loaders/pat.h"
 #include "engine/io/zip.h"
 #include "ui/brushes/brush_library.h"
 #include "ui/brushes/brush_preview.h"
@@ -119,6 +120,15 @@ brushpreview::AutoParams autoParamsForTool(AppState* state, ToolId tool) {
         0.0, 100.0);
     a.spacingAuto =
         state->option(tool, QStringLiteral("brush_spacing_auto")).toBool();
+    a.spacingAutoCoeff = std::clamp(
+        state->option(tool, QStringLiteral("brush_spacing_auto_coeff"))
+            .toDouble(),
+        0.0, 8.0);
+    a.mixOp = pittore::compute::dabmix::mix_from_id(
+        state->option(tool, QStringLiteral("brush_composite"))
+            .toString()
+            .toUtf8()
+            .constData());
     return a;
 }
 
@@ -173,6 +183,28 @@ brushpreview::BrushPreviewWidget::OwnedPattern patternForTool(AppState* state,
     out.tex.cutHi = float(std::clamp(dbl("brush_texture_cuthi", 1.0), 0.0, 1.0));
     if (out.tex.cutHi < out.tex.cutLo)
         std::swap(out.tex.cutLo, out.tex.cutHi);
+    // Paper-grain evaluator for bundle-imported textures: same tile, the
+    // grain pipeline instead of the legacy combine.
+    if (state->option(tool, QStringLiteral("brush_texture_grain")).toBool()) {
+        out.grainGray = pat->gray;
+        out.grain.gray = out.grainGray.data();
+        out.grain.w = pat->w;
+        out.grain.h = pat->h;
+        out.grain.strength = out.tex.strength;
+        out.grain.scale = out.tex.scale;
+        out.grain.offsetX = 0.0f;
+        out.grain.offsetY = 0.0f;
+        out.grain.neutral = out.tex.neutral;
+        out.grain.brightness = out.tex.brightness;
+        out.grain.contrast = out.tex.contrast;
+        out.grain.invert = out.tex.invert;
+        out.grain.mode = static_cast<pittore::compute::papergrain::GrainMode>(
+            std::clamp(out.tex.mode, 0, 2));
+        out.grain.cutoffPolicy = out.tex.cutoffPolicy;
+        out.grain.cutLo = out.tex.cutLo;
+        out.grain.cutHi = out.tex.cutHi;
+        out.grainOn = true;
+    }
     return out;
 }
 
@@ -356,6 +388,10 @@ class BrushesPanel final : public QWidget {
         p.spacingAuto =
             state_->option(tool, QStringLiteral("brush_spacing_auto"))
                 .toBool();
+        p.spacingAutoCoeff = std::clamp(
+            state_->option(tool, QStringLiteral("brush_spacing_auto_coeff"))
+                .toDouble(),
+            0.0, 8.0);
         p.opacity = opt("opacity", 100.0);
         p.tipKind = state_->option(tool, QStringLiteral("brush_stamp"))
                         .toString()
@@ -421,6 +457,12 @@ class BrushesPanel final : public QWidget {
         p.textureContrast = opt("brush_texture_contrast", 100.0);
         p.textureInvert =
             state_->option(tool, QStringLiteral("brush_texture_invert"))
+                .toBool();
+        p.textureGrain =
+            state_->option(tool, QStringLiteral("brush_texture_grain"))
+                .toBool();
+        p.textureGrain =
+            state_->option(tool, QStringLiteral("brush_texture_grain"))
                 .toBool();
         p.hoseId = state_->option(tool, QStringLiteral("brush_hose"))
                        .toString();
@@ -729,6 +771,9 @@ class BrushesPanel final : public QWidget {
         a.sharpness = std::clamp(p.sharpness, 0.0, 100.0);
         a.soften = std::clamp(p.soften, 0.0, 100.0);
         a.spacingAuto = p.spacingAuto;
+        a.spacingAutoCoeff = std::clamp(p.spacingAutoCoeff, 0.0, 8.0);
+        a.mixOp = pittore::compute::dabmix::mix_from_id(
+            p.compositeOp.toUtf8().constData());
         return a;
     }
 
@@ -762,6 +807,27 @@ class BrushesPanel final : public QWidget {
         out.tex.cutHi = float(std::clamp(p.textureCutHi, 0.0, 1.0));
         if (out.tex.cutHi < out.tex.cutLo)
             std::swap(out.tex.cutLo, out.tex.cutHi);
+        if (p.textureGrain) {
+            out.grainGray = pat->gray;
+            out.grain.gray = out.grainGray.data();
+            out.grain.w = pat->w;
+            out.grain.h = pat->h;
+            out.grain.strength = out.tex.strength;
+            out.grain.scale = out.tex.scale;
+            out.grain.offsetX = 0.0f;
+            out.grain.offsetY = 0.0f;
+            out.grain.neutral = out.tex.neutral;
+            out.grain.brightness = out.tex.brightness;
+            out.grain.contrast = out.tex.contrast;
+            out.grain.invert = out.tex.invert;
+            out.grain.mode =
+                static_cast<pittore::compute::papergrain::GrainMode>(
+                    std::clamp(p.textureMode, 0, 2));
+            out.grain.cutoffPolicy = out.tex.cutoffPolicy;
+            out.grain.cutLo = out.tex.cutLo;
+            out.grain.cutHi = out.tex.cutHi;
+            out.grainOn = true;
+        }
         return out;
     }
 
@@ -1067,9 +1133,7 @@ class BrushesPanel final : public QWidget {
                               : safe + QStringLiteral("-%1.png").arg(n);
             if (!QFile::exists(QDir(brushTipsDir()).filePath(fileName))) break;
         }
-        QImage out((int)tip.w, (int)tip.h,
-                   tip.color ? QImage::Format_ARGB32
-                             : QImage::Format_Grayscale8);
+        QImage out((int)tip.w, (int)tip.h, QImage::Format_ARGB32);
         for (std::uint32_t y = 0; y < tip.h; ++y) {
             for (std::uint32_t x = 0; x < tip.w; ++x) {
                 const std::size_t i = std::size_t(y) * tip.w + x;
@@ -1080,10 +1144,13 @@ class BrushesPanel final : public QWidget {
                                        int(tip.blue[i] * 255.0f),
                                        int(tip.alpha[i] * 255.0f)));
                 } else {
-                    // Raw scanline write: Grayscale8 setPixel goes through
-                    // the empty color table (lands as 39); scanlines do not.
-                    out.scanLine(y)[x] =
-                        (std::uint8_t)(tip.alpha[i] * 255.0f);
+                    // Alpha-carrying gray: coverage survives stampFromImage
+                    // via the alpha channel instead of the opaque 1-luma
+                    // fallback (which would invert native light-paints tips
+                    // on every save/load cycle).
+                    out.setPixel(x, y,
+                                 qRgba(0, 0, 0,
+                                       int(tip.alpha[i] * 255.0f)));
                 }
             }
         }
@@ -1121,9 +1188,11 @@ class BrushesPanel final : public QWidget {
     }
 
     static QImage tipToImage(const pittore::compute::StampTip& tip) {
-        QImage img((int)tip.w, (int)tip.h,
-                   tip.color ? QImage::Format_ARGB32
-                             : QImage::Format_Grayscale8);
+        // Always ARGB32 with coverage in the alpha channel: grayscale tips
+        // keep their exact coverage through stampFromImage (which reads
+        // alpha when present). A Grayscale8 write would force the opaque
+        // 1-luma fallback on reload and invert native (light-paints) tips.
+        QImage img((int)tip.w, (int)tip.h, QImage::Format_ARGB32);
         for (std::uint32_t y = 0; y < tip.h; ++y) {
             for (std::uint32_t x = 0; x < tip.w; ++x) {
                 const std::size_t i = std::size_t(y) * tip.w + x;
@@ -1134,8 +1203,8 @@ class BrushesPanel final : public QWidget {
                                        int(tip.blue[i] * 255.0f),
                                        int(tip.alpha[i] * 255.0f)));
                 } else {
-                    img.scanLine(y)[x] =
-                        (std::uint8_t)(tip.alpha[i] * 255.0f);
+                    const int a = int(tip.alpha[i] * 255.0f);
+                    img.setPixel(x, y, qRgba(0, 0, 0, a));
                 }
             }
         }
@@ -1322,6 +1391,29 @@ class BrushesPanel final : public QWidget {
         return QImage();
     }
 
+    // Decode bundle paper bytes (PNG, else GIMP PAT) to a QImage.
+    // Empty on failure.
+    QImage bundlePatternImage(const QByteArray& bytes) {
+        QImage img;
+        img.loadFromData(bytes, "PNG");
+        if (!img.isNull()) return img;
+        pittore::compute::brushload::PatImage pat;
+        const auto* raw =
+            reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        if (!pittore::compute::brushload::decode_pat(
+                raw, std::size_t(bytes.size()), &pat))
+            return QImage();
+        QImage out((int)pat.w, (int)pat.h, QImage::Format_Grayscale8);
+        for (std::uint32_t y = 0; y < pat.h; ++y) {
+            uchar* row = out.scanLine(y);
+            for (std::uint32_t x = 0; x < pat.w; ++x) {
+                row[x] = static_cast<uchar>(
+                    pat.gray[std::size_t(y) * pat.w + x] * 255.0f);
+            }
+        }
+        return out;
+    }
+
     bool addLooseBundleTip(const QString& baseName, const QByteArray& bytes) {
         const QString ext = baseName.section(QChar('.'), -1).toLower();
         const QString base = baseName.section(QChar('.'), 0, -2);
@@ -1362,6 +1454,8 @@ class BrushesPanel final : public QWidget {
         p.angle = std::clamp(bp.angleDeg, -180.0, 180.0);
         p.roundness = std::clamp(bp.roundness, 1.0, 100.0);
         p.spacing = std::clamp(bp.spacingPct, 1.0, 200.0);
+        p.spacingAuto = bp.useAutoSpacing;
+        p.spacingAutoCoeff = std::clamp(bp.autoSpacingCoeff, 0.0, 8.0);
         p.opacity = std::clamp(bp.opacity, 1.0, 100.0);
         p.pressureSize = bp.pressureSize;
         p.pressureOpacity = bp.pressureOpacity;
@@ -1384,6 +1478,10 @@ class BrushesPanel final : public QWidget {
         p.flowPct = std::clamp(bp.flowPct, 1.0, 100.0);
         p.tags = bp.tags;
         p.paintingMode = bp.paintingMode;
+        p.compositeOp = bp.compositeOp;
+        p.darkenPct = std::clamp(bp.darkenPct, 0.0, 100.0);
+        p.sharpness = std::clamp(bp.sharpness, 0.0, 100.0);
+        p.soften = std::clamp(bp.softness, 0.0, 100.0);
         p.rotationMode = std::clamp(bp.rotationMode, 0, 5);
         p.rotationCurve = bp.rotationCurve;
         p.sourceMode = std::clamp(bp.sourceMode, 0, 2);
@@ -1411,8 +1509,7 @@ class BrushesPanel final : public QWidget {
         p.textureCutLo = std::clamp(bp.textureCutLo, 0.0, 1.0);
         p.textureCutHi = std::clamp(bp.textureCutHi, 0.0, 1.0);
         if (bp.hasTexture && !bp.texturePng.isEmpty()) {
-            QImage img;
-            img.loadFromData(bp.texturePng, "PNG");
+            const QImage img = bundlePatternImage(bp.texturePng);
             if (!img.isNull()) {
                 const QString fileName = storePattern(bp.name, img);
                 if (!fileName.isEmpty()) {
@@ -1425,6 +1522,7 @@ class BrushesPanel final : public QWidget {
                     p.textureContrast =
                         std::clamp(bp.textureContrast, 0.0, 400.0);
                     p.textureInvert = bp.textureInvert;
+                    p.textureGrain = true;
                 }
             }
         }
@@ -1501,6 +1599,9 @@ class BrushesPanel final : public QWidget {
             return true;
         }
         tip.spacingPct = float(p.spacing);
+        tip.spacingAuto = bp.useAutoSpacing;
+        tip.spacingAutoCoeff = float(std::clamp(bp.autoSpacingCoeff, 0.0, 8.0));
+        tip.sanitize();
         const QString fileName = storeStampTip(bp.name, tip);
         if (fileName.isEmpty()) return false;
         p.tipKind = QStringLiteral("stamp");

@@ -64,6 +64,10 @@ int main(int argc, char** argv) {
     // Live-session AI bridge: local socket for the pittore-mcp shim.
     // Bridgeless (second instance) is fine — the app runs on regardless.
     pittore::ui::McpBridge mcpBridge(&state);
+    // Headless command entry (Auto Refine et al. by id) for MCP clients.
+    mcpBridge.setCommandRunner([&window](const QString& id) {
+        return window.runHeadlessCommand(id);
+    });
     mcpBridge.start();
 
     return QApplication::exec();

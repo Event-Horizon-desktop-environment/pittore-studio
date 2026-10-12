@@ -1,4 +1,5 @@
 #include "ui/main_window.h"
+#include "ui/color_mode.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -106,7 +107,8 @@ void MainWindow::newDocumentDialog() {
     dpi->setSuffix(tr(" ppi"));
     auto* mode = new QComboBox(&dialog);
     mode->addItems({QStringLiteral("RGB/8"), QStringLiteral("RGB/16"), QStringLiteral("RGB/32"),
-                    QStringLiteral("Grayscale/8"), QStringLiteral("CMYK/8")});
+                    QStringLiteral("Grayscale/8"), QStringLiteral("CMYK/8"),
+                    QStringLiteral("CMYK/16")});
     const int modeIdx = mode->findData(prefs.newDocColorMode);
     mode->setCurrentIndex(modeIdx >= 0 ? modeIdx : 0);
 
@@ -125,7 +127,12 @@ void MainWindow::newDocumentDialog() {
         DocumentItem* doc = state_->addDocument(name->text(),
                                                 QSize(width->value(), height->value()),
                                                 dpi->value());
-        if (doc) doc->colorMode = mode->currentText();
+        if (doc) {
+            doc->colorMode = mode->currentText();
+            if (doc->colorMode.startsWith(QStringLiteral("CMYK"),
+                                          Qt::CaseInsensitive))
+                doc->iccProfile = resolveCmykProfile(*doc);
+        }
         canvas_->zoomToFit();
     }
 }

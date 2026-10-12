@@ -152,16 +152,17 @@ SegmentResult segment_rgba8_pair(const std::uint8_t* rgba, int width, int height
 // result is merged as max(original, refined), so pixels are only ever ADDED —
 // coarse SAM silhouettes routinely run a few source pixels inside clothing and
 // hair edges, and this recovers that sliver without disturbing an already
-// correct boundary. A final 0.35..0.65 level (centred on the 0.5 decision
+// correct boundary. A final 0.15..0.85 level (centred on the 0.5 decision
 // point, so the binary mask is unchanged) zeroes the faint low-alpha tail the
-// filter leaves over background and keeps a graded band for hair/soft edges.
+// filter leaves over background and keeps a wide graded band for hair/soft
+// edges: steeper bands compress real hair gradation into stair-steps.
 // `rgba` is the layer's straight-alpha RGBA8 at width×height; `alpha` (values
-// in [0,1]) is updated in place. radius ≈ 10, eps ≈ 1e-3, level band 0.35..0.65
+// in [0,1]) is updated in place. radius ≈ 10, eps ≈ 1e-3, level band 0.15..0.85
 // by default (levelLo/levelHi are optional overrides used by diagnostics).
 void guided_refine_alpha(const std::uint8_t* rgba, int width, int height,
                          std::vector<float>& alpha, int radius = 10,
-                         float eps = 1e-3f, float levelLo = 0.35f,
-                         float levelHi = 0.65f);
+                         float eps = 1e-3f, float levelLo = 0.15f,
+                         float levelHi = 0.85f);
 
 // Pixel-exact conformance to a reference mask. Replaces `alpha` in place with
 // the reference's own values (grayscale / 255), so the resulting selection
