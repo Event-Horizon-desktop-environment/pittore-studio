@@ -778,8 +778,12 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     // Kept only when it carries information the recovered stack lacks: the
     // render itself (nothing else recovered) or the reference copy of
     // skipped content. A clean import drops it instead of leaving a
-    // confusing extra row in the panel.
-    const bool keepFlat = hasFlat && (useFlatBase || pd.skippedLayers > 0);
+    // confusing extra row in the panel. Both incomplete signals count:
+    // skippedLayers is the authoritative count, while complete==false covers
+    // docs that predate the counter (the codec defines complete as
+    // skippedLayers==0, so they agree on real decodes).
+    const bool keepFlat =
+        hasFlat && (useFlatBase || pd.skippedLayers > 0 || !pd.complete);
     if (keepFlat) {
         // Ground-truth base: the flattened render, scaled to fill the canvas.
         LayerItem base;
