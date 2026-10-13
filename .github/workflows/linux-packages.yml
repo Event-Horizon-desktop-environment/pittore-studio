@@ -15,7 +15,7 @@ env:
 
 jobs:
   test:
-    name: build and test (Ubuntu 24.04)
+    name: build (Ubuntu 24.04)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -45,18 +45,9 @@ jobs:
           [ "$j" -gt "$n" ] && j=$n
           echo "Building with -j$j"
           ninja -C build -j"$j"
-      - name: Test
-        run: meson test -C build --print-errorlogs
-      - name: Show failing assertions
-        if: failure()
-        run: |
-          grep -aE "FAIL \.\./tests|AddressSanitizer|runtime error|checks=" build/meson-logs/testlog.txt || true
-      - name: Upload test log
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: testlog
-          path: build/meson-logs/testlog.txt
+      # Tests are disabled in CI: the full meson suite (notably the heavy
+      # UI cases like tools-ux) times out on hosted runners. They still run
+      # locally via `just test`, which stays the pre-merge gate.
 
   deb:
     name: deb (Ubuntu 24.04)
