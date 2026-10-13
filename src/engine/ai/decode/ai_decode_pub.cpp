@@ -81,6 +81,13 @@ SamDecodeResult refine_mask(const SamEncodings& enc, int px, int py,
                             const std::string& decoderPath) {
     SamDecodeResult res;
 #ifndef PITTORE_HAS_ONNX
+    // No-ONNX stub: the parameters feed the ONNX path below, so they are
+    // intentionally unused in this configuration.
+    (void)enc;
+    (void)px;
+    (void)py;
+    (void)seedAlpha;
+    (void)decoderPath;
     res.error = "This build links no ONNX Runtime.";
     return res;
 #else

@@ -31,6 +31,11 @@ SamEncodings encode_rgba8(const std::uint8_t* rgba, int width, int height,
     enc.width = width;
     enc.height = height;
 #ifndef PITTORE_HAS_ONNX
+    // No-ONNX stub: the parameters feed the ONNX path below, so they are
+    // intentionally unused in this configuration.
+    (void)rgba;
+    (void)encoderPath;
+    (void)inputSize;
     enc.error = "This build links no ONNX Runtime. Install onnxruntime (or "
                 "onnxruntime-cuda) and rebuild, or pass -Donnxruntime-root.";
     return enc;

@@ -98,11 +98,6 @@ double maxStepAt(const QImage& m, int& ax, int& ay, int& av, int& bv) {
     return mx;
 }
 
-double maxStep(const QImage& m) {
-    int ax, ay, av, bv;
-    return maxStepAt(m, ax, ay, av, bv);
-}
-
 double mae(const QImage& m, const QImage& gt) {
     double sum = 0.0;
     const int w = m.width(), h = m.height();
