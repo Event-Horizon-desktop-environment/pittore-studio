@@ -1,0 +1,82 @@
+name: Bug report
+description: Something broken, wrong, or crashing.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Fill in what you can — logs matter more than anything else here.
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From the package filename, or the first `[app]` line of any log file.
+      placeholder: "0.1.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - AppImage
+        - Flatpak
+        - deb (Ubuntu/Debian)
+        - rpm (Fedora)
+        - Arch (pacman)
+        - Snap
+        - Portable tarball
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and session
+      description: Distribution + version, and whether you run Wayland or X11/XWayland.
+      placeholder: "Bazzite 42, Wayland"
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: "Ryzen 7 7840U"
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and compute backend
+      description: Graphics card, driver if known, and which backend the app uses (Help > System Info lists the detected compute devices).
+      placeholder: "Radeon 780M, CPU backend"
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from launch.
+      placeholder: |
+        1. File > Open, pick an .af file
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      placeholder: |
+        Expected: both pages import as layers.
+        Actual: only the flattened preview opens.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Attach the logs from `~/.config/PittoreStudio/log/` (zip the folder if it is big).
+        Always include `Pittore-UX.log`. For canvas, painting, or display issues add `Pittore-Render.log` and `Pittore-GPU.log`. After a crash, `Pittore-Crash.log` is the important one. The first `[app]` line of any log also carries your exact app version.
+      placeholder: "Attached Pittore-UX.log + Pittore-Render.log"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots / sample files
+      description: Screenshots help; a sample file that reproduces the bug helps even more.

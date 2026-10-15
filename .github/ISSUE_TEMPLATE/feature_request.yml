@@ -1,0 +1,36 @@
+name: Feature request
+description: An idea for something new or changed.
+labels: ["enhancement"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: App version you run today
+      description: From the package filename, or the first `[app]` line of any log in `~/.config/PittoreStudio/log/`.
+      placeholder: "0.1.4"
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what gets in your way?
+      placeholder: "I paint on a 720p pen display and the tool strip overflows the window."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should happen instead? Mockups and references to other apps are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds tried
+      description: Anything you do today to get around it (settings, other tools, other builds).
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and hardware (if relevant)
+      description: Only needed when the request depends on the machine (display size, tablet, GPU). Include distro + Wayland/X11, CPU, GPU.
+      placeholder: "Steam Deck (SteamOS), Wayland"

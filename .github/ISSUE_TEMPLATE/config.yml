@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Discussion / question (not a bug)
+    url: https://github.com/Event-Horizon-desktop-environment/pittore-studio/discussions
+    about: Ask how to do something, or talk through an idea before filing it.
