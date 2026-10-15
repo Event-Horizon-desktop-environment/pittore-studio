@@ -553,8 +553,9 @@ std::shared_ptr<pittore::Image> afMasksToImage(
 bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                             const QSize& canvasHint, const QImage& flattenedBase,
                             QString* error) {
-    // af_layers reports the true page size (the spread's "SprB" rectangle, or
-    // the document's "DfSz"), so the canvas comes straight from the decode.
+    // af_layers reports the stacked page canvas (each spread's "PagR" trim,
+    // else "SprB", else "DfSz", stacked vertically), so the canvas comes
+    // straight from the decode.
     // The embedded preview is only a downscaled render of the same page and is
     // kept as the flattened base layer, not as a size source. Fall back to the
     // preview, then to the layer extents, only when the decoder named no page.

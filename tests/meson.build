@@ -42,6 +42,7 @@ host_tests = [
   'test_psd',
   'test_tiff',
   'test_af',
+  'test_af_pages',
   'test_xcf',
   'test_project_file',
   'test_vector_path',

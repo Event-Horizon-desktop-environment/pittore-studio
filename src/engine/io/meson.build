@@ -40,7 +40,8 @@ io_sources = files('zip.cpp', 'psd.cpp', 'xcf.cpp', 'icc_scan.cpp',
                    'af_layers/vector/af_shapes.cpp',
                    'af_layers/walker/af_walker_decode.cpp',
                    'af_layers/walker/af_walker_emit.cpp',
-                   'af_layers/walker/af_document.cpp')
+                   'af_layers/walker/af_document.cpp',
+                   'af_layers/pages/af_pages.cpp')
 io_deps = [zlib_dep, pittore_render_dep, pittore_vector_dep, pittore_text_dep,
          pittore_color_dep]
 io_feature_args = []

@@ -14,7 +14,14 @@ namespace pittore::io {
 // The file is a small versioned filesystem (#FAT chain; entries like doc.dat,
 // tiles d/1.., originals c/1..), zlib (v1) or zstd (v2), CRC-checked. doc.dat
 // is an object graph; bitmaps ("DyBm") index tiles; placement is the "Xfrm"
-// chain; canvas is "SprB" else "DfSz".
+// chain; canvas is the union of the spreads' page rects ("PagR" rctp, else
+// "SprB", else "DfSz"), stacked vertically with a gap. Multi-spread documents
+// keep every spread (Affinity's multi-canvas): single-spread files are
+// unchanged.
+// Masks stay live, effects/filters bake into pixels, shapes/paths/text rebuild
+// from geometry. Adjustments are skipped + logged; the flat preview still shows
+// them. Needs only zlib; v2 tiles need PITTORE_AF, source images need
+// PITTORE_WEBP/JPEG — else that layer is skipped with a reason.
 // Masks stay live, effects/filters bake into pixels, shapes/paths/text rebuild
 // from geometry. Adjustments are skipped + logged; the flat preview still shows
 // them. Needs only zlib; v2 tiles need PITTORE_AF, source images need
@@ -60,11 +67,20 @@ struct AfLayer {
     std::vector<std::uint16_t> rgba;
 };
 
+// One page (one spread's trim) in source coords. The stacked import keeps
+// every spread: the canvas is the vertical stack of these rects with a gap.
+struct AfPage {
+    double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
+    std::string source;  // "PagR", "SprB" or "DfSz"
+};
+
 // Layered doc in FILE order (bottom -> top). UI reverses for its panel.
 struct AfLayersDoc {
-    std::uint32_t width = 0, height = 0;  // canvas (SprB, else DfSz)
+    std::uint32_t width = 0, height = 0;  // stacked canvas (pages + gaps)
     int depth = 8;                        // tiles are 8-bit, expanded to 16
     std::vector<AfLayer> layers;
+    // One entry per spread, in file order, in final canvas coords.
+    std::vector<AfPage> pages;
     // DyBm bitmap count, kept as `frameCount` for old log callers.
     std::uint64_t frameCount = 0;
     // True when all non-group layers made pixels. Else UI trusts flat preview.
