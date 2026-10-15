@@ -5522,8 +5522,91 @@ int main(int argc, char** argv) {
         CHECK(dd->activeLayer == smallAt);
         s = state.settings();
         s.gridSpacing = 64.0;
+        s.snapTargets = 31;
         state.applySettings(s);
         delete canvas;
+    }
+
+    // Self-snap regression. During a drag the layer's own left/centre/right
+    // edges are a step behind the proposed position, so they always sit inside
+    // the 8 px tolerance; feeding them back as snap targets latches the layer
+    // where it already is. The dragged layer's own edges must never attract
+    // it (another layer's edges still must).
+    {
+        state.addDocument(QStringLiteral("selfsnap"), QSize(200, 150), 300);
+        AppSettings s = state.settings();
+        s.snapTargets = AppState::SnapLayers;
+        state.applySettings(s);
+        QImage block(20, 20, QImage::Format_ARGB32);
+        block.fill(QColor(255, 0, 0));
+        state.placeImageLayer(block, QStringLiteral("blk"), QPointF(60, 60),
+                              1.0);
+        app.processEvents();
+        QWidget window;
+        auto* canvas = new CanvasView(&state, &window);
+        window.resize(800, 600);
+        canvas->setGeometry(0, 0, 800, 600);
+        window.show();
+        canvas->zoomToFit();
+        canvas->setZoom(1.0);
+        app.processEvents();
+        const QSizeF blk(20, 20);
+        // The dragged layer's own edges (50/60/70) sit inside tolerance of
+        // the proposed left edge 55 — self-snap would latch it back to 60.
+        const QVector<int> self{0};
+        CanvasView::MoveSnap own =
+            canvas->snappedMoveSize(QPointF(55, 100), blk, self);
+        CHECK_NEAR(own.offset.x(), 55.0, 1e-6);
+        CHECK(!own.x);
+        // Another layer's edge within tolerance still attracts: blk2 is a
+        // static target (not in the moving set), so the proposed left edge
+        // 55 pulls flush to blk2's left edge at x=60 — a 5 px snap.
+        state.placeImageLayer(block, QStringLiteral("blk2"),
+                              QPointF(70, 120), 1.0);
+        app.processEvents();
+        // placeImageLayer inserts on top, so blk2 is now index 0 and the
+        // dragged blk shifted to index 1. Exclude blk (the dragged one).
+        const QVector<int> moving{1};
+        CanvasView::MoveSnap other =
+            canvas->snappedMoveSize(QPointF(55, 100), blk, moving);
+        CHECK_NEAR(other.offset.x(), 60.0, 1e-6);
+        CHECK(other.x);
+        s = state.settings();
+        s.snapTargets = AppState::SnapTargetsAll;
+        state.applySettings(s);
+        delete canvas;
+    }
+
+    // A live text layer moved the same way keeps its layout origin in step
+    // with its offset: the origin drives the next re-render, so a per-event
+    // accumulation would throw the run off the canvas the moment the text is
+    // edited again.
+    {
+        state.addDocument(QStringLiteral("textdrag"), QSize(200, 150), 300);
+        DocumentItem* td = state.activeDocument();
+        const int ti = state.addTextLayer(
+            QPointF(20, 30), 0.0, QStringLiteral("Liberation Sans"), 32.0,
+            QColor(Qt::black));
+        CHECK(ti >= 0);
+        td->layers[ti].textSpec.text = QStringLiteral("Hi");
+        CHECK(state.refreshTextLayer(ti));
+        const QPointF off0 = td->layers[ti].offset;
+        const QPointF org0 = td->layers[ti].textSpec.origin;
+        CHECK(td->layers[ti].liveText);
+        // The canvas drag's per-event protocol: one absolute delta measured
+        // from the press baseline, applied to every moved layer.
+        for (int i = 1; i <= 12; ++i)
+            CHECK(state.moveLayersAt(QVector<int>{ti}, QPointF(i, i * 0.5),
+                                     QVector<QPointF>{off0}));
+        CHECK_NEAR(td->layers[ti].offset.x(), off0.x() + 12.0, 1e-9);
+        CHECK_NEAR(td->layers[ti].offset.y(), off0.y() + 6.0, 1e-9);
+        CHECK_NEAR(td->layers[ti].textSpec.origin.x(), org0.x() + 12.0, 1e-9);
+        CHECK_NEAR(td->layers[ti].textSpec.origin.y(), org0.y() + 6.0, 1e-9);
+        // Re-laying the run out must not move it: the ink lands where the
+        // offset already says it does.
+        CHECK(state.refreshTextLayer(ti));
+        CHECK_NEAR(td->layers[ti].offset.x(), off0.x() + 12.0, 1e-6);
+        CHECK_NEAR(td->layers[ti].offset.y(), off0.y() + 6.0, 1e-6);
     }
 
     const int rc = pittore_test::failures() == 0 ? 0 : 1;

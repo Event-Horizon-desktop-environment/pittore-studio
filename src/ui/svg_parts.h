@@ -42,6 +42,16 @@ struct SvgGradient {
     std::vector<Stop> stops;
 };
 
+// One clip-path in effect on a node, resolved into the node's local space:
+// `toNode` maps the clip's own user space (where the clipPath's shapes were
+// authored) into the local space `path` lives in. Identity for the node's
+// own clip-path; the map from the referencing ancestor's space otherwise,
+// so ancestor transforms land correctly at paint time.
+struct SvgClipRef {
+    QString id;
+    QTransform toNode;
+};
+
 // One parsed node: a group or a drawable shape. Transforms accumulate from the
 // root; `path` and style live in user space.
 struct SvgNode {
@@ -61,6 +71,10 @@ struct SvgNode {
     std::shared_ptr<SvgGradient> gradient;
     bool hasStroke = false;
     QColor stroke;
+    // stroke="url(#id)" resolved against the document's gradients: paints the
+    // stroke where `stroke` only carries the flat fallback colour. Null for
+    // ordinary solid strokes.
+    std::shared_ptr<SvgGradient> strokeGradient;
     double strokeWidth = 0.0;
     // Object refs (empty = none): pattern/hatch fill, markers,
     // clipPath/mask/filter ids, and retained mesh + filter graphs.
@@ -68,6 +82,12 @@ struct SvgNode {
     QString patternTransform;
     QString markerStart, markerMid, markerEnd;
     QString clipId, maskId, filterId;
+    // Effective clips in paint order: every ancestor's clip-path (outermost
+    // first), then this element's own. A clip-path on a group clips its whole
+    // subtree, so each descendant rasterizes against the intersection. Empty
+    // for unclipped leaves; `clipId` keeps the element's own ref alone (that
+    // is what retained-art export rewrites).
+    QVector<SvgClipRef> clipStack;
     std::shared_ptr<pittore::vector::MeshGradient> mesh;
     std::shared_ptr<pittore::vector::FilterGraph> filter;
     // Embedded raster (<image>): decoded bitmap painted into `path` (its

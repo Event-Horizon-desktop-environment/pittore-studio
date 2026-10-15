@@ -40,6 +40,7 @@
 #include "engine/core/log.h"
 
 #include "ui/canvas/shared/canvas_helpers.h"
+#include "ui/canvas/trace/canvas_trace.h"
 #include "ui/persona/vector_gradient.h"
 #include "ui/persona/vector_point_ops.h"
 
@@ -1005,6 +1006,20 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
         // final footprint (post-commit refinement of the resampled drag
         // preview — same visual state, no extra history step).
         if (moved) state_->refreshVectorArt();
+        // The gesture's final state. The frame that follows must carry at
+        // least this revision; if none does before the next gesture starts,
+        // the screen keeps the pre-release composite — which reads as "it shows
+        // here when I let go, but it is really somewhere else".
+        {
+            DocumentItem* rd = doc();
+            const LayerItem* rl = state_->activeLayer();
+            tool_logf(tool, "move/release",
+                      "moved=%d off=(%.2f,%.2f) rev=%llu pnt=%lld",
+                      moved ? 1 : 0, rl ? rl->offset.x() : 0.0,
+                      rl ? rl->offset.y() : 0.0,
+                      static_cast<unsigned long long>(rd ? rd->revision : 0),
+                      static_cast<long long>(canvasFrameCount()));
+        }
         event->accept();
         refresh();
         return;
@@ -1087,6 +1102,19 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
 
+    // Crop: release ends the gesture and leaves the frame live for fine
+    // tuning — Enter, a double-click inside, or the task bar's Apply crops
+    // the document, Esc resets the frame. No history entry until commit.
+    if (tool == ToolId::Crop) {
+        cropDragMode_ = -1;
+        dragging_ = false;
+        applyToolCursor();
+        viewport()->update();
+        event->accept();
+        refresh();
+        return;
+    }
+
     if (isSelectionTool(tool)) {
         // Alt = from center, Shift = square: resolved live so the commit
         // matches the rubber band exactly. The release event's own modifiers
@@ -1100,8 +1128,6 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
         } else {
             state_->clearSelection();
         }
-    } else if (tool == ToolId::Crop) {
-        if (rect.width() > 1 && rect.height() > 1) state_->setSelection(rect, false);
     } else if (tool == ToolId::VectorCropTool) {
         // Non-destructive object crop: the keep-rectangle becomes a reveal
         // mask on the active layer (outside hides, mask stays editable).

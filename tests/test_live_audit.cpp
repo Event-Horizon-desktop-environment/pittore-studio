@@ -507,6 +507,26 @@ int main(int argc, char** argv) {
                               Qt::LeftButton);
                     sendMouse(vp, QEvent::MouseButtonRelease, pb, Qt::LeftButton,
                               Qt::NoButton);
+                } else if (id == ToolId::Crop) {
+                    // Crop is two-phase like Perspective Crop: the drag only
+                    // shapes the live frame; the commit (double-click here,
+                    // Enter or Apply in the UI) is what resizes the document.
+                    // Without the commit the audit would see a NO-EFFECT drag.
+                    std::snprintf(gesture, sizeof(gesture), "frame+dblclick");
+                    sendMouse(vp, QEvent::MouseButtonPress, pa, Qt::LeftButton,
+                              Qt::LeftButton);
+                    for (int i = 1; i <= 4; ++i) {
+                        const QPointF p =
+                            pa + (pb - pa) * (double(i) / 4.0);
+                        sendMouse(vp, QEvent::MouseMove, p, Qt::NoButton,
+                                  Qt::LeftButton);
+                    }
+                    sendMouse(vp, QEvent::MouseButtonRelease, pb, Qt::LeftButton,
+                              Qt::NoButton);
+                    sendMouse(vp, QEvent::MouseButtonDblClick, pb, Qt::LeftButton,
+                              Qt::LeftButton);
+                    sendMouse(vp, QEvent::MouseButtonRelease, pb, Qt::LeftButton,
+                              Qt::NoButton);
                 } else if (id == ToolId::StylePickerTool) {
                     // Sample the first seeded shape, apply onto the second.
                     // Pick toggles default off without an options bar.

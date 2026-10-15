@@ -11,8 +11,8 @@ license=('MIT')
 # staticMetaObject symbols.
 options=('!lto')
 depends=('qt6-base' 'qt6-svg' 'zlib' 'harfbuzz' 'freetype2' 'fontconfig' 'lcms2'
-         'libwebp' 'libtiff' 'libjpeg-turbo' 'zstd' 'qrencode')
-makedepends=('meson' 'ninja' 'git' 'pkgconf' 'tomlplusplus')
+         'libwebp' 'libtiff' 'libjpeg-turbo' 'zstd' 'qrencode' 'tomlplusplus')
+makedepends=('meson' 'ninja' 'git' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/arrifat346afs/pittore-studio/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

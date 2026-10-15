@@ -317,10 +317,17 @@ public:
                         bakedSourceImage(tile_.imgCache.get(), l.pixels.get());
                     if (src.isNull()) continue;
                     p.save();
-                    p.setTransform(QTransform()
-                                       .scale(l.scaleX, l.scaleY)
-                                       .translate(l.offX, l.offY) *
-                                   p.transform(),
+                    // Placement must match compositeTierBox (scale the pixels,
+                    // then shift by the offset in document units). Do NOT
+                    // chain .scale().translate() here: QTransform::translate
+                    // folds the shift into the already-scaled matrix
+                    // (m31 += dx*m11), which would plant the layer at
+                    // off*scale - off-by-(1-scale)*off for any resampled
+                    // layer, exactly the post-release jump the tile path
+                    // showed while the composite stayed correct.
+                    p.setTransform(QTransform(l.scaleX, 0, 0, 0, l.scaleY, 0,
+                                              l.offX, l.offY, 1) *
+                                       p.transform(),
                                    false);
                     p.drawImage(QRectF(0, 0, src.width(), src.height()), src);
                     p.restore();
@@ -761,7 +768,19 @@ bool CanvasTileStore::paintReady(QPainter& p, const DocumentItem& doc,
                                  const QTransform& docToView, double zoomEff,
                                  const QRectF& docRect, const QRect& viewDirty,
                                  ReadySlot scheduleUpdate) {
-    if (!enabled_) return false;
+    // PITTORE_NO_TILES=1 forces the soft composite path with the store off.
+    // The tiles only ever draw once DocumentItem::revision has stopped moving
+    // (paintReady requires tile.revision == doc.revision, and every edit
+    // bumps it), so they are live exactly in the still moments - after a
+    // Move-tool release, while hovering, after a slider settles. Running the
+    // same gesture with this set separates a fault in the tiles from one in
+    // the composite blit underneath them.
+    static const bool forcedOff = [] {
+        const char* e =
+            ::pittore::core::log::pittoreEnv("PITTORE_NO_TILES", "0");
+        return e && *e && e[0] != '0';
+    }();
+    if (forcedOff || !enabled_) return false;
     const double bucket = crispZoomBucket(zoomEff);
     // Document px per tile side at this bucket: fixed until its raster would
     // reach kMaxTilePx, then shrinking with the bucket so a tile's raster

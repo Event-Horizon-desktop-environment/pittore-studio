@@ -1,22 +1,22 @@
 // Soft-proof manager over LCMS2: document -> proof -> display on float RGBA.
-// Fixture profile is the Ghostscript generic CMYK profile; the test skips
-// itself cleanly on machines without it.
+// Fixture profile is the vendored CC0 synthetic CMYK profile (see
+// tests/proof_fixture.h); the test skips itself cleanly if it is absent.
 #include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include "engine/color/proof.h"
+#include "proof_fixture.h"
 #include "test_util.h"
 
 using pittore::color::ProofIntent;
 using pittore::color::ProofManager;
 
-static const char* kCmykProfile =
-    "/usr/share/ghostscript/iccprofiles/default_cmyk.icc";
+static const std::string kCmykProfile = pittore_test::cmykFixturePath();
 
 static bool hasFixtureProfile() {
-    return std::filesystem::exists(kCmykProfile);
+    return pittore_test::hasCmykFixture();
 }
 
 // 2x2 straight-alpha RGBA float tile: mid-gray, pure green (out of CMYK
@@ -46,7 +46,7 @@ static void test_proof_unavailable_path() {
 #ifdef PITTORE_LCMS2
 void test_proof_gray_stable() {
     if (!hasFixtureProfile()) {
-        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile);
+        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile.c_str());
         return;
     }
     ProofManager pm;
@@ -67,7 +67,7 @@ void test_proof_gray_stable() {
 
 void test_proof_gamut_alarm() {
     if (!hasFixtureProfile()) {
-        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile);
+        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile.c_str());
         return;
     }
     ProofManager pm;

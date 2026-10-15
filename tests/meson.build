@@ -30,7 +30,6 @@ host_tests = [
   'test_buffer',
   'test_grayscale',
   'test_blend',
-  'test_proof',
   'test_adjust',
   'test_blur',
   'test_brush',
@@ -94,6 +93,15 @@ foreach t : host_tests
   endif
 endforeach
 
+# Soft-proof manager (engine/color/proof). Own entry rather than the
+# host_tests loop above: it locates the vendored CMYK fixture through
+# PITTORE_SOURCE_ROOT, which the loop does not pass to every binary.
+proof_test = executable('test_proof', 'test_proof.cpp',
+  dependencies : test_deps,
+  include_directories : src_inc,
+  cpp_args : ['-DPITTORE_SOURCE_ROOT="@0@"'.format(meson.project_source_root())])
+test('test_proof', proof_test)
+
 # Settings persistence (ui/settings) needs QtCore + tomlplusplus; only built
 # when the UI layer is enabled.
 if has_qt6
@@ -142,12 +150,12 @@ if has_qt6
     env : {'QT_QPA_PLATFORM' : 'offscreen'})
 
   # Canvas soft-proof bridge (ui/proof_preview): null/error paths always;
-  # rendered-proof assertions gate on the Ghostscript CMYK fixture.
+  # rendered-proof assertions gate on the vendored CC0 CMYK fixture.
   proof_preview_test = executable('test_proof_preview',
     ['test_proof_preview.cpp', '../src/ui/proof_preview.cpp'],
     dependencies : [qt6dep, pittore_color_dep],
     include_directories : [src_inc],
-    cpp_args : ['-fPIC'],
+    cpp_args : ['-fPIC', '-DPITTORE_SOURCE_ROOT="@0@"'.format(meson.project_source_root())],
     override_options : ['b_pie=true'])
   test('proof-preview', proof_preview_test)
 
@@ -299,6 +307,28 @@ if has_qt6
     include_directories : [src_inc],
     cpp_args : ['-fPIC'])
   test('svg-import-async', import_async_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen'})
+
+  # Paint-server strokes: stroke="url(#id)" paints its gradient into the
+  # piece raster and the retained vector geometry, plain strokes keep
+  # painting, fill="none" with no stroke stays empty. Headless, synthetics.
+  stroke_paint_test = executable('test_svg_stroke_paint',
+    ['test_svg_stroke_paint.cpp'],
+    dependencies : [pittore_ui_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('svg-stroke-paint', stroke_paint_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen'})
+
+  # clip-path on a <g>: the clip cuts the whole subtree (intersected with a
+  # leaf's own clip), group transforms map the clip's user space, and the
+  # retained art carries the effective clip so the canvas live-repaint vetoes.
+  clip_inherit_test = executable('test_svg_clip_inherit',
+    ['test_svg_clip_inherit.cpp'],
+    dependencies : [pittore_ui_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('svg-clip-inherit', clip_inherit_test,
     env : {'QT_QPA_PLATFORM' : 'offscreen'})
 
   # Canvas display pipeline: mode governor, crisp plan/painter, view cache,
@@ -771,6 +801,21 @@ if has_qt6
   test('layers-drag', layers_drag_test,
     env : {'QT_QPA_PLATFORM' : 'offscreen',
            'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-layers-drag'})
+
+  # The Move tool's incremental renderer vs a full rebuild: renderRegion()
+  # and rebuildComposite() share the layer gather and kernel and differ only
+  # in the rect they clear/gather/blit, so both must yield identical pixels
+  # after a move. A divergence is the "canvas shows the layer somewhere other
+  # than the model, until any full rebuild fixes it" defect, which every
+  # model-side check misses.
+  incremental_parity_test = executable('test_incremental_parity',
+    ['test_incremental_parity.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('incremental-parity', incremental_parity_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-incr-parity'})
 
   # Canvas file drops run the import profile policy (Photoshop's "Ask When
   # Pasting"): Cancel skips, matches stay silent, AlwaysAsk prompts.

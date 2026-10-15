@@ -4883,6 +4883,42 @@ bool AppState::resizeCanvas(const QPointF& newTopLeftDoc, const QSize& newSize) 
         if (l.mask && !l.maskLinked) l.maskOffset -= newTopLeftDoc;
         l.thumbnail = QImage();
     }
+    // The selection lives in document space, so it rides the same origin
+    // shift as the layers: after a crop the selection still outlines the same
+    // pixels, not a stale absolute rect. Its mask (document-sized) is rebased
+    // by the same shift, and anything the resize pushed off-canvas is dropped
+    // — it can no longer be reached by any tool.
+    if (!d->selection.isEmpty()) {
+        const QSize oldSize = d->size;
+        const QRectF moved =
+            d->selection.translated(-newTopLeftDoc).intersected(
+                QRectF(QPointF(0, 0), QSizeF(newSize)));
+        if (d->selectionIsMask && !d->selectionMask.isNull() &&
+            d->selectionMask.size() == oldSize) {
+            QImage rebased(newSize, QImage::Format_Grayscale8);
+            rebased.fill(0);
+            const int sx = qRound(-newTopLeftDoc.x());
+            const int sy = qRound(-newTopLeftDoc.y());
+            for (int y = 0; y < newSize.height(); ++y) {
+                const int srcY = y + sy;
+                if (srcY < 0 || srcY >= oldSize.height()) continue;
+                uchar* row = rebased.scanLine(y);
+                const uchar* src = d->selectionMask.constScanLine(srcY);
+                for (int x = 0; x < newSize.width(); ++x) {
+                    const int srcX = x + sx;
+                    row[x] = (srcX >= 0 && srcX < oldSize.width()) ? src[srcX] : 0;
+                }
+            }
+            d->selectionMask = std::move(rebased);
+        }
+        d->selection = moved;
+        if (moved.isEmpty()) {
+            d->selectionIsEllipse = false;
+            d->selectionIsMask = false;
+            d->selectionMask = QImage();
+        }
+        ++d->selectionStamp;
+    }
     d->size = newSize;
     d->rebuildComposite();
     emit layersChanged();

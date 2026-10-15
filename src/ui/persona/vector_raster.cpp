@@ -57,32 +57,42 @@ QColor rgbaColor(const std::uint8_t rgba[4]) {
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3]);
 }
 
+// One gradient as a brush in node space (the painter transform carries it to
+// layer/view space unchanged, like the segments).
+QBrush gradientBrushOf(const pittore::vector::ArtGradient& g) {
+    QGradient* grad = nullptr;
+    QLinearGradient linear;
+    QRadialGradient radial;
+    if (g.radial) {
+        radial = QRadialGradient(QPointF(g.cx, g.cy), std::max(0.01, g.r));
+        grad = &radial;
+    } else {
+        linear = QLinearGradient(QPointF(g.x1, g.y1), QPointF(g.x2, g.y2));
+        grad = &linear;
+    }
+    for (const pittore::vector::ArtStop& s : g.stops)
+        grad->setColorAt(std::clamp(s.pos, 0.0f, 1.0f), rgbaColor(s.rgba));
+    // grad points at a local; build the brush before returning.
+    if (g.radial) return QBrush(radial);
+    return QBrush(linear);
+}
+
 }  // namespace
 
 QBrush artFillBrush(const pittore::vector::ArtNode& node) {
     const pittore::vector::ArtPaint& paint = node.paint;
     if (!paint.hasFill) return Qt::NoBrush;
-    if (paint.hasGradient && !paint.gradient.stops.empty()) {
-        const pittore::vector::ArtGradient& g = paint.gradient;
-        // Gradient coordinates are stored in node space (like the segments),
-        // so they ride the painter transform below unchanged.
-        QGradient* grad = nullptr;
-        QLinearGradient linear;
-        QRadialGradient radial;
-        if (g.radial) {
-            radial = QRadialGradient(QPointF(g.cx, g.cy), std::max(0.01, g.r));
-            grad = &radial;
-        } else {
-            linear = QLinearGradient(QPointF(g.x1, g.y1), QPointF(g.x2, g.y2));
-            grad = &linear;
-        }
-        for (const pittore::vector::ArtStop& s : g.stops)
-            grad->setColorAt(std::clamp(s.pos, 0.0f, 1.0f), rgbaColor(s.rgba));
-        // grad points at a local; build the brush before returning.
-        if (g.radial) return QBrush(radial);
-        return QBrush(linear);
-    }
+    if (paint.hasGradient && !paint.gradient.stops.empty())
+        return gradientBrushOf(paint.gradient);
     return QBrush(rgbaColor(paint.fill));
+}
+
+QBrush artStrokeBrush(const pittore::vector::ArtNode& node) {
+    const pittore::vector::ArtPaint& paint = node.paint;
+    if (!paint.hasStroke) return Qt::NoBrush;
+    if (paint.hasStrokeGradient && !paint.strokeGradient.stops.empty())
+        return gradientBrushOf(paint.strokeGradient);
+    return QBrush(rgbaColor(paint.stroke));
 }
 
 Qt::PenCapStyle artCapStyle(int cap) {
@@ -166,11 +176,11 @@ bool rasterizeArtNode(const pittore::vector::ArtNode& node, QImage* img,
         const QPainterPath expanded = expandStrokePath(node);
         if (!expanded.isEmpty()) {
             p.setPen(Qt::NoPen);
-            p.setBrush(rgbaColor(node.paint.stroke));
+            p.setBrush(artStrokeBrush(node));
             p.drawPath(expanded);
             p.setBrush(artFillBrush(node));
         } else {
-            QPen pen(rgbaColor(node.paint.stroke),
+            QPen pen(artStrokeBrush(node),
                      std::max(0.01, node.paint.strokeWidth));
             pen.setCosmetic(false);
             pen.setCapStyle(artCapStyle(node.paint.cap));

@@ -1,12 +1,13 @@
 // test_proof_preview.cpp — canvas soft-proof bridge: null/error paths are
-// deterministic everywhere; the rendered-proof assertions need the
-// Ghostscript CMYK fixture and skip cleanly without it (same gate as
-// test_proof.cpp). No widgets, no config.
+// deterministic everywhere; the rendered-proof assertions need the vendored
+// CC0 CMYK fixture and skip cleanly without it (same gate as test_proof.cpp).
+// No widgets, no config.
 #include <cstdio>
 #include <filesystem>
 
 #include <QImage>
 
+#include "proof_fixture.h"
 #include "test_util.h"
 #include "engine/color/proof.h"
 #include "ui/proof_preview.h"
@@ -16,8 +17,7 @@ using pittore::ui::proofPreviewImage;
 
 namespace {
 
-const char* kCmykProfile =
-    "/usr/share/ghostscript/iccprofiles/default_cmyk.icc";
+const std::string kCmykProfile = pittore_test::cmykFixturePath();
 
 QImage solidImage(int w, int h, QRgb c) {
     QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
@@ -34,7 +34,7 @@ int main() {
     CHECK(proofPreviewImage(solidImage(4, 4, 0xFF808080), pm).isNull());
 
     if (!std::filesystem::exists(kCmykProfile)) {
-        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile);
+        std::printf("  (skip: no fixture profile at %s)\n", kCmykProfile.c_str());
     } else {
         CHECK(pm.setProofProfile(kCmykProfile).empty());
         // Mid-gray survives the round trip close (sRGB -> CMYK -> sRGB).

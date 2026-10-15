@@ -49,6 +49,7 @@
 #include "engine/core/log.h"
 
 #include "ui/canvas/shared/canvas_helpers.h"
+#include "ui/canvas/trace/canvas_trace.h"
 
 #include "ui/canvas/paint/canvas_display_mode.h"
 #include "ui/canvas/paint/canvas_crisp.h"
@@ -97,6 +98,11 @@ bool liveDrawOpaque(const LayerItem& l) {
     if (pt.hasFill && pt.fill[3] != 255) return false;
     if (pt.hasGradient) {
         for (const auto& stop : pt.gradient.stops) {
+            if (stop.rgba[3] != 255) return false;
+        }
+    }
+    if (pt.hasStrokeGradient) {
+        for (const auto& stop : pt.strokeGradient.stops) {
             if (stop.rgba[3] != 255) return false;
         }
     }
@@ -420,6 +426,19 @@ void CanvasView::paintEvent(QPaintEvent* e) {
                 editAgeUs / 1000.0, e->rect().width(), e->rect().height(),
                 e->rect().x(), e->rect().y());
         }
+    }
+
+    // Repaint provenance: the cause that queued this frame and where the frame
+    // actually landed. `t` is the whole story behind "the canvas shows the
+    // layer somewhere other than the model" — the model and the composite are
+    // already covered by the move/render rows — while off/bnds are the
+    // placement this frame would paint the active layer at. Emitted last so
+    // the line also reports frames that painted nothing but the surround.
+    {
+        DocumentItem* td = doc();
+        canvasTraceFrame(state_->activeTool(), canvasTakeUpdateReason(),
+                         e->rect(), viewport()->rect(), documentTransform(), td,
+                         td ? td->activeLayer : -1, ms);
     }
 }
 

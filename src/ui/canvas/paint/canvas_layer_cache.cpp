@@ -57,7 +57,9 @@ double LayerViewCache::cacheWeight(const DocumentItem& doc,
     const auto& pt = l.art->paint;
     if (!pt.hasFill && !pt.hasStroke) return 0.0;  // draws nothing
     double w = 1.0;
-    if (pt.hasGradient || pt.hasMesh || !pt.patternId.empty()) w += 2.0;
+    if (pt.hasGradient || pt.hasStrokeGradient || pt.hasMesh ||
+        !pt.patternId.empty())
+        w += 2.0;
     if (!l.flatArt.empty() || l.sharedNode) w += 2.0;
     if (pt.hasStroke) w += 1.0;
     if (pt.hasDash) w += 1.0;

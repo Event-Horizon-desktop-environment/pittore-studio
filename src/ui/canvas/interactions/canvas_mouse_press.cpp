@@ -128,6 +128,15 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
                 event->accept();
                 return;
             }
+            // Crop: the manual second press is the double-click that commits
+            // the frame, matching the real MouseButtonDblClick path. It must
+            // not also fall through into a rubber band (that would replace
+            // the frame with a hairline right before the commit).
+            if (tool == ToolId::Crop) {
+                commitCrop();
+                event->accept();
+                return;
+            }
             // Not text: fall through; the press below starts the drag/stroke
             // exactly like a normal single click.
         }
@@ -1176,6 +1185,11 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
         if (moveTransformVisible()) {
             const int handle = handleAtView(event->position());
             if (handle >= 0 && beginScaleDrag(handle, docPoint)) {
+                // A press that lands within reach of a transform handle starts a
+                // SCALE gesture, which never emits move/drag. Without this line a
+                // handle grab looks like "no drag happened" while the layer still
+                // changes shape — an invisible path next to a body move.
+                tool_logf(tool, "move/press", "path=scale handle=%d", handle);
                 dragging_ = true;
                 dragStartDoc_ = docPoint;
                 dragCurrentDoc_ = docPoint;
@@ -1221,6 +1235,7 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
             }
             if (state_->duplicateSelectedLayers()) {
                 moveDuplicated_ = true;
+                tool_logf(tool, "move/press", "path=duplicate");
                 // Re-resolve: duplication re-selected the copies.
                 d = doc();
                 if (!d) return;
@@ -1366,7 +1381,18 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
         }
     }
 
-    if (isSelectionTool(tool) || tool == ToolId::Crop) {
+    // Crop: the frame is a pending canvas edit, not a selection. The press
+    // picks the gesture from the hit test — resize from a handle, reposition
+    // from inside, rubber-band a new frame from outside. Commit is a separate
+    // step (Enter / double-click / Apply), so nothing here touches history.
+    if (tool == ToolId::Crop && event->button() == Qt::LeftButton) {
+        cropPress(docPoint, event->position());
+        viewport()->update();
+        event->accept();
+        return;
+    }
+
+    if (isSelectionTool(tool)) {
         dragging_ = true;
         dragStartDoc_ = docPoint;
         dragCurrentDoc_ = docPoint;

@@ -39,6 +39,11 @@ bool crispOpaque(const LayerItem& l) {
             if (stop.rgba[3] != 255) return false;
         }
     }
+    if (pt.hasStrokeGradient) {
+        for (const auto& stop : pt.strokeGradient.stops) {
+            if (stop.rgba[3] != 255) return false;
+        }
+    }
     if (!pt.patternId.empty()) return false;
     if (pt.hasStroke && pt.stroke[3] != 255) return false;
     if (!pt.markerStart.empty() || !pt.markerMid.empty() ||
@@ -315,12 +320,10 @@ bool drawCrispPaths(QPainter& p, const CrispPaths& paths,
         p.setOpacity(std::clamp(node.opacity, 0.0, 1.0));
         if (!paths.penStroke) {
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(paint.stroke[0], paint.stroke[1],
-                              paint.stroke[2], paint.stroke[3]));
+            p.setBrush(artStrokeBrush(node));
             p.drawPath(paths.stroke);
         } else {
-            QPen pen(QColor(paint.stroke[0], paint.stroke[1], paint.stroke[2],
-                            paint.stroke[3]),
+            QPen pen(artStrokeBrush(node),
                      std::max(0.01, paint.strokeWidth));
             pen.setCosmetic(false);
             pen.setCapStyle(artCapStyle(paint.cap));

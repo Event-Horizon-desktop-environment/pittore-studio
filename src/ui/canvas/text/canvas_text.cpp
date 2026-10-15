@@ -470,6 +470,22 @@ void CanvasView::keyPressEvent(QKeyEvent* event) {
         event->accept();
         return;
     }
+    // Crop: Enter commits the frame (the canvas crops in one undo step),
+    // Escape resets it to the whole image — the standard crop-tool pairing,
+    // and the same contract the contextual task bar's Apply/Cancel buttons
+    // follow.
+    if (state_->activeTool() == ToolId::Crop) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            commitCrop();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Escape) {
+            cancelCrop();
+            event->accept();
+            return;
+        }
+    }
     // A ruler guide in flight abandons on Escape like any drag preview.
     if (rulerGuideDragging_ && event->key() == Qt::Key_Escape) {
         cancelRulerGuide();

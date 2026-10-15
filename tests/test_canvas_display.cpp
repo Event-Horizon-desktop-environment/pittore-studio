@@ -26,6 +26,7 @@
 #include "ui/canvas/paint/canvas_tile_store.h"
 #include "ui/canvas/shared/canvas_helpers.h"
 #include "ui/svg_parts.h"
+#include "engine/compute/adjust.h"
 #include "engine/core/log.h"
 
 using namespace pittore::ui;
@@ -573,6 +574,192 @@ void test_tile_frame_simple_blit() {
     }
 }
 
+// A moved layer must render identically through the tile path and through the
+// composite the Move tool left behind. This is the one configuration the
+// static checks above cannot see, because the tile path only ever draws for a
+// document revision that has stopped moving:
+//   * every drag step bumps DocumentItem::revision, so paintReady's
+//     `tile.revision == doc.revision` can never match while the drag runs;
+//     the store queues a bake, reports the tile missing, and the caller's
+//     composite blit is what is on screen (which is why dragging looks right);
+//   * on release the revision freezes, the queued bakes publish and draw over
+//     that composite;
+//   * the next revision bump - a colour-grade slider, which calls
+//     rebuildComposite - invalidates them again and the composite shows
+//     through once more.
+// A tile that places the moved layer anywhere but where the composite does
+// therefore reads exactly as "it is here while I drag, then jumps when I let
+// go, and the grade puts it back".
+// The tile path must place a moved layer where the composite does. This is
+// checked at several document states, because which tier a layer lands in
+// depends on the rest of the stack: a plain bitmap takes the simple-blit
+// tier, an adjustment above it takes the composite tier.
+void checkTilePlacement(DocumentItem* d, int idx, double z,
+                        const char* label) {
+    bool settled = false;
+    const QImage tiled = tiledFrame(*d, z, &settled);
+    CHECK(settled);
+    if (!settled) return;
+    const QImage comp = compositeFrame(*d, z);
+    CHECK(tiled.size() == comp.size());
+    if (tiled.size() != comp.size()) return;
+
+    int worst = 0;
+    qint64 structural = 0;
+    // A displacement shows up deep inside the layer, so count separately the
+    // disagreements that are NOT hugging one of its fractional edges. The
+    // composite covers a layer's edge pixel fractionally (offset 212.16 means
+    // pixel 212 is 84% layer); the tile's simple blit snaps that edge to the
+    // device grid instead. That is a sub-pixel blending difference confined
+    // to the edge columns, not a placement difference.
+    qint64 awayFromEdge = 0;
+    // Edge bands in FRAME pixels: the composite covers a layer's edge pixel
+    // fractionally while the tile's blit snaps it, so disagreements hugging
+    // the footprint's frame-space edges are sub-pixel blending, not
+    // placement. Anything deeper inside is a real displacement.
+    const LayerItem& mover = d->layers[idx];
+    const double footW = mover.pixels ? mover.pixels->width() * mover.scaleX
+                                      : 0.0;
+    const double footH = mover.pixels ? mover.pixels->height() * mover.scaleY
+                                      : 0.0;
+    const double edgeL = mover.offset.x() * z;
+    const double edgeT = mover.offset.y() * z;
+    const double edgeR = (mover.offset.x() + footW) * z;
+    const double edgeB = (mover.offset.y() + footH) * z;
+    const bool fracL = edgeL - std::floor(edgeL) > 0.0;
+    const bool fracT = edgeT - std::floor(edgeT) > 0.0;
+    const bool fracR = edgeR - std::floor(edgeR) > 0.0;
+    const bool fracB = edgeB - std::floor(edgeB) > 0.0;
+    for (int y = 0; y < comp.height(); ++y) {
+        const QRgb* a = reinterpret_cast<const QRgb*>(tiled.constScanLine(y));
+        const QRgb* b = reinterpret_cast<const QRgb*>(comp.constScanLine(y));
+        for (int x = 0; x < comp.width(); ++x) {
+            bool pixelDiffers = false;
+            for (int c = 0; c < 4; ++c) {
+                const int delta = std::abs(int((a[x] >> (c * 8)) & 255) -
+                                            int((b[x] >> (c * 8)) & 255));
+                worst = std::max(worst, delta);
+                if (delta > 32) pixelDiffers = true;
+            }
+            if (!pixelDiffers) continue;
+            ++structural;
+            const bool onLeftEdge = fracL && x <= int(edgeL) + 2;
+            const bool onTopEdge = fracT && y <= int(edgeT) + 2;
+            const bool onRightEdge =
+                fracR && x >= int(edgeR) - 2 && x < comp.width();
+            const bool onBottomEdge =
+                fracB && y >= int(edgeB) - 2 && y < comp.height();
+            if (!onLeftEdge && !onTopEdge && !onRightEdge && !onBottomEdge)
+                ++awayFromEdge;
+        }
+    }
+    std::printf("[display] %s z=%.4f tiled-vs-composite maxdiff=%d "
+                "channels-over-32=%lld away-from-edge=%lld\n",
+                label, z, worst, static_cast<long long>(structural),
+                static_cast<long long>(awayFromEdge));
+    if (const char* dump = std::getenv("PITTORE_DUMP")) {
+        QString safeLabel = QString::fromLatin1(label);
+        safeLabel.replace(QLatin1Char('/'), QLatin1Char('_'));
+        QString base = QString::fromLocal8Bit(dump) + safeLabel +
+                       QStringLiteral("_");
+        const bool okT =
+            tiled.save(base + QStringLiteral("tiled.png"));
+        const bool okC =
+            comp.save(base + QStringLiteral("comp.png"));
+        if (!okT || !okC)
+            std::printf("[display] dump %s -> tiled=%d comp=%d\n",
+                        base.toLocal8Bit().constData(), int(okT), int(okC));
+    }
+    // Position must agree. Sub-pixel edge blending may not, and is reported
+    // above rather than asserted away.
+    CHECK(awayFromEdge == 0);
+}
+
+void test_tile_frame_after_move() {
+    AppState state;
+    DocumentItem* d =
+        state.addDocument(QStringLiteral("move-tiles"), QSize(1280, 720), 96);
+    CHECK(d != nullptr);
+    if (!d) return;
+
+    // The reported document: a background filling the frame and a layer one or
+    // two pixels smaller than it, both plain bitmaps so the mover qualifies
+    // for the tile store's simple-blit tier (no style, mask, clip or art).
+    // The mover is resampled like the session's (a ~1595x898 source at 0.8
+    // lands at the logged 1276.16x718.56 footprint): the tile blit then
+    // resamples through QPainter while the composite resamples through the
+    // engine, so this is where the two paths can separate across the whole
+    // layer rather than only along its fractional edges.
+    QImage bg(1280, 720, QImage::Format_ARGB32_Premultiplied);
+    bg.fill(qRgba(24, 24, 32, 255));
+    QImage mover(1595, 898, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < mover.height(); ++y)
+        for (int x = 0; x < mover.width(); ++x)
+            mover.setPixel(x, y, qRgba((x * 255) / (mover.width() - 1),
+                                       (y * 255) / (mover.height() - 1),
+                                       ((x + y) * 255) /
+                                           (mover.width() + mover.height() - 2),
+                                       255));
+    state.addPixelLayerFromImage(bg, QStringLiteral("bg"), QPointF(0, 0), 1.0,
+                                 1.0, QStringLiteral("bg"),
+                                 QStringLiteral("layer"));
+    state.addPixelLayerFromImage(mover, QStringLiteral("mover"),
+                                 QPointF(2, 1), 0.8, 0.8,
+                                 QStringLiteral("mover"),
+                                 QStringLiteral("layer"));
+    int idx = -1;
+    for (int i = 0; i < d->layers.size(); ++i)
+        if (d->layers[i].name == QStringLiteral("mover")) idx = i;
+    CHECK(idx >= 0);
+    if (idx < 0) return;
+
+    // The offset the reported drag ended on: fractional, and far enough right
+    // that the mover's left edge uncovers the background.
+    const QPointF from = d->layers[idx].offset;
+    const QPointF to(212.16, 0.72);
+    const QVector<int> idxs{idx};
+    const QVector<QPointF> starts{from};
+    CHECK(state.moveLayersAt(idxs, to - from, starts));
+
+    // The mover's panel index shifts whenever a layer is inserted above it,
+    // so re-resolve by name at every stage rather than trusting a snapshot.
+    const auto findMover = [d] {
+        for (int i = 0; i < d->layers.size(); ++i)
+            if (d->layers[i].name == QStringLiteral("mover")) return i;
+        return -1;
+    };
+
+    // Before any grade: the state the reported drag leaves behind.
+    checkTilePlacement(d, idx, 1.0, "move/plain-z1");
+    checkTilePlacement(d, idx, 1.5625, "move/plain-z1.5625");
+
+    // The reported sequence continues with a colour grade. An adjustment
+    // layer covers the whole document and takes the tile store's COMPOSITE
+    // tier while the mover stays on the SIMPLE tier, so one tile now mixes a
+    // self-placed bitmap with a snapshot blit of the composite above it. The
+    // two-layer case above never exercised that mix.
+    using pittore::compute::AdjustmentKind;
+    CHECK(state.addAdjustmentLayer(
+        static_cast<int>(AdjustmentKind::BrightnessContrast)));
+    state.setAdjustmentParamAt(d->activeLayer, 0, 0.15f);
+    state.setAdjustmentParamAt(d->activeLayer, 1, 0.20f);
+    idx = findMover();
+    CHECK(idx >= 0);
+    if (idx < 0) return;
+    checkTilePlacement(d, idx, 1.0, "grade/plain-z1");
+    checkTilePlacement(d, idx, 1.5625, "grade/plain-z1.5625");
+
+    // Move again under the grade: the gesture the report describes, where the
+    // drag reads right and the jump appears once the drag is over.
+    const QPointF from2 = d->layers[idx].offset;
+    const QPointF to2(-96.35, 41.8);
+    const QVector<int> idxs2{idx};
+    const QVector<QPointF> starts2{from2};
+    CHECK(state.moveLayersAt(idxs2, to2 - from2, starts2));
+    checkTilePlacement(d, idx, 1.0, "grade/moved-z1");
+    checkTilePlacement(d, idx, 1.5625, "grade/moved-z1.5625");
+}
+
 // Same check on the shipped fixtures: the Bay Area map carries embedded
 // <image> layers above 80k vector paths, which is where the soft-tile report
 // came from. Skips cleanly when the fixtures are absent (never commit them).
@@ -647,6 +834,7 @@ int main(int argc, char** argv) {
     // Crisp-gain checks last: they leave the tile store enabled.
     test_tile_frame_crisp();
     test_tile_frame_simple_blit();
+    test_tile_frame_after_move();
     test_tile_frame_crisp_fixture();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),

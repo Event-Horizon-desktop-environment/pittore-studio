@@ -37,6 +37,7 @@
 #include "ui/persona/vector_raster.h"
 #include "ui/selection_mask.h"
 #include "ui/svg_parts.h"
+#include "ui/tools/log/tool_log.h"
 #include "engine/ai/bg_remove.h"
 #include "engine/compute/brushes/tip/tip.h"
 #include "engine/compute/paint.h"
@@ -44,6 +45,7 @@
 #include "engine/core/log.h"
 
 #include "ui/canvas/shared/canvas_helpers.h"
+#include "ui/canvas/trace/canvas_trace.h"
 
 namespace pittore::ui {
 
@@ -588,6 +590,13 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
             }
             return;
         }
+        // Crop: the frame tracks the gesture (rubber band, handle resize or
+        // reposition) and stays live after release for fine tuning.
+        if (state_->activeTool() == ToolId::Crop) {
+            cropDragTo(cursorDoc_);
+            viewport()->update();
+            return;
+        }
         // Perspective Crop corner drag: the quad follows the pointer.
         if (state_->activeTool() == ToolId::PerspectiveCrop &&
             pcropCorner_ >= 0) {
@@ -633,22 +642,118 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
         } else if (moveDragging_) {
             if (const LayerItem* l = state_->activeLayer()) {
                 const QPointF raw = cursorDoc_ - moveGrabOffset_;
+                // The footprint the snap measures against, also logged: origin
+                // plus size is the only way a trace can place every edge, so an
+                // off-canvas edge can be attributed to the snap or the cursor
+                // instead of guessed at. Identical to what the snap calls use.
+                const QSizeF footprint =
+                    (l->kind == LayerItem::Kind::Group)
+                        ? state_->groupBounds(doc()->activeLayer).size()
+                        : (l->pixels ? QSizeF(l->pixels->width() * l->scaleX,
+                                              l->pixels->height() * l->scaleY)
+                                     : QSizeF());
                 // Snap the anchor layer's edges/centers to whatever targets are
                 // active (guides, grid, document bounds). Only interactive moves
                 // snap; programmatic placement stays exact.
                 moveSnap_ = (l->kind == LayerItem::Kind::Group)
-                                ? snappedMoveSize(raw, state_->groupBounds(doc()->activeLayer).size())
-                                : snappedMoveOffset(raw, *l);
+                                ? snappedMoveSize(raw, footprint, moveLayerSet_)
+                                : snappedMoveOffset(raw, *l, moveLayerSet_);
                 const QPointF snapped = moveSnap_.offset;
                 // One delta applied to every moved pixel layer: the anchor's
                 // press offset is the baseline the snap is measured against.
                 const QPointF delta = snapped - moveAnchorStartOffset_;
+                const QPointF before = l->offset;
                 if (state_->moveLayersAt(moveLayerSet_, delta, moveLayerStarts_))
                     moveChanged_ = true;
+                // The mover places the anchor at exactly the snapped position
+                // (start + delta), so any divergence is the mover itself — most
+                // likely a stale/short starts[] baseline silently degrading the
+                // gesture to per-event accumulation, which walks the layer off
+                // the canvas while the cursor stays put. Flagged loudly: a jump
+                // has to be attributable from the log alone.
+                const QPointF actual =
+                    (l->kind == LayerItem::Kind::Group)
+                        ? state_->groupBounds(doc()->activeLayer).topLeft()
+                        : l->offset;
+                if (std::abs(actual.x() - snapped.x()) > 0.5 ||
+                    std::abs(actual.y() - snapped.y()) > 0.5)
+                    tool_logf(state_->activeTool(), "move/JUMP",
+                              "actual=(%.1f,%.1f) snap=(%.1f,%.1f) "
+                              "raw=(%.1f,%.1f) size=(%.1f,%.1f) set=%d starts=%d",
+                              actual.x(), actual.y(), snapped.x(), snapped.y(),
+                              raw.x(), raw.y(), footprint.width(),
+                              footprint.height(), int(moveLayerSet_.size()),
+                              int(moveLayerStarts_.size()));
+                // One line per drag step so a random off-screen jump can be
+                // traced to whichever value spiked:
+                //   view  the event's position in viewport pixels
+                //   glob  the same event's physical desktop position, and vg
+                //         the viewport's own desktop origin; view must equal
+                //         glob - vg, so if glob sweeps calmly while view
+                //         lurches the local coordinate (widget origin / event
+                //         source) is wrong, not the pointer
+                //   cur   view mapped into the document; view steady while cur
+                //         jumps means documentTransform moved under the drag
+                //         (scroll/resize), not the pointer
+                //   raw   cur minus the press-time grab offset
+                //   snap  raw after snapping (the anchor's target position)
+                //   delta snap minus the anchor's press offset
+                //   hit   which axes snapped; feat names the layer feature that
+                //         won: L/C/R left-centre-right, T/M/B top-middle-bottom
+                //         (so tgt can be checked against the right edge)
+                //   size  the snapped footprint; origin + size places every edge
+                //   off   the anchor layer's real offset before -> after the
+                //         mover ran (must track snap; a divergence here is the
+                //         mover/starts, not the cursor)
+                //   rev   composite revision once the mover's renderRegion ran;
+                //         match it against canvas/frame's rev to find the frame
+                //         this step is waiting for
+                //   pnt   painted-frame count at the moment of the step: no
+                //         frame advancing past it before the next row is a
+                //         repaint that never came, and the screen is stale
+                //   ets   Qt's own QInputEvent::timestamp() for the event, so
+                //         two steps sharing a wall-clock millisecond can be
+                //         told apart: equal ets means one Qt event was
+                //         dispatched twice, differing ets means two events
+                //   qc    where the OS reports the cursor right now, sampled
+                //         independently of the event. qc tracking view rules
+                //         out our dispatch; qc steady while view teleports
+                //         proves the event itself carries a wrong position
+                const QPoint vg = viewport()->mapToGlobal(QPoint(0, 0));
+                const QPointF qc = viewport()->mapFromGlobal(QCursor::pos());
+                const auto featChar = [](int i, const char* codes) {
+                    return (i >= 0 && i <= 2) ? codes[i] : '-';
+                };
+                tool_logf(state_->activeTool(), "move/drag",
+                          "view=(%.1f,%.1f) glob=(%.1f,%.1f) vg=(%d,%d) "
+                          "qc=(%.1f,%.1f) "
+                          "cur=(%.1f,%.1f) raw=(%.1f,%.1f) "
+                          "snap=(%.1f,%.1f) delta=(%.1f,%.1f) hit=%c%c "
+                          "feat=%c%c tgt=(%.1f,%.1f) size=(%.1f,%.1f) "
+                          "off=(%.1f,%.1f)->(%.1f,%.1f) "
+                          "zoom=%.3f rev=%llu pnt=%lld ets=%llu",
+                          event->position().x(), event->position().y(),
+                          event->globalPosition().x(),
+                          event->globalPosition().y(), vg.x(), vg.y(),
+                          qc.x(), qc.y(),
+                          cursorDoc_.x(), cursorDoc_.y(), raw.x(), raw.y(),
+                          snapped.x(), snapped.y(), delta.x(), delta.y(),
+                          moveSnap_.x ? 'X' : '-', moveSnap_.y ? 'Y' : '-',
+                          featChar(moveSnap_.xFeat, "LCR"),
+                          featChar(moveSnap_.yFeat, "TMB"),
+                          moveSnap_.xPos, moveSnap_.yPos, footprint.width(),
+                          footprint.height(), before.x(),
+                          before.y(), l->offset.x(), l->offset.y(), zoom(),
+                          static_cast<unsigned long long>(
+                              doc() ? doc()->revision : 0),
+                          static_cast<long long>(canvasFrameCount()),
+                          static_cast<unsigned long long>(event->timestamp()));
                 // The smart guides span the whole document, so the drag repaints
                 // the viewport rather than just the moved layer's strip.
-                if (state_->snapEnabled() && state_->snapTargets())
+                if (state_->snapEnabled() && state_->snapTargets()) {
+                    canvasNoteUpdate("snap-guides");
                     viewport()->update();
+                }
             }
         } else if (strokeActive_) {
             // Continuous stroke: fill the gap from the last dab to the cursor.
@@ -824,6 +929,12 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
                 viewport()->update(vr.toAlignedRect());
             }
         }
+        return;
+    }
+    // Crop hover: resize cursors over the frame's handles, the move cursor
+    // inside it (drag to reposition), crosshair outside (draw a new frame).
+    if (state_->activeTool() == ToolId::Crop) {
+        cropHoverUpdate(event->position());
         return;
     }
     if (state_->activeTool() == ToolId::Move && moveTransformVisible()) {

@@ -790,39 +790,81 @@ void CanvasView::paintOverlay(QPainter& p) {
         p.drawImage(t.mapRect(docRect), overlay);
     }
 
-    // Crop overlay: darken outside the crop box and draw thirds.
-    if (state_->taskContext() == TaskContext::Crop) {
-        const QRectF box = d->selection.isEmpty()
-                               ? QRectF(d->size.width() * 0.1, d->size.height() * 0.1,
-                                        d->size.width() * 0.8, d->size.height() * 0.8)
-                               : d->selection;
-        QPainterPath outside;
-        outside.addRect(QRectF(viewport()->rect()));
-        QPainterPath inside;
-        inside.addPolygon(t.map(QPolygonF(box)));
-        p.fillPath(outside.subtracted(inside), QColor(0, 0, 0, 140));
+    // Crop overlay: the live frame with a darkened surround, the guides the
+    // tool's Overlay option asks for, eight resize handles and a live size
+    // readout. The frame is view state — the document is untouched until the
+    // crop commits (Enter, double-click, or the task bar's Apply). Gated on
+    // the tool itself, so Perspective Crop draws only its own quad.
+    if (state_->activeTool() == ToolId::Crop &&
+        state_->taskContext() == TaskContext::Crop) {
+        const QRectF box = cropOverlayRect();
+        if (!box.isEmpty()) {
+            const QRectF mapped = t.map(QPolygonF(box)).boundingRect();
+            QPainterPath outside;
+            outside.addRect(QRectF(viewport()->rect()));
+            QPainterPath inside;
+            inside.addPolygon(t.map(QPolygonF(box)));
+            p.fillPath(outside.subtracted(inside), QColor(0, 0, 0, 140));
 
-        p.setPen(QPen(QColor(255, 255, 255, 120), 1));
-        const QRectF mapped = t.map(QPolygonF(box)).boundingRect();
-        for (int i = 1; i < 3; ++i) {
-            const double x = mapped.left() + mapped.width() * i / 3.0;
-            const double y = mapped.top() + mapped.height() * i / 3.0;
-            p.drawLine(QPointF(x, mapped.top()), QPointF(x, mapped.bottom()));
-            p.drawLine(QPointF(mapped.left(), y), QPointF(mapped.right(), y));
+            // Overlay guides per the tool option. "Never Show Overlay" (6)
+            // keeps only the frame and handles; the drawn geometries are the
+            // thirds, the sixths grid and the golden section — the option
+            // values this build renders.
+            const int overlay =
+                state_->option(ToolId::Crop, QStringLiteral("overlay")).toInt();
+            if (overlay != 6) {
+                p.setPen(QPen(QColor(255, 255, 255, 120), 1));
+                if (overlay == 1) {
+                    for (int i = 1; i < 6; ++i) {
+                        const double x = mapped.left() + mapped.width() * i / 6.0;
+                        const double y = mapped.top() + mapped.height() * i / 6.0;
+                        p.drawLine(QPointF(x, mapped.top()), QPointF(x, mapped.bottom()));
+                        p.drawLine(QPointF(mapped.left(), y), QPointF(mapped.right(), y));
+                    }
+                } else if (overlay == 4) {
+                    static const double kGolden[2] = {0.382, 0.618};
+                    for (const double f : kGolden) {
+                        const double x = mapped.left() + mapped.width() * f;
+                        const double y = mapped.top() + mapped.height() * f;
+                        p.drawLine(QPointF(x, mapped.top()), QPointF(x, mapped.bottom()));
+                        p.drawLine(QPointF(mapped.left(), y), QPointF(mapped.right(), y));
+                    }
+                } else {
+                    for (int i = 1; i < 3; ++i) {
+                        const double x = mapped.left() + mapped.width() * i / 3.0;
+                        const double y = mapped.top() + mapped.height() * i / 3.0;
+                        p.drawLine(QPointF(x, mapped.top()), QPointF(x, mapped.bottom()));
+                        p.drawLine(QPointF(mapped.left(), y), QPointF(mapped.right(), y));
+                    }
+                }
+            }
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(Qt::white, 1));
+            p.drawRect(mapped);
+
+            // Corner and edge handles: the same 0..7 order the press hit
+            // test uses, so what is painted is exactly what is grabbable.
+            p.setBrush(Qt::white);
+            p.setPen(Qt::NoPen);
+            for (int h = 0; h < 8; ++h) {
+                const QPointF hp = t.map(cropHandlePos(h, box));
+                p.drawRect(QRectF(hp.x() - 3.5, hp.y() - 3.5, 7, 7));
+            }
+
+            // Live size readout on a chip along the frame's bottom edge.
+            const QString label = QStringLiteral("%1 × %2")
+                                      .arg(qRound(box.width()))
+                                      .arg(qRound(box.height()));
+            const QFontMetrics fm(p.font());
+            const double cw = fm.horizontalAdvance(label) + 12.0;
+            const double ch = fm.height() + 6.0;
+            const QRectF chip(QPointF(mapped.center().x() - cw * 0.5,
+                                      mapped.bottom() - ch - 8.0),
+                              QSizeF(cw, ch));
+            p.fillRect(chip, QColor(0, 0, 0, 160));
+            p.setPen(Qt::white);
+            p.drawText(chip, Qt::AlignCenter, label);
         }
-        p.setPen(QPen(Qt::white, 1));
-        p.drawRect(mapped);
-
-        // Corner and edge handles.
-        p.setBrush(Qt::white);
-        p.setPen(Qt::NoPen);
-        for (QPointF handle : {mapped.topLeft(), mapped.topRight(), mapped.bottomLeft(),
-                               mapped.bottomRight(),
-                               QPointF(mapped.center().x(), mapped.top()),
-                               QPointF(mapped.center().x(), mapped.bottom()),
-                               QPointF(mapped.left(), mapped.center().y()),
-                               QPointF(mapped.right(), mapped.center().y())})
-            p.drawRect(QRectF(handle.x() - 3, handle.y() - 3, 6, 6));
     }
 
     // Transform handles on the active layer bounds.

@@ -56,6 +56,12 @@ struct ArtPaint {
 
     bool hasStroke = false;
     std::uint8_t stroke[4] = {0, 0, 0, 255};
+    // Stroke paint server (SVG stroke="url(#id)"): when set it paints the
+    // stroke instead of `stroke`, which stays as the flat fallback colour
+    // for panels and writers that only carry a solid. Coordinates live in
+    // node space like `gradient`.
+    bool hasStrokeGradient = false;
+    ArtGradient strokeGradient;
     double strokeWidth = 1.0;
     int cap = 0;   // 0 butt, 1 round, 2 square
     int join = 0;  // 0 miter, 1 round, 2 bevel

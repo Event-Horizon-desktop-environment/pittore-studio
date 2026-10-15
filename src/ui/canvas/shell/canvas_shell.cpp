@@ -42,6 +42,7 @@
 #include "engine/core/log.h"
 
 #include "ui/canvas/shared/canvas_helpers.h"
+#include "ui/canvas/trace/canvas_trace.h"
 #include "ui/persona/vector_node.h"
 #include "engine/vector/boolean.h"
 
@@ -120,12 +121,24 @@ CanvasView::CanvasView(AppState* state, QWidget* parent)
     connect(hoverSettleTimer_, &QTimer::timeout, this, &CanvasView::onHoverSettle);
 
     connect(state_, &AppState::activeDocumentChanged, this, [this] {
+        // Each tab carries its own zoom and scroll, so two screenshots taken
+        // on different tabs are two different views of the same file — named
+        // here so a position that "changed by itself" can be told apart from a
+        // view that changed tabs under it.
+        DocumentItem* td = doc();
+        canvasTraceDoc(state_->activeTool(), state_->activeDocumentIndex(),
+                       td ? td->title : QString(), td ? td->zoom : 0.0);
+        canvasNoteUpdate("doc");
         pendingFit_ = true;
         applyPendingFit();
         updateScrollRange();
         // A brush tool's cursor decision flips with a document opening/closing
         // (the ring only exists over an open document).
         applyToolCursor();
+        // The crop frame belongs to the document it was drawn on: switching
+        // documents arms a fresh frame over the new one (empty when there is
+        // none, which the overlay paints as nothing).
+        if (state_->activeTool() == ToolId::Crop) cropArmForDocument();
         refresh();
     });
     connect(state_, &AppState::documentModified, this, &CanvasView::refresh);
@@ -153,7 +166,15 @@ CanvasView::CanvasView(AppState* state, QWidget* parent)
             documentTransform().mapRect(docRect)
                 .adjusted(-4, -4, 4, 4)
                 .intersected(QRectF(viewport()->rect()));
-        if (!v.isEmpty()) viewport()->update(v.toAlignedRect());
+        // Named even when nothing gets scheduled: a region that maps entirely
+        // outside the viewport is a repaint that never came, and the screen
+        // keeps the previous frame for exactly that region.
+        canvasTraceUpdate(state_->activeTool(),
+                          v.isEmpty() ? "region-outside" : "region", docRect,
+                          v.toAlignedRect());
+        if (v.isEmpty()) return;
+        canvasNoteUpdate("region");
+        viewport()->update(v.toAlignedRect());
     });
     connect(state_, &AppState::layersChanged, this, [this] {
         // A Character-panel or options-bar edit re-sets the run, so the caret
@@ -189,6 +210,13 @@ CanvasView::CanvasView(AppState* state, QWidget* parent)
         replacePaletteTargets_.clear();
         tool_log(id, "canvas/apply-tool-cursor", "cursor + brush ring");
         applyToolCursor();
+        // Entering Crop arms its frame over the whole document (standard
+        // crop-tool behaviour: the frame appears the moment the tool is
+        // picked, ready to drag in or resize from a handle).
+        if (id == ToolId::Crop) {
+            tool_log(id, "canvas/crop-arm", "arming crop frame");
+            cropArmForDocument();
+        }
         // Entering Rotate View seeds its angle field with the live rotation.
         if (state_->activeTool() == ToolId::RotateView) {
             tool_log(id, "canvas/rotate-view-seed", "seeding angle");

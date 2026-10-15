@@ -1,6 +1,6 @@
 name: pittore-studio
 base: core24
-version: '0.1.1'
+version: '0.1.2'
 summary: Layer-based photo editor for Linux
 description: |
   Raster painting and retouching, vector persona, text,
@@ -54,3 +54,9 @@ parts:
       - libfreetype6
       - libfontconfig1
       - liblcms2-2
+      - libtomlplusplus3t64
+      - libwebp7
+      - libtiff6
+      - libjpeg-turbo8
+      - libzstd1
+      - libqrencode4

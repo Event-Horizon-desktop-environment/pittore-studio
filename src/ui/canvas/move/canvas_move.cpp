@@ -33,6 +33,7 @@
 #include "ui/icons.h"
 #include "ui/selection_mask.h"
 #include "ui/svg_parts.h"
+#include "ui/tools/log/tool_log.h"
 #include "engine/ai/bg_remove.h"
 #include "engine/compute/paint.h"
 #include "engine/compute/warp.h"
@@ -140,19 +141,22 @@ int CanvasView::handleAtView(const QPointF& viewPos) const {
 // at 32 doc px so a snap never teleports the layer at very low zoom. Returns
 // the raw offset unchanged when snapping is off or nothing is near.
 CanvasView::MoveSnap CanvasView::snappedMoveOffset(const QPointF& raw,
-                                                   const LayerItem& layer) const {
+                                                   const LayerItem& layer,
+                                                   const QVector<int>& moving) const {
     if (!layer.pixels) {
         MoveSnap snap;
         snap.offset = raw;
         return snap;
     }
     return snappedMoveSize(raw, QSizeF(layer.pixels->width() * layer.scaleX,
-                                       layer.pixels->height() * layer.scaleY));
+                                       layer.pixels->height() * layer.scaleY),
+                           moving);
 }
 
 
 CanvasView::MoveSnap CanvasView::snappedMoveSize(const QPointF& raw,
-                                                 const QSizeF& size) const {
+                                                 const QSizeF& size,
+                                                 const QVector<int>& moving) const {
     DocumentItem* d = doc();
     MoveSnap snap;
     snap.offset = raw;
@@ -202,10 +206,15 @@ CanvasView::MoveSnap CanvasView::snappedMoveSize(const QPointF& raw,
         }
     }
     if (targets & AppState::SnapLayers) {
-        // Edges and centres of the other visible layers (a layer snapping
-        // to its own current edges resolves to a near-zero delta, i.e. to
-        // staying put, so no exclusion bookkeeping is needed).
+        // Edges and centres of the other visible layers. The layers this
+        // gesture drags are excluded: their own edges sit a per-event step
+        // behind the proposed position, always inside tolerance, so keeping
+        // them would snap every small step back to where the layer just was
+        // (the drag crawls in lurches instead of tracking the cursor) and,
+        // once a feature drifted within tolerance of another of its own
+        // edges, yank it by half its own width.
         for (int i = 0; i < d->layers.size(); ++i) {
+            if (moving.contains(i)) continue;
             const LayerItem& l = d->layers[i];
             if (l.kind == LayerItem::Kind::Group) continue;
             if (!l.visible || !l.pixels) continue;
@@ -225,26 +234,33 @@ CanvasView::MoveSnap CanvasView::snappedMoveSize(const QPointF& raw,
     // winning target is reported so the overlay can draw its guide line.
     auto nearest = [&tol](const std::vector<double>& features,
                           const std::vector<double>& tgts, double rawV,
-                          double* outTarget, bool* outHit) {
+                          double* outTarget, bool* outHit, int* outFeat) {
         double best = rawV;
         double bestDist = tol + 1.0;
         double target = 0.0;
-        for (double f : features) {
+        int feat = -1;
+        for (int i = 0; i < static_cast<int>(features.size()); ++i) {
+            const double f = features[i];
             for (double t : tgts) {
                 const double dist = std::fabs(f - t);
                 if (dist <= tol && dist < bestDist) {
                     bestDist = dist;
                     best = rawV - (f - t);
                     target = t;
+                    feat = i;
                 }
             }
         }
         *outTarget = target;
         *outHit = bestDist <= tol;
+        *outFeat = feat;
         return best;
     };
-    snap.offset = QPointF(nearest(xFeat, xTargets, raw.x(), &snap.xPos, &snap.x),
-                          nearest(yFeat, yTargets, raw.y(), &snap.yPos, &snap.y));
+    snap.offset =
+        QPointF(nearest(xFeat, xTargets, raw.x(), &snap.xPos, &snap.x,
+                        &snap.xFeat),
+                nearest(yFeat, yTargets, raw.y(), &snap.yPos, &snap.y,
+                        &snap.yFeat));
     // The centre guide is special-cased in the overlay: green vertical, red
     // horizontal, as the live centre readout.
     snap.xCenter = snap.x && std::fabs(snap.xPos - d->size.width() / 2.0) < 0.5;
@@ -402,6 +418,16 @@ bool CanvasView::beginMoveDrag(const QPointF& docPos) {
         if (idx < 0 || idx >= d->layers.size()) continue;
         moveLayerStarts_.append(d->layers[idx].offset);
     }
+    // The press-time baseline a trace can measure every move/drag line against:
+    // a random off-screen jump only makes sense relative to where the gesture
+    // started (grab point, anchor offset, how many layers ride along).
+    tool_logf(state_->activeTool(), "move/drag-begin",
+              "press=(%.1f,%.1f) grab=(%.1f,%.1f) anchor0=(%.1f,%.1f) "
+              "set=%d starts=%d group=%d",
+              docPos.x(), docPos.y(), moveGrabOffset_.x(), moveGrabOffset_.y(),
+              moveAnchorStartOffset_.x(), moveAnchorStartOffset_.y(),
+              int(moveLayerSet_.size()), int(moveLayerStarts_.size()),
+              int(isGroup));
     return true;
 }
 

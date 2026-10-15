@@ -1,10 +1,6 @@
 name: Linux packages
 
 on:
-  push:
-    branches: [main, master]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
     inputs:
       release:
@@ -99,7 +95,7 @@ jobs:
           Description: Layer-based photo editor for Linux
            Raster painting and retouching, vector persona, text,
            adjustment layers, filters, and an ICC-aware colour pipeline.
-          Depends: libc6, libstdc++6, libqt6widgets6, libqt6network6, libqt6svg6, zlib1g, libharfbuzz0b, libfreetype6, libfontconfig1
+          Depends: libc6, libstdc++6, libqt6widgets6, libqt6network6, libqt6svg6, zlib1g, libharfbuzz0b, libfreetype6, libfontconfig1, liblcms2-2, libwebp7, libtiff6, libjpeg-turbo8, libzstd1, libqrencode4, libtomlplusplus3t64
           EOF
       - name: Pack deb
         run: |

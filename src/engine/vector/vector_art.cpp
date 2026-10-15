@@ -219,18 +219,14 @@ std::string artDocumentToSvg(const ArtDocument& doc, const ArtSvgOptions& opt) {
     }
 
     // Gradients live in <defs>; each gradient-bearing element references one.
+    // Fill and stroke servers get separate ids: one shape may carry both.
     std::string defs;
     std::vector<int> gradIndex(doc.elements.size(), -1);
+    std::vector<int> strokeGradIndex(doc.elements.size(), -1);
     int gradientCount = 0;
-    for (std::size_t i = 0; i < doc.elements.size(); ++i) {
-        const ArtElement& el = doc.elements[i];
-        if (el.raster) continue;
-        const ArtPaint& paint = el.node.paint;
-        if (!paint.hasFill || !paint.hasGradient || paint.gradient.stops.empty())
-            continue;
-        const ArtGradient& g = paint.gradient;
-        const std::string id = "grad" + std::to_string(gradientCount++);
-        gradIndex[i] = gradientCount - 1;
+    auto emitGradient = [&](const ArtGradient& g) -> int {
+        const int index = gradientCount++;
+        const std::string id = "grad" + std::to_string(index);
         if (g.radial) {
             defs += "<radialGradient id=\"" + id +
                     "\" gradientUnits=\"userSpaceOnUse\" cx=\"" + num(g.cx) +
@@ -243,6 +239,18 @@ std::string artDocumentToSvg(const ArtDocument& doc, const ArtSvgOptions& opt) {
         }
         for (const ArtStop& stop : g.stops) appendStop(defs, stop);
         defs += g.radial ? "</radialGradient>\n" : "</linearGradient>\n";
+        return index;
+    };
+    for (std::size_t i = 0; i < doc.elements.size(); ++i) {
+        const ArtElement& el = doc.elements[i];
+        if (el.raster) continue;
+        const ArtPaint& paint = el.node.paint;
+        if (paint.hasFill && paint.hasGradient &&
+            !paint.gradient.stops.empty())
+            gradIndex[i] = emitGradient(paint.gradient);
+        if (paint.hasStroke && paint.hasStrokeGradient &&
+            !paint.strokeGradient.stops.empty())
+            strokeGradIndex[i] = emitGradient(paint.strokeGradient);
     }
     // Mesh + filter defs ride the same <defs> block (ids referenced above).
     for (std::size_t i = 0; i < doc.elements.size(); ++i) {
@@ -334,10 +342,15 @@ std::string artDocumentToSvg(const ArtDocument& doc, const ArtSvgOptions& opt) {
         if (n.evenOdd && !bakedProfile) svg += " fill-rule=\"evenodd\"";
 
         if (paint.hasStroke && paint.strokeWidth > 0.0 && !bakedProfile) {
-            svg += " stroke=\"" + hexColor(paint.stroke) + "\"";
-            if (paint.stroke[3] != 255)
-                svg += " stroke-opacity=\"" + num(paint.stroke[3] / 255.0) +
-                       "\"";
+            if (strokeGradIndex[i] >= 0) {
+                svg += " stroke=\"url(#grad" + std::to_string(strokeGradIndex[i]) +
+                       ")\"";
+            } else {
+                svg += " stroke=\"" + hexColor(paint.stroke) + "\"";
+                if (paint.stroke[3] != 255)
+                    svg += " stroke-opacity=\"" + num(paint.stroke[3] / 255.0) +
+                           "\"";
+            }
             svg += " stroke-width=\"" + num(paint.strokeWidth) + "\"";
             if (const char* c = capName(paint.cap))
                 svg += std::string(" stroke-linecap=\"") + c + "\"";
@@ -676,6 +689,26 @@ std::vector<std::uint8_t> encodeArtNode(const ArtNode& node) {
     w.u8(node.paint.hasPatternXform ? 1u : 0u);
     if (node.paint.hasPatternXform)
         for (double m : node.paint.patternXform) w.f64(m);
+    // Stroke-gradient tail (see decode): same forward-compatible convention,
+    // appended after the pattern-transform tail so older decoders, which stop
+    // there, never see the extra bytes as part of a block they expect.
+    w.u8(node.paint.hasStrokeGradient ? 1u : 0u);
+    if (node.paint.hasStrokeGradient) {
+        const ArtGradient& g = node.paint.strokeGradient;
+        w.u8(g.radial ? 1u : 0u);
+        w.f64(g.x1);
+        w.f64(g.y1);
+        w.f64(g.x2);
+        w.f64(g.y2);
+        w.f64(g.cx);
+        w.f64(g.cy);
+        w.f64(g.r);
+        w.u32(static_cast<std::uint32_t>(g.stops.size()));
+        for (const ArtStop& s : g.stops) {
+            w.f32(s.pos);
+            w.rgba(s.rgba);
+        }
+    }
     return std::move(w.bytes);
 }
 
@@ -848,6 +881,32 @@ std::optional<ArtNode> decodeArtNode(const std::vector<std::uint8_t>& bytes,
         node.paint.hasPatternXform = r.u8() != 0;
         if (r.ok && node.paint.hasPatternXform)
             for (double& m : node.paint.patternXform) m = r.f64();
+        if (!r.ok) return std::nullopt;
+    }
+    // Stroke-gradient tail (end-appended after the pattern-transform tail):
+    // absent in older files → the stroke stays the flat `stroke` colour.
+    node.paint.hasStrokeGradient = false;
+    node.paint.strokeGradient = ArtGradient{};
+    if (r.i < bytes.size() && r.ok) {
+        node.paint.hasStrokeGradient = r.u8() != 0;
+        if (r.ok && node.paint.hasStrokeGradient) {
+            ArtGradient& g = node.paint.strokeGradient;
+            g.radial = r.u8() != 0;
+            g.x1 = r.f64();
+            g.y1 = r.f64();
+            g.x2 = r.f64();
+            g.y2 = r.f64();
+            g.cx = r.f64();
+            g.cy = r.f64();
+            g.r = r.f64();
+            const std::uint32_t stops = r.u32();
+            if (!r.ok || stops > bytes.size()) return std::nullopt;
+            g.stops.resize(stops);
+            for (ArtStop& s : g.stops) {
+                s.pos = r.f32();
+                r.rgba(s.rgba);
+            }
+        }
         if (!r.ok) return std::nullopt;
     }
     if (consumed) *consumed = r.i;

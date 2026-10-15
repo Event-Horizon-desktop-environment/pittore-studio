@@ -79,6 +79,12 @@ class CanvasView final : public QAbstractScrollArea {
     void updateRulerGuide(Qt::Orientation orientation, const QPointF& rulerPos);
     void finishRulerGuide(bool commit);
     void cancelRulerGuide();
+    // Crop tool: the live frame is view state until it is committed. Apply
+    // crops the document in one undo step (canvas resizes, layer content
+    // stays put); Cancel resets the frame to the whole document. Routed
+    // from the contextual task bar via the window's command dispatcher.
+    void commitCrop();
+    void cancelCrop();
     // Node tool click-selection (convert/close/split/join/reverse target):
     // selected art layer and anchor segment, or -1 when nothing is selected.
     int selectedNodeLayer() const { return nodeSelLayer_; }
@@ -140,16 +146,29 @@ class CanvasView final : public QAbstractScrollArea {
         bool y = false;
         double yPos = 0.0;
         bool yCenter = false;
+        // Which of the layer's three features won the snap on each axis:
+        // 0 = left/top, 1 = centre, 2 = right/bottom, -1 = no snap. Without it
+        // a trace shows the winning target but not which edge it pulled there,
+        // so an off-canvas edge cannot be attributed to the snap or the cursor.
+        int xFeat = -1;
+        int yFeat = -1;
     };
     // Move-drag snapping (public so tests can pin the target list, grid
     // spacing included): snappedMoveOffset snaps a layer by its pixel
     // footprint, snappedMoveSize by an explicit doc-space footprint. Both
     // return the raw offset unchanged when nothing snaps, plus the guide
-    // line(s) to draw (see implementation for the tolerance rules).
-    MoveSnap snappedMoveOffset(const QPointF& raw, const LayerItem& layer) const;
+    // line(s) to draw (see implementation for the tolerance rules). `moving`
+    // lists the layers the gesture itself drags: their own edges are never
+    // snap targets, or every small per-event step would snap back onto where
+    // the layer just was and the drag would crawl in lurches (and, once a
+    // feature drifted within tolerance of another of its own edges, teleport
+    // by half the layer's width).
+    MoveSnap snappedMoveOffset(const QPointF& raw, const LayerItem& layer,
+                               const QVector<int>& moving = {}) const;
     // Same snapping for a doc-space footprint of given size (used when the
     // moved unit is a group and has no single pixel footprint).
-    MoveSnap snappedMoveSize(const QPointF& raw, const QSizeF& size) const;
+    MoveSnap snappedMoveSize(const QPointF& raw, const QSizeF& size,
+                             const QVector<int>& moving = {}) const;
 
     // Liquify: an in-progress warp stroke. The main window calls
     // cancelLiquify() on Escape and commitLiquifyStrokeIfActive() when the tool
@@ -280,6 +299,30 @@ class CanvasView final : public QAbstractScrollArea {
     QTransform documentTransform() const;
     QSizeF scaledDocumentSize() const;
     DocumentItem* doc() const { return state_->activeDocument(); }
+
+    // Crop tool (own TU: canvas/tools/canvas_crop.cpp). The frame is a
+    // document-space rect held in the view — never the document selection:
+    // a crop rect is a pending canvas edit, not a pixel selection. Moving the
+    // pointer over the crop tool arms a frame over the whole document; a press
+    // picks the gesture from the hit test (a handle, inside the frame, or
+    // outside it to rubber-band a new one), moves track it, and release keeps
+    // the frame live for fine tuning until commitCrop().
+    static constexpr int kCropMove = 8;   // drag inside repositions the frame
+    static constexpr int kCropDraw = 9;   // drag outside rubber-bands a new frame
+    QRectF cropOverlayRect() const;       // live frame, clamped to the document
+    double cropRatio() const;             // active ratio constraint (0 = free)
+    // Handle position for a frame rect (move-tool convention 0..7: TL, top,
+    // TR, right, BR, bottom, BL, left — the opposite handle is (h + 4) % 8).
+    static QPointF cropHandlePos(int handle, const QRectF& rect);
+    int cropHandleAtView(const QPointF& viewPos) const;
+    void cropArmForDocument();
+    void cropPress(const QPointF& docPoint, const QPointF& viewPos);
+    void cropDragTo(const QPointF& docPoint);
+    void cropHoverUpdate(const QPointF& viewPos);
+    QRectF cropRect_;                  // the live frame, document space
+    int cropDragMode_ = -1;            // -1 idle, 0..7 handle, kCropMove, kCropDraw
+    QPointF cropPressDoc_;             // press point (anchor / move delta base)
+    QRectF cropPressRect_;             // frame at press (resize/move base)
 
     // Brush: paint one dab at docPos and mark the stroke dirty. Reads the
     // active tool's brush size/hardness/opacity options + foreground colour.

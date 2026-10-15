@@ -27,6 +27,11 @@ QPainterPath artNodePath(const pittore::vector::ArtNode& node);
 // painter (gradient coordinates ride the painter transform unchanged).
 QBrush artFillBrush(const pittore::vector::ArtNode& node);
 
+// Stroke brush: the retained stroke gradient when the shape carries one
+// (SVG stroke="url(#id)"), else the flat stroke colour. Shared by the
+// rasterizer and the view-space painter for the same reason.
+QBrush artStrokeBrush(const pittore::vector::ArtNode& node);
+
 // ArtPaint cap/join codes shared by the rasterizer and the view-space
 // painter, so both stroke identically (cap 0 butt, 1 round, 2 square; join
 // 0 miter, 1 round, 2 bevel).

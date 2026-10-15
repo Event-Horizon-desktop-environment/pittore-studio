@@ -1282,11 +1282,55 @@ struct PaintState {
     QColor fill{0, 0, 0};
     bool hasStroke = false;
     QColor stroke{0, 0, 0};
+    // Resolved stroke paint server (stroke="url(#id)"); inherits like the
+    // flat colour it replaces.
+    std::shared_ptr<SvgGradient> strokeGradient;
+    // stroke-opacity folded the same way the flat path folds it into
+    // `stroke`: applied to the paint server's stops at node build time.
+    double strokeOpacity = 1.0;
     double strokeWidth = 1.0;
     double opacity = 1.0;
     // Fill rule likewise inherits; the spec initial value is nonzero.
     bool fillEvenOdd = false;
+    // clip-path refs inherited from ancestors (outermost first): each entry
+    // pairs the resolved id with the referencing element's cumulative
+    // transform, i.e. the user space its clip shapes are authored in. A
+    // clip-path on a <g> applies to the whole subtree, so it joins this
+    // stack before the children walk.
+    QVector<QPair<QString, QTransform>> clipAncestors;
 };
+
+// The stroke paint server for one node: the shared def as-is, or a private
+// copy when an element or an ancestor narrowed stroke-opacity (the flat path
+// folds that into `stroke` instead, so the stops are scaled here and the
+// authored def is never mutated).
+std::shared_ptr<SvgGradient> nodeStrokeGradient(const PaintState& ps) {
+    if (!ps.strokeGradient || ps.strokeOpacity >= 1.0) return ps.strokeGradient;
+    auto g = std::make_shared<SvgGradient>(*ps.strokeGradient);
+    for (SvgGradient::Stop& s : g->stops)
+        s.color.setAlphaF(
+            qBound(0.0, s.color.alphaF() * ps.strokeOpacity, 1.0));
+    return g;
+}
+
+// Resolve a node's effective clip stack at build time: each inherited ref is
+// mapped into the node's own local space (the space its `path` lives in, the
+// one the painter has in effect when the clip is applied), then the element's
+// own clip-path is appended as identity. Shared by both walkers so the leaf
+// rasterizer only ever intersects and applies.
+void finishClipStack(SvgNode& n, const PaintState& ps) {
+    if (ps.clipAncestors.isEmpty() && n.clipId.isEmpty()) return;
+    const QTransform toLocal =
+        n.transform.isInvertible() ? n.transform.inverted() : QTransform();
+    n.clipStack.reserve(ps.clipAncestors.size() + 1);
+    for (const QPair<QString, QTransform>& c : ps.clipAncestors) {
+        SvgClipRef r;
+        r.id = c.first;
+        r.toNode = toLocal * c.second;
+        n.clipStack.append(std::move(r));
+    }
+    n.clipStack.append(SvgClipRef{n.clipId, QTransform()});
+}
 
 void scanResources(QXmlStreamReader& xml, SvgResources& res) {
     auto cellShapes = [&](SvgResources& r, QVector<SvgNode>& shapes) {
@@ -1481,7 +1525,11 @@ bool sameMergePaint(const SvgNode& last, const SvgNode& cur) {
     if (cur.mesh || last.mesh) return false;
     if (cur.filter || last.filter) return false;
     if (!cur.filterId.isEmpty() || !last.filterId.isEmpty()) return false;
-    if (!cur.clipId.isEmpty() || !last.clipId.isEmpty()) return false;
+    // Any clip (own or inherited) keeps a leaf out of a merged run: the
+    // row's retained flatArt cannot re-apply a clip at zoom, and two
+    // same-paint leaves under *different* ancestor clips must not share a
+    // raster either.
+    if (!cur.clipStack.isEmpty() || !last.clipStack.isEmpty()) return false;
     if (!cur.maskId.isEmpty() || !last.maskId.isEmpty()) return false;
     if (!cur.markerStart.isEmpty() || !last.markerStart.isEmpty()) return false;
     if (!cur.markerMid.isEmpty() || !last.markerMid.isEmpty()) return false;
@@ -1489,6 +1537,7 @@ bool sameMergePaint(const SvgNode& last, const SvgNode& cur) {
     if (cur.hasStroke != last.hasStroke) return false;
     if (cur.hasStroke) {
         if (cur.stroke != last.stroke) return false;
+        if (cur.strokeGradient || last.strokeGradient) return false;
         if (cur.strokeWidth != last.strokeWidth) return false;
         if (cur.stroke.alpha() != 255) return false;
     }
@@ -1680,12 +1729,38 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
         if (parseColor(strokeStr, &c)) {
             ps.hasStroke = true;
             ps.stroke = c;
-        } else if (!strokeStr.startsWith(QLatin1String("url("))) {
+            ps.strokeGradient.reset();
+        } else if (strokeStr.startsWith(QLatin1String("url("))) {
+            // Paint-server stroke. Gradients resolve here (not in the
+            // per-node block below) so a group's stroke="url(#id)" inherits
+            // into its children like the flat colour it replaces. A pattern
+            // ref is not supported as stroke paint and a dangling ref has no
+            // fallback: both leave the inherited stroke untouched, and the
+            // dangling one is reported so the verdict can go degraded.
+            const QString id = refTarget(strokeStr);
+            const auto it = res.grads.constFind(id);
+            if (it != res.grads.constEnd()) {
+                ps.hasStroke = true;
+                ps.strokeGradient = *it;
+                if (budget && budget->diag) ++budget->diag->gradUses;
+            } else {
+                ps.strokeGradient.reset();
+                if (budget && budget->diag && !id.isEmpty() &&
+                    !res.patterns.contains(id))
+                    noteCapped(budget->diag->missingRefs,
+                               QStringLiteral("stroke#") + id);
+            }
+        } else {
             ps.hasStroke = false;
+            ps.strokeGradient.reset();
         }
     }
     if (!fillOp.isEmpty()) ps.fill.setAlphaF(qBound(0.0, parseLength(fillOp, 1.0) * ps.fill.alphaF(), 1.0));
-    if (!strokeOp.isEmpty()) ps.stroke.setAlphaF(qBound(0.0, parseLength(strokeOp, 1.0) * ps.stroke.alphaF(), 1.0));
+    if (!strokeOp.isEmpty()) {
+        const double f = qBound(0.0, parseLength(strokeOp, 1.0), 1.0);
+        ps.stroke.setAlphaF(f * ps.stroke.alphaF());
+        ps.strokeOpacity *= f;
+    }
     if (!opStr.isEmpty()) ps.opacity *= qBound(0.0, parseLength(opStr, 1.0), 1.0);
     if (!swStr.isEmpty()) ps.strokeWidth = qMax(0.0, parseLength(swStr, 1.0));
     // Fill rule inherits like any presentation attribute; absent means the
@@ -1708,6 +1783,19 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
         node.name = id.isEmpty() ? QStringLiteral("Group") : id;
         node.opacity = ps.opacity;
         node.transform = tf;
+        // A clip-path on a group clips its whole subtree: it joins the
+        // inherited stack before the children walk, each of which resolves
+        // the intersection into its own raster.
+        const QString gid = refTarget(readAttr(a, QLatin1String("clip-path")));
+        if (!gid.isEmpty()) {
+            if (budget && budget->diag) {
+                ++budget->diag->clipUses;
+                if (!res.clips.contains(gid))
+                    noteCapped(budget->diag->missingRefs,
+                               QStringLiteral("clip#") + gid);
+            }
+            ps.clipAncestors.append(qMakePair(gid, tf));
+        }
         walkChildren(xml, tf, ps, res, node.children, budget);
         // Drop the row entirely when it has nothing (empty group).
         if (!node.children.isEmpty()) {
@@ -1773,6 +1861,7 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
         node.fill = ps.fill;
         node.hasStroke = ps.hasStroke;
         node.stroke = ps.stroke;
+        node.strokeGradient = nodeStrokeGradient(ps);
         node.strokeWidth = ps.strokeWidth;
         static_cast<void>(pushLeaf(out, std::move(node), budget));
         return;
@@ -1947,6 +2036,7 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
     node.mesh = mesh;
     node.hasStroke = ps.hasStroke;
     node.stroke = ps.stroke;
+    node.strokeGradient = nodeStrokeGradient(ps);
     node.strokeWidth = ps.strokeWidth;
     node.markerStart = refTarget(readAttr(a, QLatin1String("marker-start")));
     node.markerMid = refTarget(readAttr(a, QLatin1String("marker-mid")));
@@ -1961,6 +2051,7 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
     node.clipId = refTarget(readAttr(a, QLatin1String("clip-path")));
     node.maskId = refTarget(readAttr(a, QLatin1String("mask")));
     node.filterId = refTarget(readAttr(a, QLatin1String("filter")));
+    finishClipStack(node, ps);
     if (!node.filterId.isEmpty()) {
         const auto it = res.filters.constFind(node.filterId);
         if (it != res.filters.constEnd())
@@ -2005,6 +2096,7 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
         // The bitmap is the paint: no fill, stroke or markers of its own.
         node.hasFill = false;
         node.hasStroke = false;
+        node.strokeGradient.reset();
         node.patternId.clear();
         node.markerStart.clear();
         node.markerMid.clear();
@@ -2053,32 +2145,44 @@ double transformScale(const QTransform& t) {
     return std::max(sx, std::max(sy, 1e-9));
 }
 
-QBrush makeBrush(const SvgNode& n, const QPainterPath& path) {
-    if (n.gradient) {
-        const QRectF b = path.boundingRect();
-        if (n.gradient->radial) {
-            QRadialGradient g(
-                n.gradient->userSpace ? QPointF(n.gradient->cx, n.gradient->cy)
-                                      : QPointF(b.x() + b.width() * n.gradient->cx,
-                                                b.y() + b.height() * n.gradient->cy),
-                n.gradient->userSpace ? n.gradient->r
-                                      : std::max(b.width(), b.height()) * n.gradient->r);
-            for (const auto& s : n.gradient->stops)
-                g.setColorAt(qBound(0.0, s.offset, 1.0), s.color);
-            return QBrush(g);
-        }
-        QLinearGradient g(
-            n.gradient->userSpace ? QPointF(n.gradient->x1, n.gradient->y1)
-                                  : QPointF(b.x() + b.width() * n.gradient->x1,
-                                            b.y() + b.height() * n.gradient->y1),
-            n.gradient->userSpace ? QPointF(n.gradient->x2, n.gradient->y2)
-                                  : QPointF(b.x() + b.width() * n.gradient->x2,
-                                            b.y() + b.height() * n.gradient->y2));
-        for (const auto& s : n.gradient->stops)
-            g.setColorAt(qBound(0.0, s.offset, 1.0), s.color);
-        return QBrush(g);
+// One gradient as a brush, with objectBoundingBox coordinates resolved
+// against `bounds` (the geometry box, which per spec is what both the fill
+// and the stroke paint server map onto).
+QBrush gradientBrush(const SvgGradient& g, const QRectF& bounds) {
+    if (g.radial) {
+        QRadialGradient rad(
+            g.userSpace ? QPointF(g.cx, g.cy)
+                        : QPointF(bounds.x() + bounds.width() * g.cx,
+                                  bounds.y() + bounds.height() * g.cy),
+            g.userSpace ? g.r
+                        : std::max(bounds.width(), bounds.height()) * g.r);
+        for (const auto& s : g.stops)
+            rad.setColorAt(qBound(0.0, s.offset, 1.0), s.color);
+        return QBrush(rad);
     }
+    QLinearGradient lin(
+        g.userSpace ? QPointF(g.x1, g.y1)
+                    : QPointF(bounds.x() + bounds.width() * g.x1,
+                              bounds.y() + bounds.height() * g.y1),
+        g.userSpace ? QPointF(g.x2, g.y2)
+                    : QPointF(bounds.x() + bounds.width() * g.x2,
+                              bounds.y() + bounds.height() * g.y2));
+    for (const auto& s : g.stops)
+        lin.setColorAt(qBound(0.0, s.offset, 1.0), s.color);
+    return QBrush(lin);
+}
+
+QBrush makeBrush(const SvgNode& n, const QPainterPath& path) {
+    if (n.gradient) return gradientBrush(*n.gradient, path.boundingRect());
     return QBrush(n.fill);
+}
+
+// The stroke paint: the resolved paint server when stroke="url(#id)", else
+// the flat colour. `bounds` is the geometry box the objectBoundingBox units
+// map onto (the mapped path for pattern/marker cells).
+QBrush makeStrokeBrush(const SvgNode& n, const QRectF& bounds) {
+    if (n.strokeGradient) return gradientBrush(*n.strokeGradient, bounds);
+    return QBrush(n.stroke);
 }
 
 // Collects one subtree in panel order: a group header row, then each child
@@ -2189,6 +2293,42 @@ void rgbaOf(const QColor& c, std::uint8_t out[4]) {
     out[3] = static_cast<std::uint8_t>(qBound(0, s.alpha(), 255));
 }
 
+// SvgGradient → ArtGradient with objectBoundingBox coordinates resolved
+// against `b`, the same way makeBrush() resolves them for the rasterizer, so
+// the exported SVG shades identically.
+void toArtGradient(const SvgGradient& src, const QRectF& b,
+                   pittore::vector::ArtGradient* g) {
+    g->radial = src.radial;
+    if (src.radial) {
+        if (src.userSpace) {
+            g->cx = src.cx;
+            g->cy = src.cy;
+            g->r = src.r;
+        } else {
+            g->cx = b.x() + b.width() * src.cx;
+            g->cy = b.y() + b.height() * src.cy;
+            g->r = std::max(b.width(), b.height()) * src.r;
+        }
+    } else if (src.userSpace) {
+        g->x1 = src.x1;
+        g->y1 = src.y1;
+        g->x2 = src.x2;
+        g->y2 = src.y2;
+    } else {
+        g->x1 = b.x() + b.width() * src.x1;
+        g->y1 = b.y() + b.height() * src.y1;
+        g->x2 = b.x() + b.width() * src.x2;
+        g->y2 = b.y() + b.height() * src.y2;
+    }
+    g->stops.reserve(src.stops.size());
+    for (const SvgGradient::Stop& s : src.stops) {
+        pittore::vector::ArtStop stop;
+        stop.pos = static_cast<float>(qBound(0.0, s.offset, 1.0));
+        rgbaOf(s.color, stop.rgba);
+        g->stops.push_back(stop);
+    }
+}
+
 // The paint of a node, with gradient coordinates resolved into user space the
 // same way makeBrush() resolves them for the rasterizer, so the exported SVG
 // shades identically.
@@ -2196,43 +2336,20 @@ void fillArtPaint(const SvgNode& n, pittore::vector::ArtPaint* paint) {
     paint->hasFill = n.hasFill;
     rgbaOf(n.fill, paint->fill);
     if (n.hasFill && n.gradient) {
-        const QRectF b = n.path.boundingRect();
-        const SvgGradient& src = *n.gradient;
-        pittore::vector::ArtGradient& g = paint->gradient;
         paint->hasGradient = true;
-        g.radial = src.radial;
-        if (src.radial) {
-            if (src.userSpace) {
-                g.cx = src.cx;
-                g.cy = src.cy;
-                g.r = src.r;
-            } else {
-                g.cx = b.x() + b.width() * src.cx;
-                g.cy = b.y() + b.height() * src.cy;
-                g.r = std::max(b.width(), b.height()) * src.r;
-            }
-        } else if (src.userSpace) {
-            g.x1 = src.x1;
-            g.y1 = src.y1;
-            g.x2 = src.x2;
-            g.y2 = src.y2;
-        } else {
-            g.x1 = b.x() + b.width() * src.x1;
-            g.y1 = b.y() + b.height() * src.y1;
-            g.x2 = b.x() + b.width() * src.x2;
-            g.y2 = b.y() + b.height() * src.y2;
-        }
-        g.stops.reserve(src.stops.size());
-        for (const SvgGradient::Stop& s : src.stops) {
-            pittore::vector::ArtStop stop;
-            stop.pos = static_cast<float>(qBound(0.0, s.offset, 1.0));
-            rgbaOf(s.color, stop.rgba);
-            g.stops.push_back(stop);
-        }
+        toArtGradient(*n.gradient, n.path.boundingRect(), &paint->gradient);
     }
     paint->hasStroke = n.hasStroke;
     rgbaOf(n.stroke, paint->stroke);
     paint->strokeWidth = std::max(0.01, n.strokeWidth);
+    // The stroke paint server rides the same retained gradient record as the
+    // fill, in the node's own space (like the segments), so the vector
+    // persona, the crisp painter and the SVG writer all see the ring the
+    // rasterizer painted.
+    paint->hasStrokeGradient = n.hasStroke && n.strokeGradient != nullptr;
+    if (paint->hasStrokeGradient)
+        toArtGradient(*n.strokeGradient, n.path.boundingRect(),
+                      &paint->strokeGradient);
     paint->patternId = n.patternId.toStdString();
     paint->hasPatternXform = false;
     if (!n.patternTransform.isEmpty()) {
@@ -2250,7 +2367,15 @@ void fillArtPaint(const SvgNode& n, pittore::vector::ArtPaint* paint) {
     paint->markerStart = n.markerStart.toStdString();
     paint->markerMid = n.markerMid.toStdString();
     paint->markerEnd = n.markerEnd.toStdString();
+    // The clip in effect, own or inherited: the canvas vetoes its live
+    // vector repaint on this id (the engine rasterizer cannot re-apply a
+    // clip), so a leaf clipped by an ancestor group must surface it here
+    // too, or the canvas repaints it unclipped over the correct bake. The
+    // outermost ancestor clip stands in when several stack (only one id
+    // fits the field; the bake applies the full intersection).
     paint->clipId = n.clipId.toStdString();
+    if (paint->clipId.empty() && !n.clipStack.isEmpty())
+        paint->clipId = n.clipStack.first().id.toStdString();
     paint->maskId = n.maskId.toStdString();
     paint->hasMesh = n.mesh && !n.mesh->patches.empty();
     if (paint->hasMesh) paint->mesh = *n.mesh;
@@ -2323,7 +2448,8 @@ void paintCellShape(QPainter& p, const SvgNode& s, const QTransform& t) {
     if (s.hasFill) p.setBrush(s.gradient ? makeBrush(s, sp) : QBrush(s.fill));
     else p.setBrush(Qt::NoBrush);
     if (s.hasStroke) {
-        QPen pen(s.stroke, std::max(0.01, s.strokeWidth));
+        QPen pen(makeStrokeBrush(s, sp.boundingRect()),
+                 std::max(0.01, s.strokeWidth));
         pen.setCosmetic(false);
         p.setPen(pen);
         if (!s.hasFill) p.setBrush(Qt::NoBrush);
@@ -2366,13 +2492,23 @@ void paintMarkers(QPainter& p, const SvgNode& n, const SvgResources& res) {
     }
 }
 
+// Effective clip for a node, in its local space: the intersection of every
+// clip-path in effect (its own plus each ancestor's — a group clip applies to
+// the whole subtree). Each ref carries the map from its own user space, so
+// ancestor transforms land correctly. Dangling refs contribute nothing, the
+// same as the single-ref behaviour before stacks existed.
 QPainterPath clipUserPath(const SvgNode& n, const SvgResources& res) {
     QPainterPath clip;
-    if (n.clipId.isEmpty()) return clip;
-    const auto it = res.clips.constFind(n.clipId);
-    if (it == res.clips.constEnd()) return clip;
-    for (const SvgNode& s : it.value().shapes)
-        clip = clip.united(s.transform.map(s.path));
+    bool have = false;
+    for (const SvgClipRef& c : n.clipStack) {
+        const auto it = res.clips.constFind(c.id);
+        if (it == res.clips.constEnd()) continue;
+        QPainterPath cell;
+        for (const SvgNode& s : it.value().shapes)
+            cell = cell.united(c.toNode.map(s.transform.map(s.path)));
+        clip = have ? clip.intersected(cell) : cell;
+        have = true;
+    }
     return clip;
 }
 
@@ -2484,7 +2620,8 @@ void paintLeafBody(QPainter& p, const SvgNode& n, const SvgResources& res) {
         p.setBrush(Qt::NoBrush);
     }
     if (n.hasStroke) {
-        QPen pen(n.stroke, std::max(0.01, n.strokeWidth));
+        QPen pen(makeStrokeBrush(n, n.path.boundingRect()),
+                 std::max(0.01, n.strokeWidth));
         pen.setCosmetic(false);
         p.setPen(pen);
         p.setBrush(n.hasFill || !n.patternId.isEmpty() ? p.brush() : Qt::NoBrush);
@@ -2572,13 +2709,16 @@ bool rasterizePart(const SvgNode& n, QImage* img, QPointF* offset,
 // layer opacity), no pattern/mesh/filter/clip/mask/markers (phase- or
 // temp-dependent), text excluded (labels stay crisp vector rows) and
 // bitmaps excluded (the row's retained geometry is vector-only).
+// Own and inherited clip-paths both count: the row's retained flatArt has
+// no clip defs to re-apply at zoom, so a clipped leaf keeps a row whose
+// retained subtree repaints the clip exactly.
 bool flattenableLeaf(const SvgNode& n) {
     if (n.group || n.fromText) return false;
     if (n.opacity != 1.0) return false;
     if (n.image) return false;
     if (!n.patternId.isEmpty() || n.mesh || n.filter) return false;
     if (!n.filterId.isEmpty()) return false;
-    if (!n.clipId.isEmpty() || !n.maskId.isEmpty()) return false;
+    if (!n.clipStack.isEmpty() || !n.maskId.isEmpty()) return false;
     if (!n.markerStart.isEmpty() || !n.markerMid.isEmpty() ||
         !n.markerEnd.isEmpty())
         return false;
@@ -2923,7 +3063,8 @@ void paintFlattenedLeaf(QPainter& docP, const SvgNode& n, const SvgResources& re
         docP.setBrush(Qt::NoBrush);
     }
     if (n.hasStroke) {
-        QPen pen(n.stroke, std::max(0.01, n.strokeWidth));
+        QPen pen(makeStrokeBrush(n, n.path.boundingRect()),
+                 std::max(0.01, n.strokeWidth));
         pen.setCosmetic(false);
         docP.setPen(pen);
         if (!n.hasFill && n.patternId.isEmpty()) docP.setBrush(Qt::NoBrush);
@@ -2984,12 +3125,29 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
         if (parseColor(strokeStr, &c)) {
             ps.hasStroke = true;
             ps.stroke = c;
-        } else if (!strokeStr.startsWith(QLatin1String("url("))) {
+            ps.strokeGradient.reset();
+        } else if (strokeStr.startsWith(QLatin1String("url("))) {
+            // Paint-server stroke: same resolution as the per-shape walker
+            // (no diagnostics here — the flatten pass is the overflow path).
+            const QString id = refTarget(strokeStr);
+            const auto it = res.grads.constFind(id);
+            if (it != res.grads.constEnd()) {
+                ps.hasStroke = true;
+                ps.strokeGradient = *it;
+            } else {
+                ps.strokeGradient.reset();
+            }
+        } else {
             ps.hasStroke = false;
+            ps.strokeGradient.reset();
         }
     }
     if (!fillOp.isEmpty()) ps.fill.setAlphaF(qBound(0.0, parseLength(fillOp, 1.0) * ps.fill.alphaF(), 1.0));
-    if (!strokeOp.isEmpty()) ps.stroke.setAlphaF(qBound(0.0, parseLength(strokeOp, 1.0) * ps.stroke.alphaF(), 1.0));
+    if (!strokeOp.isEmpty()) {
+        const double f = qBound(0.0, parseLength(strokeOp, 1.0), 1.0);
+        ps.stroke.setAlphaF(f * ps.stroke.alphaF());
+        ps.strokeOpacity *= f;
+    }
     if (!opStr.isEmpty()) ps.opacity *= qBound(0.0, parseLength(opStr, 1.0), 1.0);
     if (!swStr.isEmpty()) ps.strokeWidth = qMax(0.0, parseLength(swStr, 1.0));
     // Fill rule inherits; absent means the spec initial value (nonzero).
@@ -3003,6 +3161,11 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
             ps.fillEvenOdd = true;
     }
     if (tag == QLatin1String("g")) {
+        // Same inherited-clip rule as the main walker: the group's clip-path
+        // joins the stack the children resolve against. `tf * root` is the
+        // cumulative map a leaf's transform carries here.
+        const QString gid = refTarget(readAttr(a, QLatin1String("clip-path")));
+        if (!gid.isEmpty()) ps.clipAncestors.append(qMakePair(gid, tf * root));
         return flattenChildren(xml, tf, ps, res, docP, root, progress,
                                streamTotal);
     }
@@ -3100,6 +3263,7 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
     }
     n.hasStroke = ps.hasStroke;
     n.stroke = ps.stroke;
+    n.strokeGradient = nodeStrokeGradient(ps);
     n.strokeWidth = ps.strokeWidth;
     n.markerStart = refTarget(readAttr(a, QLatin1String("marker-start")));
     n.markerMid = refTarget(readAttr(a, QLatin1String("marker-mid")));
@@ -3107,6 +3271,7 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
     n.clipId = refTarget(readAttr(a, QLatin1String("clip-path")));
     n.maskId = refTarget(readAttr(a, QLatin1String("mask")));
     n.filterId = refTarget(readAttr(a, QLatin1String("filter")));
+    finishClipStack(n, ps);
     if (!n.filterId.isEmpty()) {
         const auto it = res.filters.constFind(n.filterId);
         if (it != res.filters.constEnd())
@@ -3117,6 +3282,7 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
         n.imageFit = imageFit;
         n.hasFill = false;
         n.hasStroke = false;
+        n.strokeGradient.reset();
         n.patternId.clear();
         n.markerStart.clear();
         n.markerMid.clear();

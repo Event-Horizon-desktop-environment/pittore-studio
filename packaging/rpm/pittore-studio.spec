@@ -1,5 +1,5 @@
 Name:           pittore-studio
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Layer-based photo editor for Linux
 License:        MIT
@@ -12,6 +12,7 @@ BuildRequires:  tomlplusplus-devel lcms2-devel
 BuildRequires:  qt6-qtbase-devel qt6-qtsvg-devel
 BuildRequires:  libwebp-devel libtiff-devel libjpeg-turbo-devel libzstd-devel qrencode-devel
 Requires:       qt6-qtbase qt6-qtsvg zlib-ng harfbuzz freetype fontconfig lcms2
+Requires:       tomlplusplus
 
 %description
 Raster painting and retouching, vector persona, text, adjustment

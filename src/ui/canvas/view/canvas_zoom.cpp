@@ -41,6 +41,7 @@
 #include "engine/core/log.h"
 
 #include "ui/canvas/shared/canvas_helpers.h"
+#include "ui/canvas/trace/canvas_trace.h"
 
 namespace pittore::ui {
 
@@ -132,6 +133,8 @@ void CanvasView::setZoom(double zoom, QPointF anchor) {
         anchor.x() < 0 ? QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0) : anchor;
     const QPointF docAnchor = viewToDocument(anchorPoint);
 
+    const double zBefore = d->zoom;
+    const QPointF originBefore = documentToView(QPointF(0, 0));
     d->zoom = z;
     updateScrollRange();
     // Zoom-coupled vector display is rebaked on settle, not per tick: a
@@ -166,6 +169,12 @@ void CanvasView::setZoom(double zoom, QPointF anchor) {
     vb->setValue(int(qBound(double(vb->minimum()), nyd,
                             double(vb->maximum()))));
 
+    // Named before the refresh it schedules: an unexpected zoom is exactly the
+    // "content jumped off screen" symptom, and the frame that follows carries
+    // the resulting transform.
+    canvasTraceZoom(state_ ? state_->activeTool() : ToolId::Count_, zBefore, z,
+                    originBefore, documentToView(QPointF(0, 0)));
+    canvasNoteUpdate("zoom");
     emit zoomChanged(z);
     refresh();
     brushCursorRect_ = QRectF();   // ring geometry lives in view space
@@ -339,6 +348,7 @@ void CanvasView::setExtrasVisible(bool on) { extras_ = on; refresh(); }
 
 
 void CanvasView::refresh() {
+    canvasNoteUpdate("refresh");
     viewport()->update();
     if (horizontalRuler_) horizontalRuler_->update();
     if (verticalRuler_) verticalRuler_->update();
@@ -346,7 +356,14 @@ void CanvasView::refresh() {
 }
 
 
-void CanvasView::scrollContentsBy(int, int) { refresh(); }
+void CanvasView::scrollContentsBy(int dx, int dy) {
+    // The view origin moving under a drag is a "jumped off screen" candidate
+    // on its own, so the step is named before the refresh it schedules.
+    canvasTraceScroll(state_ ? state_->activeTool() : ToolId::Count_, dx, dy,
+                      documentToView(QPointF(0, 0)));
+    canvasNoteUpdate("scroll");
+    refresh();
+}
 
 
 void CanvasView::applyPendingFit() {
@@ -362,11 +379,27 @@ void CanvasView::applyPendingFit() {
 
 
 void CanvasView::resizeEvent(QResizeEvent* event) {
+    // Captured before the base class re-lays the viewport out: the transform
+    // reads viewport size, margins and the scrollbars, so a frame that jumps
+    // needs to be able to name which of the three moved.
+    const CanvasResizeState before{size(),        viewport()->size(),
+                                   viewportMargins(), horizontalScrollBar()->value(),
+                                   horizontalScrollBar()->width(),
+                                   verticalScrollBar()->value(),
+                                   verticalScrollBar()->width()};
     QAbstractScrollArea::resizeEvent(event);
     applyPendingFit();
     updateScrollRange();
     layoutRulers();
     if (taskBar_) taskBar_->reflow();
+    const CanvasResizeState after{size(),        viewport()->size(),
+                                  viewportMargins(), horizontalScrollBar()->value(),
+                                  horizontalScrollBar()->width(),
+                                  verticalScrollBar()->value(),
+                                  verticalScrollBar()->width()};
+    if (before.viewport != after.viewport)
+        canvasTraceResize(state_ ? state_->activeTool() : ToolId::Count_, before,
+                          after);
 }
 
 }  // namespace pittore::ui

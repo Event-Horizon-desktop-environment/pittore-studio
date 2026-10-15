@@ -4,6 +4,7 @@
 
 #include "ui/app_state.h"
 #include "ui/app_state_detail.h"
+#include "ui/tools/log/tool_log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -212,16 +213,43 @@ bool AppState::moveLayersAt(const QVector<int>& indices, const QPointF& delta,
     const bool useStarts = starts.size() == indices.size();
     QRect region;
     bool moved = false;
+    // Visual-split detector. The composite is drawn from
+    // layerDrawSource().offset, not from l->offset directly, so a path that
+    // leaves the draw placement behind (a stale styled/mask bake) moves the
+    // model and the pixels by different amounts — a jump that no move/drag
+    // line, which only reads the model, can ever show. A style bake sits a
+    // constant `grow` away from the model origin, so the absolute positions
+    // are allowed to differ; the *deltas* are not.
+    bool split = false;
+    QPointF splitModel, splitDraw;
+    QPointF off;   // last layer's model placement, for the trace below
     for (int i = 0; i < indices.size(); ++i) {
         const int idx = indices.at(i);
         if (idx < 0 || idx >= d->layers.size()) continue;
         LayerItem* l = &d->layers[idx];
         if (l->kind != LayerItem::Kind::Pixel || l->locked || !l->pixels) continue;
         const QRectF oldBounds = layerBounds(*d, *l);
+        const QPointF drawFrom = layerDrawSource(*l).offset;
         // Absolute placement: start + delta (gesture-baseline compatible).
-        l->offset = (useStarts ? starts.at(i) : l->offset) + delta;
+        const QPointF from = l->offset;
+        const QPointF to = (useStarts ? starts.at(i) : l->offset) + delta;
+        l->offset = to;
         syncLinkedMaskPlacement(*l);
-        if (l->liveText) l->textSpec.origin += delta;
+        // The layout origin tracks the placement step, not the gesture
+        // delta: `delta` is the whole press-to-cursor distance and this runs
+        // once per move event, so adding it would walk the origin away from
+        // the pixels quadratically (the next re-render then drops the run
+        // off the canvas).
+        if (l->liveText) l->textSpec.origin += to - from;
+        const QPointF drawTo = layerDrawSource(*l).offset;
+        if (!split &&
+            (std::abs((to - from).x() - (drawTo - drawFrom).x()) > 0.01 ||
+             std::abs((to - from).y() - (drawTo - drawFrom).y()) > 0.01)) {
+            split = true;
+            splitModel = to - from;
+            splitDraw = drawTo - drawFrom;
+        }
+        off = to;
         const QRectF newBounds = layerBounds(*d, *l);
         const double halo = std::ceil(std::max({l->scaleX, l->scaleY})) + 1.0;
         region |= oldBounds.adjusted(-halo, -halo, halo, halo).toAlignedRect();
@@ -231,8 +259,37 @@ bool AppState::moveLayersAt(const QVector<int>& indices, const QPointF& delta,
     if (!moved) return false;
     d->dirty = true;
     region = region.intersected(QRect(QPoint(0, 0), d->size));
-    if (region.isEmpty()) return true;
+    if (region.isEmpty()) {
+        // The model moved but nothing intersects the document: neither the
+        // composite nor regionModified runs, so the screen keeps the previous
+        // frame while the layer sits somewhere new. Silent here would be a
+        // purely visual jump, so name it.
+        tool_logf(activeTool(), "move/no-render",
+                  "off=(%.1f,%.1f) delta=(%.1f,%.1f) region-empty doc=%dx%d",
+                  off.x(), off.y(), delta.x(), delta.y(), d->size.width(),
+                  d->size.height());
+        return true;
+    }
+    // renderRegion() bumps DocumentItem::revision only when it actually
+    // recomposited — it returns past the bump when the region clips away or
+    // the tone path bails. An unchanged revision means the model moved and
+    // the composite did not.
+    const std::uint64_t revBefore = d->revision;
     d->renderRegion(region);
+    if (d->revision == revBefore)
+        tool_logf(activeTool(), "render/SKIP",
+                  "off=(%.1f,%.1f) delta=(%.1f,%.1f) region=(%d,%d %dx%d) "
+                  "rev=%llu",
+                  off.x(), off.y(), delta.x(), delta.y(), region.x(),
+                  region.y(), region.width(), region.height(),
+                  static_cast<unsigned long long>(d->revision));
+    if (split)
+        tool_logf(activeTool(), "render/SPLIT",
+                  "off=(%.1f,%.1f) model=(%+.2f,%+.2f) draw=(%+.2f,%+.2f) "
+                  "region=(%d,%d %dx%d)",
+                  off.x(), off.y(), splitModel.x(), splitModel.y(),
+                  splitDraw.x(), splitDraw.y(), region.x(), region.y(),
+                  region.width(), region.height());
     noteRegionEdit(QRectF(region));
     emit regionModified(d, QRectF(region));
     return true;

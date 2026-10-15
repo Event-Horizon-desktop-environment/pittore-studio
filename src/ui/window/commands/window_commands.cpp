@@ -195,6 +195,17 @@ void MainWindow::runCommand(const QString& id) {
                                                                 : TaskContext::None);
     } else if (id == QLatin1String("cancel")) {
         state_->setTaskContext(TaskContext::None);
+    } else if (id == QLatin1String("apply_crop") ||
+               id == QLatin1String("apply-crop")) {
+        // Contextual task bar Apply / Enter: crop the document to the live
+        // frame in one undo step (no-op with a hint when the frame already
+        // covers the whole image).
+        canvas_->commitCrop();
+    } else if (id == QLatin1String("cancel_crop") ||
+               id == QLatin1String("cancel-crop")) {
+        // Contextual task bar Cancel / Escape: the frame returns to the whole
+        // document; nothing in the document ever changed, so no undo entry.
+        canvas_->cancelCrop();
     } else if (id == QLatin1String("new-layer")) {
         LayerItem layer;
         layer.name = tr("Layer %1").arg(doc ? doc->layers.size() + 1 : 1);

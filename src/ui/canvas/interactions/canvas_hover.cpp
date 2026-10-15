@@ -134,6 +134,14 @@ void CanvasView::mouseDoubleClickEvent(QMouseEvent* event) {
         refresh();
         return;
     }
+    // Double-click commits an armed crop frame (Enter and the task bar's
+    // Apply do the same).
+    if (tool == ToolId::Crop) {
+        commitCrop();
+        event->accept();
+        refresh();
+        return;
+    }
     // Double-click with an armed Perspective Crop quad commits the warp.
     if (tool == ToolId::PerspectiveCrop && pcropArmed_) {
         const int outW = state_->option(tool, QStringLiteral("w")).toInt();
