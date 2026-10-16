@@ -193,13 +193,18 @@ jobs:
           # Build-time only (same plugin story as the CUDA step above).
           # AMD's el9 network repo; the el8-tagged RPMs install fine in
           # the Fedora container. gpgcheck is off: this repo content never
-          # ships, only our compiled kernels do.
+          # ships, only our compiled kernels do. priority=1 pins AMD's
+          # repo above Fedora's own ROCm (7.1.1): without it dnf mixes the
+          # two stacks (Fedora hipcc + AMD runtime) and the lib lookup
+          # below fails — the same version-number trap as Ubuntu's
+          # universe packages, fixed there with an apt pin.
           cat > /etc/yum.repos.d/rocm.repo <<EOF
           [rocm]
           name=AMD ROCm 7.2
           baseurl=https://repo.radeon.com/rocm/el9/7.2/main
           enabled=1
           gpgcheck=0
+          priority=1
           EOF
           dnf -y install hipcc hip-devel hip-runtime-amd
           echo "$(dirname "$(rpm -ql hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"

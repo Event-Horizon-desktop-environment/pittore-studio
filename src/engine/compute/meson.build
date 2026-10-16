@@ -260,7 +260,10 @@ if hip_feature.allowed()
       build_by_default : true)
 
     hip_lib_dir = join_paths(hip_root, 'lib')
-    hip_rt = cc.find_library('amdhip64', dirs : [hip_lib_dir], required : true)
+    hip_lib64_dir = join_paths(hip_root, 'lib64')
+    hip_rt = cc.find_library('amdhip64',
+                             dirs : [hip_lib_dir, hip_lib64_dir],
+                             required : true)
     hip_plugin = shared_module('pittore-hip',
       objects : [hip_backend_obj, hip_plugin_obj],
       dependencies : declare_dependency(dependencies : hip_rt),
