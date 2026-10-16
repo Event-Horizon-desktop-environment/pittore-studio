@@ -13,6 +13,9 @@ option('cuda-archs', type : 'string', value : 'native',
 option('hip-root', type : 'string', value : '',
   description : 'Path to the ROCm root (empty = derived from hipcc location)')
 
+option('hip-archs', type : 'string', value : 'native',
+  description : 'AMD GPU targets: "native" lets hipcc target the build machine GPUs (needs one visible), or a comma list like "gfx1030,gfx1100,gfx1201" for GPU-less builders such as CI')
+
 option('onnxruntime', type : 'feature', value : 'auto',
   description : 'ONNX Runtime AI backend for background removal; auto = on when a runtime is found')
 

@@ -1066,7 +1066,11 @@ if pittore_hip_enabled
   exe = executable('test_hip', ['test_hip.cpp'] + gpu_tests,
     dependencies : test_deps,
     include_directories : src_inc)
-  test('hip-parity', exe)
+  # The HIP backend ships as a plugin: hand the test its path so the
+  # loader exercises the same dlopen path the app uses. No AMD GPU on
+  # the box is still a clean skip (devices come back empty).
+  test('hip-parity', exe,
+    env : {'PITTORE_HIP_PLUGIN' : hip_plugin.full_path()})
 endif
 
 # Shapes and free paths: decode the shape probes and compare the composited

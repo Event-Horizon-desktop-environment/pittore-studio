@@ -152,9 +152,12 @@ endif
 
 # --- HIP backend (AMD) ------------------------------------------------------
 # Meson has no "hip" language (add_languages('hip') errors on 1.11+), so the
-# kernels + runtime are compiled directly by hipcc through a custom_target.
-# The resulting object is archived into libpittore-compute, so every consumer
-# (app, test_hip, test-all) picks it up through pittore_compute_dep.
+# kernels are compiled directly by hipcc through a custom_target. Unlike
+# CUDA there is no static redistributable HIP host runtime, so the backend
+# ships as a plugin (libpittore-hip.so) that the factory dlopens at runtime:
+# the app starts everywhere and lights the GPU path up only where the ROCm
+# HIP runtime is installed. The plugin's DT_NEEDED on libamdhip64 carries
+# no rpath into build-machine paths — never ship those in an artifact.
 hip_feature = get_option('backend-hip')
 pittore_hip_enabled = false
 if hip_feature.allowed()
@@ -163,32 +166,107 @@ if hip_feature.allowed()
     hipcc = find_program(join_paths(hip_root, 'bin', 'hipcc'),
                          required : hip_feature.enabled())
   else
-    hipcc = find_program('hipcc', required : hip_feature.enabled())
+    hipcc = find_program('hipcc',
+                         dirs : ['/opt/rocm/bin', '/usr/lib/rocm/bin'],
+                         required : hip_feature.enabled())
   endif
   if hipcc.found()
     if hip_root == ''
       hip_root = fs.parent(fs.parent(hipcc.full_path()))
     endif
-    hip_obj = custom_target('hip_backend_obj',
+    compute_args += '-DPITTORE_HAS_HIP=1'
+    pittore_hip_enabled = true
+
+    # Which GPUs the shipped kernels run on. "native" passes no arch flags
+    # and hipcc targets the build machine's GPUs (needs one visible, so dev
+    # machines only). GPU-less builders (CI) pass an explicit comma list;
+    # each becomes an --offload-arch image in one fat binary. There is no
+    # PTX-style JIT fallback, so every arch a user might have must be
+    # listed (unknown entries fail the build loudly, which is the point).
+    hip_arch_flags = []
+    hip_archs_opt = get_option('hip-archs')
+    if hip_archs_opt != '' and hip_archs_opt != 'native'
+      foreach a : hip_archs_opt.split(',')
+        a = a.strip()
+        if a == ''
+          continue
+        endif
+        if not a.startswith('gfx')
+          error('pittore-studio: bad -Dhip-archs entry "' + a + '" (want gfxNNN like gfx1030)')
+        endif
+        hip_arch_flags += '--offload-arch=' + a
+      endforeach
+    endif
+
+    # hipcc wraps clang, so plain spellings apply: optimization level
+    # through, -g for debug info, -DNDEBUG per b_ndebug with the same
+    # if-release rule meson applies to gcc. -fPIC: the object links into
+    # the plugin shared module below.
+    hip_build_args = []
+    if get_option('optimization') == 'plain'
+      hip_build_args = []
+    elif get_option('optimization') == '0'
+      hip_build_args = ['-O0']
+    elif get_option('optimization') == 'g'
+      hip_build_args = ['-O0']
+    elif get_option('optimization') == '1'
+      hip_build_args = ['-O1']
+    elif get_option('optimization') == '2'
+      hip_build_args = ['-O2']
+    else
+      # '3', 's' and 'fast' all land on clang's top level.
+      hip_build_args = ['-O3']
+    endif
+    if get_option('debug')
+      hip_build_args += '-g'
+    endif
+    if get_option('b_ndebug') == 'true' \
+        or (get_option('b_ndebug') == 'if-release'
+            and get_option('buildtype') in ['release', 'plain'])
+      hip_build_args += '-DNDEBUG'
+    endif
+
+    # Header deps: clang -MD writes paths ninja reads fine, and -MF lands
+    # exactly on the depfile ninja expects for this target.
+    hip_backend_obj = custom_target('hip_backend_obj',
       input : files('hip_backend.cpp'),
       output : 'hip_backend.hip.o',
       command : [hipcc, '-c',
                  '-DPITTORE_HAS_HIP=1',
                  '-std=c++20',
+                 '-fPIC',
                  '-I' + meson.project_source_root() + '/src',
                  '-I' + join_paths(hip_root, 'include'),
-                 '@INPUT@',
-                 '-o', '@OUTPUT@'],
+                 ] + hip_build_args + hip_arch_flags + [
+                 '-MD', '-MT', '@OUTPUT@',
+                 '-MF', join_paths(meson.current_build_dir(), 'hip_backend.d'),
+                 '@INPUT@', '-o', '@OUTPUT@'],
+      depfile : 'hip_backend.d',
       build_by_default : true)
-    compute_sources += hip_obj
-    compute_args += '-DPITTORE_HAS_HIP=1'
-    pittore_hip_enabled = true
+    hip_plugin_obj = custom_target('hip_plugin_obj',
+      input : files('hip_plugin.cpp'),
+      output : 'hip_plugin.o',
+      command : [hipcc, '-c',
+                 '-DPITTORE_HAS_HIP=1',
+                 '-std=c++20',
+                 '-fPIC',
+                 '-I' + meson.project_source_root() + '/src',
+                 '-I' + join_paths(hip_root, 'include'),
+                 ] + hip_build_args + [
+                 '-MD', '-MT', '@OUTPUT@',
+                 '-MF', join_paths(meson.current_build_dir(), 'hip_plugin.d'),
+                 '@INPUT@', '-o', '@OUTPUT@'],
+      depfile : 'hip_plugin.d',
+      build_by_default : true)
 
     hip_lib_dir = join_paths(hip_root, 'lib')
     hip_rt = cc.find_library('amdhip64', dirs : [hip_lib_dir], required : true)
-    compute_deps += declare_dependency(
-      dependencies : hip_rt,
-      link_args : ['-Wl,-rpath,' + hip_lib_dir])
+    hip_plugin = shared_module('pittore-hip',
+      objects : [hip_backend_obj, hip_plugin_obj],
+      dependencies : declare_dependency(dependencies : hip_rt),
+      install : true,
+      install_dir : get_option('libdir') / 'pittore')
+    compute_sources += files('hip_loader.cpp')
     message('pittore-studio: HIP backend enabled  (ROCm @ ' + hip_root + ')')
   endif
 else

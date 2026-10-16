@@ -6,7 +6,7 @@
 #include "engine/compute/cuda_backend.h"
 #endif
 #if defined(PITTORE_HAS_HIP)
-#include "engine/compute/hip_backend.h"
+#include "engine/compute/hip_loader.h"
 #endif
 
 namespace pittore::compute {
@@ -18,7 +18,7 @@ std::vector<Device> enumerate_devices() {
     for (auto& d : cuda_devices()) out.push_back(d);
 #endif
 #if defined(PITTORE_HAS_HIP)
-    for (auto& d : hip_devices()) out.push_back(d);
+    for (auto& d : hip_plugin_devices()) out.push_back(d);
 #endif
     return out;
 }
@@ -35,7 +35,7 @@ std::unique_ptr<ComputeBackend> make_backend(BackendType type) {
 #endif
         case BackendType::HIP:
 #if defined(PITTORE_HAS_HIP)
-            return make_hip_backend();
+            return hip_plugin_make_backend();
 #else
             return nullptr;
 #endif
@@ -48,7 +48,7 @@ std::unique_ptr<ComputeBackend> make_default_backend() {
     if (auto c = make_cuda_backend()) return c;
 #endif
 #if defined(PITTORE_HAS_HIP)
-    if (auto h = make_hip_backend()) return h;
+    if (auto h = hip_plugin_make_backend()) return h;
 #endif
     return std::make_unique<CpuBackend>();
 }

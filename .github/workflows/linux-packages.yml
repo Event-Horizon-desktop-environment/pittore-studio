@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  MESON_OPTS: -Dbuildtype=release --prefix=/usr -Dbackend-cuda=enabled -Dcuda-archs=sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120,+ptx -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
+  MESON_OPTS: -Dbuildtype=release --prefix=/usr -Dbackend-cuda=enabled -Dcuda-archs=sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120,+ptx -Dbackend-hip=enabled -Dhip-archs=gfx906,gfx908,gfx90a,gfx942,gfx950,gfx1010,gfx1012,gfx1030,gfx1031,gfx1032,gfx1100,gfx1101,gfx1102,gfx1103,gfx1150,gfx1151,gfx1200,gfx1201 -Donnxruntime=disabled -Dapp=enabled
 
 jobs:
   test:
@@ -40,6 +40,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm HIP toolkit (build-only)
+        run: |
+          set -euo pipefail
+          # Build-time only: hipcc compiles our kernels here; the backend
+          # ships as a plugin dlopened at runtime, so users install the
+          # small hip-runtime-amd package instead of any toolkit.
+          curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
+          # outranks AMD's (1.1.1) by version number; without this apt
+          # mixes the two stacks and the old compiler rejects new GPU
+          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq hip-dev
+          echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
           # UI tests enumerate installed font families (type-tool-ui needs
           # >100); a bare runner ships only a handful, so install Noto's
           # per-script families plus the usual core sets.
@@ -86,6 +102,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm HIP toolkit (build-only)
+        run: |
+          set -euo pipefail
+          # Build-time only: hipcc compiles our kernels here; the backend
+          # ships as a plugin dlopened at runtime, so users install the
+          # small hip-runtime-amd package instead of any toolkit.
+          curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
+          # outranks AMD's (1.1.1) by version number; without this apt
+          # mixes the two stacks and the old compiler rejects new GPU
+          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq hip-dev
+          echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and stage
         run: |
           set -euo pipefail
@@ -100,7 +132,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp src/engine/compute/libpittore-hip.so
           rm -rf staging dist
           mkdir -p staging dist
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
@@ -116,6 +148,7 @@ jobs:
            Raster painting and retouching, vector persona, text,
            adjustment layers, filters, and an ICC-aware colour pipeline.
           Depends: libc6, libstdc++6, libqt6widgets6, libqt6network6, libqt6svg6, zlib1g, libharfbuzz0b, libfreetype6, libfontconfig1, liblcms2-2, libwebp7, libtiff6, libjpeg-turbo8, libzstd1, libqrencode4, libtomlplusplus3t64
+          Recommends: hip-runtime-amd
           EOF
       - name: Pack deb
         run: |
@@ -154,6 +187,22 @@ jobs:
           dnf config-manager addrepo --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
           dnf -y install cuda-nvcc-13-4 cuda-cudart-devel-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm HIP toolkit (build-only)
+        run: |
+          set -euo pipefail
+          # Build-time only (same plugin story as the CUDA step above).
+          # AMD's el9 network repo; the el8-tagged RPMs install fine in
+          # the Fedora container. gpgcheck is off: this repo content never
+          # ships, only our compiled kernels do.
+          cat > /etc/yum.repos.d/rocm.repo <<EOF
+          [rocm]
+          name=AMD ROCm 7.2
+          baseurl=https://repo.radeon.com/rocm/el9/7.2/main
+          enabled=1
+          gpgcheck=0
+          EOF
+          dnf -y install hipcc hip-devel hip-runtime-amd
+          echo "$(dirname "$(rpm -ql hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and pack rpm
         run: |
           set -euo pipefail
@@ -203,7 +252,7 @@ jobs:
             zlib harfbuzz freetype2 fontconfig tomlplusplus lcms2 \
             qt6-base qt6-svg \
             libwebp libtiff libjpeg-turbo zstd qrencode \
-            cuda
+            cuda hip-runtime-amd
           # makepkg refuses to run as root; build as an unprivileged user.
           useradd -m builder
           mkdir -p pkgwork dist
@@ -251,6 +300,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm HIP toolkit (build-only)
+        run: |
+          set -euo pipefail
+          # Build-time only: hipcc compiles our kernels here; the backend
+          # ships as a plugin dlopened at runtime, so users install the
+          # small hip-runtime-amd package instead of any toolkit.
+          curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
+          # outranks AMD's (1.1.1) by version number; without this apt
+          # mixes the two stacks and the old compiler rejects new GPU
+          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq hip-dev
+          echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and pack tarball
         run: |
           set -euo pipefail
@@ -264,7 +329,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp src/engine/compute/libpittore-hip.so
           rm -rf staging dist
           mkdir -p staging dist
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
@@ -301,6 +366,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm HIP toolkit (build-only)
+        run: |
+          set -euo pipefail
+          # Build-time only: hipcc compiles our kernels here; the backend
+          # ships as a plugin dlopened at runtime, so users install the
+          # small hip-runtime-amd package instead of any toolkit.
+          curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
+          # outranks AMD's (1.1.1) by version number; without this apt
+          # mixes the two stacks and the old compiler rejects new GPU
+          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq hip-dev
+          echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and pack AppImage
         run: |
           set -euo pipefail
@@ -315,7 +396,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp src/engine/compute/libpittore-hip.so
           rm -rf AppDir dist
           mkdir -p AppDir dist
           DESTDIR="$PWD/AppDir" meson install -C build --no-rebuild

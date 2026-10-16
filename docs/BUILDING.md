@@ -127,10 +127,11 @@ automatically; `PITTORE_JOBS` overrides.)
 | Option | Default | What it does |
 |---|---|---|
 | `backend-cuda` | `auto` | CUDA (NVIDIA) backend; on when `nvcc` is found (PATH or a standard install root) |
-| `backend-hip` | `auto` | HIP (AMD) backend; on when `hipcc` is found |
+| `backend-hip` | `auto` | HIP (AMD) backend; on when `hipcc` is found (PATH or a standard install root) |
 | `cuda-root` | auto | CUDA toolkit root, overriding PATH and the standard roots |
 | `cuda-archs` | `native` | GPU targets nvcc compiles for; `native` probes the build GPU, a GPU-less builder (CI) passes a comma list such as `sm_75,sm_86,sm_120,+ptx` |
-| `hip-root` | auto | ROCm root when it is not on `PATH` |
+| `hip-root` | auto | ROCm root, overriding PATH and the standard roots |
+| `hip-archs` | `native` | AMD GPU targets hipcc compiles for (`--offload-arch` each); `native` targets the build machine's GPUs, a GPU-less builder (CI) passes a comma list such as `gfx1030,gfx1100,gfx1201`. HIP has no driver-JIT fallback, so list every arch you ship for |
 | `app` | `auto` | Build the Qt application; off when Qt6 or `lcms2` is missing |
 | `onnxruntime` | `auto` | ONNX Runtime for GPU inference |
 | `onnxruntime-root` | auto | Prefix of an ONNX Runtime install |
@@ -247,8 +248,13 @@ install roots (`/usr/local/cuda/bin`, `/opt/cuda/bin`, `/usr/lib/cuda/bin`).
 For any other layout, pass the root explicitly:
 `meson setup build -Dcuda-root=/path/to/cuda`.
 
-**HIP not picked up** — `hipcc` is not on `PATH`; build.sh never installs
-ROCm. Install it yourself, then `just reconf`.
+**HIP not picked up** — `hipcc` was searched on `PATH` plus the
+standard install roots (`/opt/rocm/bin`, `/usr/lib/rocm/bin`). For any
+other layout, pass the root explicitly:
+`meson setup build -Dhip-root=/path/to/rocm`. build.sh never installs
+ROCm. The HIP backend ships as a plugin (`libpittore-hip.so`, installed
+under `<libdir>/pittore`): the app starts without ROCm and uses the GPU
+once the `hip-runtime-amd` package is installed.
 
 **Stale or confusing configuration state** — start over:
 
