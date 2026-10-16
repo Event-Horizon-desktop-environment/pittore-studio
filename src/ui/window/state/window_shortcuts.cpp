@@ -173,6 +173,45 @@ void MainWindow::refreshCarrierShortcuts() {
 }
 
 
+bool MainWindow::handleBrushSizeKey(QKeyEvent* key) {
+    // Shift is the hardness flag, not part of the binding. An id missing
+    // from the map was explicitly unbound, so it matches nothing (fresh
+    // installs carry the defaults, so [ / ] work out of the box).
+    const QString smallerSeq =
+        keymapCache_.value(QStringLiteral("brush-smaller"));
+    const QString largerSeq =
+        keymapCache_.value(QStringLiteral("brush-larger"));
+    const bool smaller =
+        !smallerSeq.isEmpty() && keyEventMatchesShortcut(key, smallerSeq);
+    const bool larger =
+        !largerSeq.isEmpty() && keyEventMatchesShortcut(key, largerSeq);
+    if (!smaller && !larger) return false;
+    const ToolId t = state_->activeTool();
+    const bool hardness = (key->modifiers() & Qt::ShiftModifier) != 0;
+    if (hardness) {
+        // Shift+key: brush hardness 0..100% in fine steps.
+        const double cur =
+            state_->option(t, QStringLiteral("brush_hardness")).toDouble();
+        const double base =
+            state_->option(t, QStringLiteral("brush_hardness")).isValid()
+                ? cur
+                : 50.0;
+        const double next = smaller ? qMax(0.0, base - 5.0)
+                                    : qMin(100.0, base + 5.0);
+        state_->setOption(t, QStringLiteral("brush_hardness"), next);
+    } else {
+        // Fine-grain size steps (~4%) so tapping lands exactly.
+        const double cur =
+            state_->option(t, QStringLiteral("brush_size")).toDouble();
+        const double base = cur > 0.0 ? cur : 64.0;
+        const double next = smaller ? qMax(1.0, base * 0.96)
+                                    : qMin(5000.0, base / 0.96);
+        state_->setOption(t, QStringLiteral("brush_size"), next);
+    }
+    return true;
+}
+
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     // Text entry always wins: tool letters must not fire while a field has focus.
     if (QWidget* focus = qApp->focusWidget()) {
@@ -188,7 +227,13 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
     if (event->type() == QEvent::KeyPress) {
         auto* key = static_cast<QKeyEvent*>(event);
-        if (key->isAutoRepeat()) return QMainWindow::eventFilter(watched, event);
+        // Held brush-size keys repeat for every brush tool (issue #8);
+        // every other key ignores repeats (no Space/Ctrl re-push, no
+        // repeated layer delete, no tool-letter retrigger).
+        if (key->isAutoRepeat()) {
+            if (handleBrushSizeKey(key)) return true;
+            return QMainWindow::eventFilter(watched, event);
+        }
 
         // Escape cancels an in-progress Liquify warp back to the snapshot.
         if (key->key() == Qt::Key_Escape && canvas_ && canvas_->liquifyStrokeActive()) {
@@ -220,37 +265,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             return true;
         }
         // Brush size keys follow Settings > Shortcuts (brush-smaller/larger);
-        // Shift is the hardness flag, not part of the binding. An id missing
-        // from the map was explicitly unbound, so it matches nothing (fresh
-        // installs carry the defaults, so [ / ] work out of the box).
-        const QString smallerSeq = keymapCache_.value(QStringLiteral("brush-smaller"));
-        const QString largerSeq = keymapCache_.value(QStringLiteral("brush-larger"));
-        const bool smaller =
-            !smallerSeq.isEmpty() && keyEventMatchesShortcut(key, smallerSeq);
-        const bool larger =
-            !largerSeq.isEmpty() && keyEventMatchesShortcut(key, largerSeq);
-        if (smaller || larger) {
-            const ToolId t = state_->activeTool();
-            const bool hardness = (key->modifiers() & Qt::ShiftModifier) != 0;
-            if (hardness) {
-                // Shift+key: brush hardness 0..100% in fine steps.
-                const double cur = state_->option(t, QStringLiteral("brush_hardness")).toDouble();
-                const double base = state_->option(t, QStringLiteral("brush_hardness")).isValid()
-                                        ? cur
-                                        : 50.0;
-                const double next = smaller
-                                        ? qMax(0.0, base - 5.0)
-                                        : qMin(100.0, base + 5.0);
-                state_->setOption(t, QStringLiteral("brush_hardness"), next);
-            } else {
-                // Fine-grain size steps (~4%) so tapping lands exactly.
-                const double cur = state_->option(t, QStringLiteral("brush_size")).toDouble();
-                const double base = cur > 0.0 ? cur : 64.0;
-                const double next = smaller ? qMax(1.0, base * 0.96) : qMin(5000.0, base / 0.96);
-                state_->setOption(t, QStringLiteral("brush_size"), next);
-            }
-            return true;
-        }
+        // first press and auto-repeat share one handler (issue #8).
+        if (handleBrushSizeKey(key)) return true;
         if (key->key() >= Qt::Key_0 && key->key() <= Qt::Key_9 &&
             !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier | Qt::ShiftModifier))) {
             const int d = key->key() - Qt::Key_0;

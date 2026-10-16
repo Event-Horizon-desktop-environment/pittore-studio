@@ -419,6 +419,14 @@ int main(int argc, char** argv) {
             sendMouse(vp, QEvent::MouseButtonRelease, src, Qt::LeftButton,
                       Qt::NoButton, Qt::AltModifier);
             app.processEvents();
+            // Issue #8: the Alt-pinned source shows a tracking cross: it
+            // is visible, sits on the anchor before the first stroke, and
+            // the cursor dirty rect covers it (paint ⊆ invalidated area).
+            CHECK(canvas->cloneSourceVisible());
+            const QPointF srcDoc = canvas->cloneSourceDoc();
+            CHECK((srcDoc - QPointF(11, 11)).manhattanLength() < 0.05);
+            CHECK(canvas->brushCursorViewRect().contains(
+                canvas->documentToView(QPointF(11, 11))));
             const int depth = state.undoDepth();
             const QPointF vv = canvas->documentToView(QPointF(40, 40));
             sendMouse(vp, QEvent::MouseButtonPress, vv, Qt::LeftButton, Qt::LeftButton);

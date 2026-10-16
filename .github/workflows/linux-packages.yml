@@ -408,9 +408,13 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage -O linuxdeploy-plugin-qt
           chmod +x linuxdeploy linuxdeploy-plugin-qt
+          # The HIP plugin's libamdhip64 lives in /opt/rocm (no ld path):
+          # excluding it keeps the ROCm runtime a user install (the plugin
+          # dlopens gracefully without it) instead of failing deployment.
           ./linuxdeploy --appimage-extract-and-run --appdir AppDir \
             --desktop-file AppDir/studio.pittore.painter.desktop \
             --icon-file AppDir/painter.svg \
+            --exclude-library 'libamdhip64.so*' \
             --plugin qt \
             --output appimage
           mkdir -p dist

@@ -19,6 +19,7 @@ class QDockWidget;
 class QDragEnterEvent;
 class QDropEvent;
 class QMenu;
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QTabBar;
@@ -160,6 +161,10 @@ class MainWindow final : public QMainWindow {
     // installShortcuts (spotlight, zoom, ...). Called at startup and whenever
     // Settings > Shortcuts is applied.
     void refreshCarrierShortcuts();
+    // Brush size/hardness keys (keymap ids brush-smaller/larger). Shared by
+    // the first press and key auto-repeat, so holding [ / ] walks the size
+    // for every brush tool (issue #8). Returns true when it handled the key.
+    bool handleBrushSizeKey(QKeyEvent* key);
     // Points the import profile-mismatch resolver at the modal dialog
     // (embedded-profile mismatch workflow). Re-armed after any
     // stretch that must stay silent (session restore).

@@ -1447,6 +1447,7 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
         state_->setStatusHint(tool == ToolId::CloneStamp
                                   ? tr("Clone Stamp: source set — paint to copy.")
                                   : tr("Healing Brush: source set — paint to heal."));
+        viewport()->update();  // the source cross is overlay-only paint
         event->accept();
         return;
     }

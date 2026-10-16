@@ -440,7 +440,19 @@ void CanvasView::cursorRingGeometry(double& rDoc, double& ratio,
 
 
 QRectF CanvasView::brushCursorViewRect() const {
-    if (!brushCursorVisible()) return QRectF();
+    const QTransform t = documentTransform();
+    // Clone-source cross (issue #8): view-sized arms, unioned with the ring
+    // rect so the cross can never paint outside its invalidated area. The
+    // cross is tool-gated, not outline-gated: it reads even when the ring
+    // is hidden mid-stroke by preference.
+    QRectF cross;
+    if (cloneSourceVisible()) {
+        const QPointF sView = t.map(cloneSourceDoc());
+        static constexpr double kHalf = 10.0;
+        cross = QRectF(sView.x() - kHalf, sView.y() - kHalf, 2.0 * kHalf,
+                       2.0 * kHalf);
+    }
+    if (!brushCursorVisible()) return cross;
     double r, ratio, angleDeg;
     bool square;
     cursorRingGeometry(r, ratio, angleDeg, square);
@@ -449,18 +461,41 @@ QRectF CanvasView::brushCursorViewRect() const {
         ratio = 1.0;
         square = false;
     }
-    const QTransform t = documentTransform();
     const QPointF cView = t.map(cursorDoc_);
     const QPointF eView = t.map(cursorDoc_ + QPointF(r, 0.0));
     const double rv = std::hypot(eView.x() - cView.x(), eView.y() - cView.y());
     const double rvMinor = rv * ratio;
-    if (rv <= 0.5 && rvMinor <= 0.5) return QRectF();   // hairline brush: no ring to draw
+    if (rv <= 0.5 && rvMinor <= 0.5) return cross;   // hairline brush: no ring to draw
     // Rotated-ellipse bbox in view space (+3px slack for the pen width).
     const double rad = angleDeg * 3.14159265358979323846 / 180.0;
     const double hx = std::hypot(rv * std::cos(rad), rvMinor * std::sin(rad));
     const double hy = std::hypot(rv * std::sin(rad), rvMinor * std::cos(rad));
-    return QRectF(cView.x() - hx - 3.0, cView.y() - hy - 3.0,
-                  2.0 * hx + 6.0, 2.0 * hy + 6.0);
+    const QRectF ring(cView.x() - hx - 3.0, cView.y() - hy - 3.0,
+                      2.0 * hx + 6.0, 2.0 * hy + 6.0);
+    return cross.isEmpty() ? ring : (ring | cross);
+}
+
+
+bool CanvasView::cloneSourceVisible() const {
+    const ToolId tool = state_->activeTool();
+    if (tool != ToolId::CloneStamp && tool != ToolId::HealingBrush)
+        return false;
+    return cloneHasAlt_;
+}
+
+
+QPointF CanvasView::cloneSourceDoc() const {
+    // The engine samples each dab at dab + offset, so mid-stroke the live
+    // source tracks the cursor. Between strokes an aligned tool keeps its
+    // offset (the hover preview is where the next dab samples); a
+    // non-aligned one re-anchors to the Alt point every press, so the
+    // honest hover preview is the anchor itself.
+    const ToolId tool = state_->activeTool();
+    const bool aligned =
+        state_->option(tool, QStringLiteral("aligned")).toBool();
+    if (cloneHasOffset_ && (aligned || strokeActive_))
+        return cursorDoc_ + cloneOffset_;
+    return cloneAltPoint_;
 }
 
 

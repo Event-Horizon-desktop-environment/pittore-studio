@@ -135,6 +135,15 @@ class CanvasView final : public QAbstractScrollArea {
     void cursorRingGeometry(double& rDoc, double& ratio, double& angleDeg,
                             bool& square) const;
     QRectF brushCursorViewRect() const;
+    // Clone/Healing source cross (issue #8): the Alt-pinned point the next
+    // dab samples from. Before the first stroke of the anchor it is the
+    // anchor itself; once a stroke derives the dab→source offset it tracks
+    // the cursor (aligned strokes keep it across presses, non-aligned ones
+    // re-anchor every press, so the hover preview falls back to the
+    // anchor between strokes). Same paint ⊆ dirty-rect contract as the
+    // ring: brushCursorViewRect covers both.
+    bool cloneSourceVisible() const;
+    QPointF cloneSourceDoc() const;
     QCursor canvasCursor() const;
     // Move-drag smart guides. While a move drag is live a faint document-centre
     // crosshair is shown (green vertical, red horizontal) so the centre is a

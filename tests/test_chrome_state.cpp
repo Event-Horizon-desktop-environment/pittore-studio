@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QListView>
@@ -273,6 +274,35 @@ int main(int argc, char** argv) {
         app.processEvents();
         CHECK(state.activeDocument()->selectionIsMask);
         CHECK(!selectionMaskBbox(state.activeDocument()->selectionMask).isEmpty());
+    }
+
+    // Brush-size keys repeat while held (issue #8): a first [ press and
+    // a held (auto-repeat) [ press both shrink every brush tool, ] grows.
+    state.setActiveTool(ToolId::Brush);
+    state.setOption(ToolId::Brush, QStringLiteral("brush_size"), 100.0);
+    app.processEvents();
+    {
+        QKeyEvent press(QEvent::KeyPress, Qt::Key_BracketLeft,
+                        Qt::NoModifier, QStringLiteral("["));
+        QApplication::sendEvent(&mainWin, &press);
+        app.processEvents();
+        const double s1 = state.option(ToolId::Brush, QStringLiteral("brush_size")).toDouble();
+        CHECK(qAbs(s1 - 96.0) < 1e-9);
+        // Held key: Qt delivers KeyPress with isAutoRepeat() set; the old
+        // filter dropped those before the brush handler ever saw them.
+        QKeyEvent repeat(QEvent::KeyPress, Qt::Key_BracketLeft,
+                         Qt::NoModifier, QStringLiteral("["), true);
+        CHECK(repeat.isAutoRepeat());
+        QApplication::sendEvent(&mainWin, &repeat);
+        app.processEvents();
+        const double s2 = state.option(ToolId::Brush, QStringLiteral("brush_size")).toDouble();
+        CHECK(qAbs(s2 - 96.0 * 0.96) < 1e-9);
+        QKeyEvent bigger(QEvent::KeyPress, Qt::Key_BracketRight,
+                         Qt::NoModifier, QStringLiteral("]"), true);
+        QApplication::sendEvent(&mainWin, &bigger);
+        app.processEvents();
+        const double s3 = state.option(ToolId::Brush, QStringLiteral("brush_size")).toDouble();
+        CHECK(s3 > s2);
     }
 
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),

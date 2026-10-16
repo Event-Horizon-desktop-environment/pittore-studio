@@ -127,6 +127,26 @@ void CanvasView::paintBrushCursor(QPainter& p) {
         }
     }
 
+    // Clone-source cross (issue #8): a tiny view-sized cross at the point
+    // the next dab samples from — the Alt-pinned anchor before the first
+    // stroke, then tracking the cursor by the stroke offset. Same dark-base
+    // + white-core ribbon as the ring, so it reads on any background.
+    // Overlay only, never document pixels.
+    if (cloneSourceVisible()) {
+        const QPointF sView = t.map(cloneSourceDoc());
+        static constexpr double kArm = 7.0;
+        p.save();
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(0, 0, 0, 230), 4));
+        p.drawLine(sView + QPointF(-kArm, 0), sView + QPointF(kArm, 0));
+        p.drawLine(sView + QPointF(0, -kArm), sView + QPointF(0, kArm));
+        p.setPen(QPen(Qt::white, 1.5));
+        p.drawLine(sView + QPointF(-kArm, 0), sView + QPointF(kArm, 0));
+        p.drawLine(sView + QPointF(0, -kArm), sView + QPointF(0, kArm));
+        p.restore();
+    }
+
     // Alt+Right resize HUD (conventional behaviour): accent size + hardness rings
     // around the pointer plus a px/% chip, all reading the same live options
     // the drag writes — no need to glance at the status bar.
