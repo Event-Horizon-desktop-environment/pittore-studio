@@ -24,16 +24,10 @@ QLayoutItem* FlowLayout::itemAt(int index) const {
     return items_.value(index);
 }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
 QLayoutItem* FlowLayout::takeAt(int index) {
     if (index < 0 || index >= items_.size()) return nullptr;
     return items_.takeAt(index);
 }
-#else
-QLayoutItem* FlowLayout::takeAt() {
-    return items_.isEmpty() ? nullptr : items_.takeFirst();
-}
-#endif
 
 void FlowLayout::setGeometry(const QRect& rect) {
     QLayout::setGeometry(rect);

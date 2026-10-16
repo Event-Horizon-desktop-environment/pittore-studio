@@ -22,12 +22,7 @@ class FlowLayout final : public QLayout {
     void addItem(QLayoutItem* item) override;
     int count() const override;
     QLayoutItem* itemAt(int index) const override;
-    // Qt 6.10 replaced the no-argument takeAt() with takeAt(index).
-#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
     QLayoutItem* takeAt(int index) override;
-#else
-    QLayoutItem* takeAt() override;
-#endif
     void setGeometry(const QRect& rect) override;
     QSize sizeHint() const override;
     QSize minimumSize() const override;
