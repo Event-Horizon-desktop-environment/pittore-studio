@@ -7,6 +7,7 @@
 #include <QFormLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QVBoxLayout>
@@ -39,17 +40,30 @@ void styleColorButton(QPushButton* button, const QColor& c) {
 
 StrokePanel::StrokePanel(AppState* state, QWidget* parent)
     : QWidget(parent), state_(state) {
+    // Scrollable body: the form is taller than most docks, and a plain
+    // layout would lift the window's minimum height when the Vector persona
+    // shows this panel. The scroll area keeps the dock floor small, so the
+    // window stays resizable on small logical screens.
     auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(12, 10, 12, 10);
-    outer->setSpacing(8);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* body = new QWidget;
+    auto* column = new QVBoxLayout(body);
+    column->setContentsMargins(12, 10, 12, 10);
+    column->setSpacing(8);
+    scroll->setWidget(body);
+    outer->addWidget(scroll);
 
-    title_ = new QLabel(tr("No vector layer selected"), this);
+    title_ = new QLabel(tr("No vector layer selected"), body);
     title_->setWordWrap(true);
-    outer->addWidget(title_);
+    column->addWidget(title_);
 
     auto* form = new QFormLayout();
     form->setSpacing(6);
-    outer->addLayout(form);
+    column->addLayout(form);
 
     fillCheck_ = new QCheckBox(tr("Fill"), this);
     fillButton_ = new QPushButton(this);
@@ -143,8 +157,8 @@ StrokePanel::StrokePanel(AppState* state, QWidget* parent)
     auto* note = new QLabel(tr("Align — planned."), this);
     note->setWordWrap(true);
     note->setEnabled(false);
-    outer->addWidget(note);
-    outer->addStretch(1);
+    column->addWidget(note);
+    column->addStretch(1);
 
     // One undo step per discrete gesture (never per slider tick).
     connect(fillButton_, &QPushButton::clicked, this, [this] { pickColor(true); });

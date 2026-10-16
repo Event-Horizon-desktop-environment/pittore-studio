@@ -413,9 +413,19 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage -O linuxdeploy-plugin-qt
           chmod +x linuxdeploy linuxdeploy-plugin-qt
-          # The HIP plugin's libamdhip64 lives in /opt/rocm (no ld path):
-          # excluding it keeps the ROCm runtime a user install (the plugin
-          # dlopens gracefully without it) instead of failing deployment.
+          # The HIP plugin needs libamdhip64 at runtime only; it is dlopened
+          # from the ROCm install and must stay OUT of the AppDir. Two
+          # linuxdeploy quirks to satisfy, both runner-scoped and build-only:
+          #  1. linuxdeploy-plugin-qt re-scans every AppDir library with ldd
+          #     in a subprocess that cannot receive --exclude-library, so the
+          #     lib must at least RESOLVE: point LD_LIBRARY_PATH at the ROCm
+          #     runtime lib dir for the scan.
+          #  2. the CLI --exclude-library only reaches the linuxdeploy core;
+          #     the plugin process is spawned with just --appdir and picks up
+          #     its exclude list from LINUXDEPLOY_EXCLUDED_LIBRARIES instead.
+          export ROCM_LIB_DIR="$(dirname "$(dpkg -L hip-runtime-amd | grep -m1 '/lib/libamdhip64\.so')")"
+          export LINUXDEPLOY_EXCLUDED_LIBRARIES='libamdhip64.so*'
+          LD_LIBRARY_PATH="$ROCM_LIB_DIR" \
           ./linuxdeploy --appimage-extract-and-run --appdir AppDir \
             --desktop-file AppDir/studio.pittore.painter.desktop \
             --icon-file AppDir/painter.svg \

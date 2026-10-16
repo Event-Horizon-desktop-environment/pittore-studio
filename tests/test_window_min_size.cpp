@@ -14,6 +14,7 @@
 #include "ui/app_state.h"
 #include "ui/main_window.h"
 #include "ui/options_bar.h"
+#include "ui/persona/persona_manager.h"
 #include "ui/tools_panel.h"
 
 using namespace pittore::ui;
@@ -45,6 +46,21 @@ int main(int argc, char** argv) {
     // arrangement of the same chrome still fits a 720p screen.
     CHECK(win.minimumSize().width() <= 1280);
     CHECK(win.minimumSize().height() <= 720);
+
+    // The Vector persona adds its own panels; none may floor the window
+    // above the Pixel arrangement. Docks show synchronously, so the floor
+    // and the resize land without pumping events.
+    if (PersonaManager* personas = win.findChild<PersonaManager*>()) {
+        const QSize pixelFloor = win.minimumSize();
+        personas->setPersona(Persona::Vector);
+        CHECK(win.minimumSize().width() <= 1280);
+        CHECK(win.minimumSize().height() <= pixelFloor.height());
+        win.resize(1280, 720);
+        CHECK(win.width() == 1280);
+        CHECK(win.height() == 720);
+    } else {
+        CHECK(false);
+    }
 
     // The two fixes the floor is made of: the tool strip stacked columns
     // instead of growing past the window, and the options bar wrapped
