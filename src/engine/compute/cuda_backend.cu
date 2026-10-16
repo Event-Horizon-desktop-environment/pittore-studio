@@ -1248,13 +1248,13 @@ class CudaBuffer final : public Buffer {
     void upload() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(cudaMemcpy(dev_, host_, size_, cudaMemcpyHostToDevice), "cudaMemcpy H2D");
-        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::bulkTrace()) PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     void download() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(cudaMemcpy(host_, dev_, size_, cudaMemcpyDeviceToHost), "cudaMemcpy D2H");
-        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::bulkTrace()) PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 

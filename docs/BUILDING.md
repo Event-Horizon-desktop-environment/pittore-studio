@@ -126,9 +126,10 @@ automatically; `PITTORE_JOBS` overrides.)
 
 | Option | Default | What it does |
 |---|---|---|
-| `backend-cuda` | `auto` | CUDA (NVIDIA) backend; on when `nvcc` is found |
+| `backend-cuda` | `auto` | CUDA (NVIDIA) backend; on when `nvcc` is found (PATH or a standard install root) |
 | `backend-hip` | `auto` | HIP (AMD) backend; on when `hipcc` is found |
-| `cuda-root` | auto | CUDA toolkit root when it is not on `PATH` |
+| `cuda-root` | auto | CUDA toolkit root, overriding PATH and the standard roots |
+| `cuda-archs` | `native` | GPU targets nvcc compiles for; `native` probes the build GPU, a GPU-less builder (CI) passes a comma list such as `sm_75,sm_86,sm_120,+ptx` |
 | `hip-root` | auto | ROCm root when it is not on `PATH` |
 | `app` | `auto` | Build the Qt application; off when Qt6 or `lcms2` is missing |
 | `onnxruntime` | `auto` | ONNX Runtime for GPU inference |
@@ -226,8 +227,8 @@ just uninstall
 ```
 
 The install step is deliberately separated from the build: running ninja
-under `sudo` scrubs `PATH`, so `nvcc` and `hipcc` disappear and a GPU build
-that worked a second ago fails.
+under `sudo` scrubs `PATH`, so `hipcc` disappears and a GPU build that
+worked a second ago fails.
 
 ## Troubleshooting
 
@@ -241,8 +242,10 @@ again.
 **The application target is missing** — Qt6 or `lcms2` was not found. Install
 them and reconfigure: `just reconf`.
 
-**CUDA not picked up** — `nvcc` is not on `PATH`. Pass the root explicitly:
-`meson setup build -Dcuda-root=/opt/cuda`.
+**CUDA not picked up** — `nvcc` was searched on `PATH` plus the standard
+install roots (`/usr/local/cuda/bin`, `/opt/cuda/bin`, `/usr/lib/cuda/bin`).
+For any other layout, pass the root explicitly:
+`meson setup build -Dcuda-root=/path/to/cuda`.
 
 **HIP not picked up** — `hipcc` is not on `PATH`; build.sh never installs
 ROCm. Install it yourself, then `just reconf`.

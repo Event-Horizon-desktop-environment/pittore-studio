@@ -23,7 +23,8 @@ layers, filters, and an ICC-aware colour pipeline.
 
 %build
 meson setup build --prefix=/usr -Dbuildtype=release \
-  -Dbackend-cuda=disabled -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
+  -Dbackend-cuda=enabled -Dcuda-archs=sm_75,sm_80,sm_86,sm_89,sm_90,sm_100,sm_120,+ptx \
+  -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
 ninja -C build src/app/painter src/app/pittore-mcp
 
 %install

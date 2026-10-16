@@ -479,6 +479,9 @@ inline QString describeStack(const std::vector<CompositedLayer>& gathered) {
 class DocumentItem {
   public:
     DocumentItem(QString title, QSize size, int dpi);
+    // Defined in app_state_composite.cpp (needs the PaintStage definition
+    // there): the staging buffers die with the document.
+    ~DocumentItem();
 
     QString title;
     QString filePath;

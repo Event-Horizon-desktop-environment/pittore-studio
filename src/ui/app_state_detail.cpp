@@ -1008,4 +1008,40 @@ void normalizeLayerIndents(QVector<LayerItem>& layers) {
     }
 }
 
+
+// Decode an imported QImage (premultiplied ARGB32) into a straight-alpha
+// engine Image at native resolution. The result is the lossless source a
+// placed layer keeps; the compositor resamples from it on the fly. Images
+// over 100 MP are refused (a 100 MP RGBAf layer alone is 1.6 GB).
+std::shared_ptr<pittore::Image> imageFromQImage(const QImage& in) {
+    if (in.isNull()) return nullptr;
+    const QImage img = in.format() == QImage::Format_ARGB32_Premultiplied
+                           ? in
+                           : in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    if (img.isNull()) return nullptr;
+    const int w = img.width(), h = img.height();
+    if (w <= 0 || h <= 0 ||
+        static_cast<qint64>(w) * h > 100'000'000)
+        return nullptr;
+    auto out = std::make_shared<pittore::Image>(static_cast<std::uint32_t>(w),
+                                                 static_cast<std::uint32_t>(h));
+    for (int y = 0; y < h; ++y) {
+        const QRgb* row = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        pittore::RGBAf* dst =
+            out->data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+        for (int x = 0; x < w; ++x) {
+            const int a = qAlpha(row[x]);
+            if (a <= 0) {
+                dst[x] = pittore::RGBAf{0, 0, 0, 0};
+                continue;
+            }
+            const float inv = 1.0f / static_cast<float>(a);
+            dst[x] = pittore::RGBAf{qRed(row[x]) * inv, qGreen(row[x]) * inv,
+                                     qBlue(row[x]) * inv,
+                                     static_cast<float>(a) / 255.0f};
+        }
+    }
+    return out;
+}
+
 }  // namespace pittore::ui

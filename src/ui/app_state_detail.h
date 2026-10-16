@@ -98,4 +98,17 @@ QVector<int> layerMoveUnit(const DocumentItem* d, int* base = nullptr);
 // composite) treats it as outside — the group eye then misses it.
 void normalizeLayerIndents(QVector<LayerItem>& layers);
 
+// Shared file-local helpers from the app_state.cpp split, one definition
+// each for the whole UI lib:
+// - cpuBackend: the fallback CPU backend (defined in app_state_composite.cpp)
+// - imageFromQImage: premultiplied QImage to straight-alpha engine Image
+//   (defined in app_state_detail.cpp)
+// - adjustmentAuxSize: Curves/Levels aux-table footprint (defined in
+//   app_state_adjust.cpp)
+pittore::compute::ComputeBackend& cpuBackend();
+std::shared_ptr<pittore::Image> imageFromQImage(const QImage& in);
+std::size_t adjustmentAuxSize(const LayerItem& l);
+// Working-set bytes of a WxH RGBAf plane (defined in app_state_composite.cpp).
+std::size_t layerBytes(const QSize& size);
+
 }  // namespace pittore::ui

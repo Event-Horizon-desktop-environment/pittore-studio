@@ -2,7 +2,7 @@
 # a 115-layer project where -O2 takes 4.5s. -g stays on, so nothing is lost
 # for debugging, and nothing in src/ relies on assert().
 project('pittore-studio', 'cpp',
-  version : '0.1.4',
+  version : '0.1.5',
   license : 'MIT',
   meson_version : '>=1.1.0',
   default_options : [

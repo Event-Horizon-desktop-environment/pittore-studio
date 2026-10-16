@@ -253,10 +253,24 @@ inline bool strokeTrace() {
     return true;
 }
 
-// Transfer-trace gate: REMOVED — all GPU upload/download logs write
-// unconditionally (same cost caveat as strokeTrace above).
+// Transfer-trace gate: REMOVED — per-event GPU region upload/download
+// logs write unconditionally (same cost caveat as strokeTrace above).
+// Whole-buffer transfers are bulk traffic: one per layer per cold
+// composite on the thousand-layer documents, so they use bulkTrace().
 inline bool transferTrace() {
     return true;
+}
+
+// Bulk-traffic gate: whole-layer cache fills and their whole-buffer
+// uploads fire once per layer per cold composite — the hundreds of
+// thousands of lines the svg-scale regression pins to zero. Off unless
+// PITTORE_BULK_TRACE=1; per-event stroke/region logs stay always-on.
+inline bool bulkTrace() {
+    static const bool on = [] {
+        const char* e = pittoreEnv("PITTORE_BULK_TRACE", "INFINITY_BULK_TRACE");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    return on;
 }
 
 // Slow-event threshold (ms): region/rebuild logs are trace-gated above, but

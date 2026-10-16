@@ -5,6 +5,7 @@
 #include "ui/app_state_detail.h"
 
 #include "engine/text/text_engine.h"
+#include "ui/tools/options/tool_options.h"
 
 #include <QFont>
 #include <QFontMetricsF>
@@ -318,6 +319,59 @@ TextItem AppState::activeTextSpec() const {
     const QColor c = option(tool, QStringLiteral("color")).value<QColor>();
     if (c.isValid()) t.color = c;
     return t;
+}
+
+
+pittore::text::TextSpec textSpecFor(const TextItem& t) {
+    pittore::text::TextSpec spec;
+    spec.text = t.text.toStdString();
+    spec.family = t.family.toStdString();
+    spec.bold = t.bold;
+    spec.italic = t.italic;
+    spec.size = static_cast<float>(std::max(1.0, t.size));
+    spec.align = t.align == 1   ? pittore::text::Align::Center
+                 : t.align == 2 ? pittore::text::Align::Right
+                                : pittore::text::Align::Left;
+    spec.lineHeight = static_cast<float>(std::max(0.1, t.lineHeight));
+    spec.tracking = static_cast<float>(t.tracking);
+    if (t.wrapWidth > 0.5) spec.wrapWidth = static_cast<float>(t.wrapWidth);
+    spec.underline = qBound(0, t.underline, 2);
+    spec.strike = qBound(0, t.strike, 2);
+    auto rgba = [](const QColor& c) {
+        return std::array<float, 4>{c.redF(), c.greenF(), c.blueF(), c.alphaF()};
+    };
+    spec.inkColor = rgba(t.color);
+    if (t.underlineColor.isValid()) spec.underlineColor = rgba(t.underlineColor);
+    if (t.strikeColor.isValid()) spec.strikeColor = rgba(t.strikeColor);
+    if (t.backgroundColor.isValid()) spec.backgroundColor = rgba(t.backgroundColor);
+    spec.baselineShift = static_cast<float>(t.baselineShift);
+    spec.hScale = static_cast<float>(t.hScale > 0.0 ? t.hScale / 100.0 : 1.0);
+    spec.vScale = static_cast<float>(t.vScale > 0.0 ? t.vScale / 100.0 : 1.0);
+    spec.superSub = qBound(-1, t.superSub, 1);
+    spec.allCaps = t.allCaps;
+    spec.kerning = t.kerning;
+    spec.otFeatures = t.otFeatures;
+    return spec;
+}
+
+pittore::text::TextLayout textLayoutFor(const TextItem& t) {
+    std::optional<pittore::text::TextLayout> laid =
+        pittore::text::layoutText(textSpecFor(t));
+    return laid ? *laid : pittore::text::TextLayout{};
+}
+
+QString typeFamilyForIndex(int index) {
+    const std::vector<std::string>& families = typeFontFamilies();
+    if (index < 0 || index >= static_cast<int>(families.size())) return QString();
+    return QString::fromStdString(families[static_cast<std::size_t>(index)]);
+}
+
+int typeIndexForFamily(const QString& family) {
+    const std::vector<std::string>& families = typeFontFamilies();
+    const std::string want = family.toStdString();
+    for (std::size_t i = 0; i < families.size(); ++i)
+        if (families[i] == want) return static_cast<int>(i);
+    return -1;
 }
 
 }  // namespace pittore::ui

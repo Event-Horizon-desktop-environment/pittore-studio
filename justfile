@@ -55,7 +55,7 @@ test: build
 # with:  meson configure build -Dbuildtype=debugoptimized
 app:
 	test -f build/build.ninja && meson configure build -Dbuildtype=release || meson setup build --prefix=/usr -Dbuildtype=release
-	ninja -C build -j{{JOBS}} src/app/painter
+	ninja -C build -j{{JOBS}} src/app/painter src/app/pittore-mcp
 
 # Single-binary test runner — send this to a friend.
 test-all: build

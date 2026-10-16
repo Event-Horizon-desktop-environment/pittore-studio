@@ -7,6 +7,9 @@ option('backend-hip', type : 'feature', value : 'auto',
 option('cuda-root', type : 'string', value : '',
   description : 'Path to the CUDA toolkit root (empty = derived from nvcc location)')
 
+option('cuda-archs', type : 'string', value : 'native',
+  description : 'CUDA GPU targets: "native" probes the build machine GPU (needs a driver), or a comma list like "sm_75,sm_86,sm_120,+ptx" for GPU-less builders such as CI')
+
 option('hip-root', type : 'string', value : '',
   description : 'Path to the ROCm root (empty = derived from hipcc location)')
 

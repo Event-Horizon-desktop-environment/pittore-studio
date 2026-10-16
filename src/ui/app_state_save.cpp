@@ -254,4 +254,22 @@ bool AppState::applyImportedProfile(DocumentItem& doc, const QString& embedded,
     return true;
 }
 
+
+// Serialize a live document into the on-disk project description (no file IO).
+// The single source for createNewProject and saveProject; round-trips exactly
+// through loadProjectFile + openProject.
+bool psdRawBlocksFresh(const LayerItem& l) {
+    if (l.psdRawBlocks.empty()) return false;
+    if (l.kind != l.psdRawKind) return false;
+    if (l.sourceStamp != l.psdRawSrc) return false;
+    if (l.kind == LayerItem::Kind::Adjustment && l.adjustStamp != l.psdRawAdj)
+        return false;
+    if (l.hasMask != l.psdRawHadMask) return false;
+    if (l.hasMask && l.mask && l.maskStamp != l.psdRawMask) return false;
+    if (l.offset != l.psdRawOffset || l.scaleX != l.psdRawScaleX ||
+        l.scaleY != l.psdRawScaleY)
+        return false;
+    return true;
+}
+
 }  // namespace pittore::ui
