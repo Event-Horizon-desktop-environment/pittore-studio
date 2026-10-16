@@ -7,6 +7,7 @@
 #include <QFont>
 #include <QFile>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QElapsedTimer>
 #include <QPainter>
 #include <QStringList>
@@ -24,6 +25,7 @@
 
 #include "engine/core/log.h"
 #include "engine/vector/marker.h"
+#include "engine/vector/svg/switch_cond.h"
 
 namespace pittore::ui {
 
@@ -102,6 +104,24 @@ void noteCapped(QHash<QString, int>& map, const QString& key) {
     }
     if (map.size() >= 16) return;
     map.insert(key, 1);
+}
+
+// Non-rendered elements: descriptive metadata, font/color definitions, and
+// timed animation (the static raster shows the base frame, so animation
+// elements change nothing). Skipped without a diagnostic. <script>,
+// <foreignObject> and media elements stay counted: dropping them loses
+// real content and must keep the degraded verdict.
+bool silentNonRendered(const QString& tag) {
+    static const char* kSilent[] = {
+        "desc",           "title",          "metadata",       "font",
+        "font-face",      "font-face-src",  "font-face-uri",  "font-face-format",
+        "font-face-name", "missing-glyph",  "hkern",          "vkern",
+        "color-profile",  "cursor",         "view",           "animate",
+        "animateTransform", "animateMotion", "set",           "mpath",
+        "discard",        nullptr};
+    for (int i = 0; kSilent[i]; ++i)
+        if (tag == QLatin1String(kSilent[i])) return true;
+    return false;
 }
 
 // Byte-level run collapse for huge flat SVGs: consecutive identical
@@ -1298,6 +1318,11 @@ struct PaintState {
     // clip-path on a <g> applies to the whole subtree, so it joins this
     // stack before the children walk.
     QVector<QPair<QString, QTransform>> clipAncestors;
+    // visibility:hidden (and collapse, same thing without reflow) inherits:
+    // hidden subtrees paint nothing.
+    bool hidden = false;
+    // Inside <clipPath>: clip-rule (not fill-rule) selects the winding rule.
+    bool inClip = false;
 };
 
 // The stroke paint server for one node: the shared def as-is, or a private
@@ -1333,10 +1358,11 @@ void finishClipStack(SvgNode& n, const PaintState& ps) {
 }
 
 void scanResources(QXmlStreamReader& xml, SvgResources& res) {
-    auto cellShapes = [&](SvgResources& r, QVector<SvgNode>& shapes) {
+    auto cellShapes = [&](SvgResources& r, QVector<SvgNode>& shapes,
+                          const PaintState& ps = PaintState()) {
         // Walk def-children with identity placement; PaintState defaults to
         // opaque black fill (SVG initial values). Defs are tiny: no budget.
-        walkChildren(xml, QTransform(), PaintState(), r, shapes, nullptr);
+        walkChildren(xml, QTransform(), ps, r, shapes, nullptr);
     };
     while (!xml.atEnd()) {
         if (xml.readNext() != QXmlStreamReader::StartElement) continue;
@@ -1374,7 +1400,9 @@ void scanResources(QXmlStreamReader& xml, SvgResources& res) {
         } else if (tag == QLatin1String("clipPath") && !id.isEmpty() &&
                    !res.clips.contains(id)) {
             SvgClipCell cell;
-            cellShapes(res, cell.shapes);
+            PaintState clipPs;
+            clipPs.inClip = true;
+            cellShapes(res, cell.shapes, clipPs);
             res.clips.insert(id, std::move(cell));
         } else if (tag == QLatin1String("mask") && !id.isEmpty() &&
                    !res.masks.contains(id)) {
@@ -1480,6 +1508,21 @@ void scanResources(QXmlStreamReader& xml, SvgResources& res) {
                 xml.skipCurrentElement();
             }
             res.meshes.insert(id, std::move(m));
+        } else if ((tag == QLatin1String("solidcolor") ||
+                    tag == QLatin1String("solidColor")) &&
+                   !id.isEmpty() && !res.solids.contains(id)) {
+            // Single-color paint server: `solid-color` plus `solid-opacity`
+            // flatten to one colour (both spellings accepted: lowercase is
+            // the SVG 2 draft form, camelCase the Tiny 1.2 form).
+            QColor c;
+            if (parseColor(readAttr(a, QLatin1String("solid-color")), &c)) {
+                const double so =
+                    parseLength(readAttr(a, QLatin1String("solid-opacity")), 1.0);
+                c.setAlphaF(qBound(0.0, so * c.alphaF(), 1.0));
+                res.solids.insert(id, c);
+            }
+            // Unparseable servers stay absent: referencing shapes fall into
+            // the dangling-ref note below, like gradients and patterns.
         } else if ((tag == QLatin1String("rect") || tag == QLatin1String("circle") ||
                     tag == QLatin1String("ellipse") || tag == QLatin1String("line") ||
                     tag == QLatin1String("polyline") || tag == QLatin1String("polygon") ||
@@ -1715,6 +1758,25 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
     const QString strokeOp = readAttr(a, QLatin1String("stroke-opacity"));
     const QString opStr = readAttr(a, QLatin1String("opacity"));
     const QString swStr = readAttr(a, QLatin1String("stroke-width"));
+    // display="none" drops the element and its subtree; visibility
+    // hidden/collapse paints nothing (no reflow here: leaves carry their own
+    // boxes). Visibility inherits, display does not. Limitation: an explicit
+    // visibility="visible" does not re-show a hidden ancestor's subtree
+    // (CSS would); that override stays culled. Honored content is not loss:
+    // no diagnostic, verdict stays ok.
+    if (readAttr(a, QLatin1String("display")).trimmed().compare(
+            QLatin1String("none"), Qt::CaseInsensitive) == 0) {
+        xml.skipCurrentElement();
+        return;
+    }
+    const QString visStr =
+        readAttr(a, QLatin1String("visibility")).trimmed().toLower();
+    if (visStr == QLatin1String("hidden") || visStr == QLatin1String("collapse"))
+        ps.hidden = true;
+    if (ps.hidden) {
+        xml.skipCurrentElement();
+        return;
+    }
     if (!fillStr.isEmpty()) {
         QColor c;
         if (parseColor(fillStr, &c)) {
@@ -1764,9 +1826,11 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
     if (!opStr.isEmpty()) ps.opacity *= qBound(0.0, parseLength(opStr, 1.0), 1.0);
     if (!swStr.isEmpty()) ps.strokeWidth = qMax(0.0, parseLength(swStr, 1.0));
     // Fill rule inherits like any presentation attribute; absent means the
-    // spec initial value (nonzero). Glyph paths from <text> keep the
-    // toolkit/font default and never take this path.
-    const QString fillRuleStr = readAttr(a, QLatin1String("fill-rule"));
+    // spec initial value (nonzero). Inside <clipPath> the clip-rule property
+    // governs instead (fill-rule is ignored there). Glyph paths from <text>
+    // keep the toolkit/font default and never take this path.
+    const QString fillRuleStr =
+        readAttr(a, ps.inClip ? QLatin1String("clip-rule") : QLatin1String("fill-rule"));
     if (!fillRuleStr.isEmpty()) {
         if (fillRuleStr.trimmed().compare(QLatin1String("nonzero"),
                                           Qt::CaseInsensitive) == 0)
@@ -1776,7 +1840,55 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
             ps.fillEvenOdd = true;
     }
 
-    if (tag == QLatin1String("g")) {
+    if (silentNonRendered(tag)) {
+        xml.skipCurrentElement();
+        return;
+    }
+    // <style> is consumed by the normalize pre-pass: silent only when that
+    // pass actually ran, so over-cap stylesheets stay loud.
+    if (tag == QLatin1String("style") && budget && budget->diag &&
+        budget->diag->normNote == QLatin1String("expanded")) {
+        xml.skipCurrentElement();
+        return;
+    }
+    if (tag == QLatin1String("switch")) {
+        // Conditional processing: walk the first child whose
+        // requiredFeatures/requiredExtensions/systemLanguage hold, with the
+        // switch's own transform and paint. Untaken siblings are
+        // alternatives, not loss: silent. Nothing passing means nothing
+        // renderable: counted once.
+        const std::string locale =
+            QLocale::system().bcp47Name().toStdString();
+        bool picked = false;
+        while (xml.readNextStartElement()) {
+            if (picked) {
+                xml.skipCurrentElement();
+                continue;
+            }
+            const QXmlStreamAttributes ca = xml.attributes();
+            pittore::svg::SwitchCond cond;
+            cond.requiredFeatures =
+                readAttr(ca, QLatin1String("requiredFeatures")).toStdString();
+            cond.requiredExtensions =
+                readAttr(ca, QLatin1String("requiredExtensions")).toStdString();
+            cond.systemLanguage =
+                readAttr(ca, QLatin1String("systemLanguage")).toStdString();
+            if (pittore::svg::switchChildOk(cond, locale)) {
+                picked = true;
+                walkElement(xml, tf, ps, res, out, budget);
+            } else {
+                xml.skipCurrentElement();
+            }
+        }
+        if (!picked && budget && budget->diag) {
+            ++budget->diag->skippedLeaves;
+            noteCapped(budget->diag->skipTags, tag);
+        }
+        return;
+    }
+    // <a> is a transparent group for static import: children render
+    // normally, linking/activation has no raster effect.
+    if (tag == QLatin1String("g") || tag == QLatin1String("a")) {
         SvgNode node;
         node.group = true;
         const QString id = a.value(QLatin1String("id")).toString();
@@ -1983,7 +2095,9 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
         res.shapeRefs.insert(nodeId, std::move(ref));
     }
 
-    // Resolve url(#id) fills: gradients first, then pattern cells.
+    // Resolve url(#id) fills: gradients first, then pattern cells, then
+    // single-colour servers (flattened to their colour, like a one-stop
+    // gradient; the flatten overflow pass keeps inherited paint instead).
     std::shared_ptr<SvgGradient> grad;
     QString patternId;
     QString patternXform;
@@ -2000,6 +2114,9 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
             patternId = id;
             patternXform = res.patterns.value(id).xform;
             if (budget && budget->diag) ++budget->diag->patternUses;
+        } else if (res.solids.contains(id)) {
+            ps.hasFill = true;
+            ps.fill = res.solids.value(id);
         } else if (budget && budget->diag && !id.isEmpty()) {
             // Dangling paint server: the shape keeps its inherited paint.
             noteCapped(budget->diag->missingRefs,
@@ -3111,6 +3228,21 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
     const QString strokeOp = readAttr(a, QLatin1String("stroke-opacity"));
     const QString opStr = readAttr(a, QLatin1String("opacity"));
     const QString swStr = readAttr(a, QLatin1String("stroke-width"));
+    // Same display/visibility rule as the main walker (overflow path must
+    // agree, or huge files would render hidden content the normal path drops).
+    if (readAttr(a, QLatin1String("display")).trimmed().compare(
+            QLatin1String("none"), Qt::CaseInsensitive) == 0) {
+        xml.skipCurrentElement();
+        return true;
+    }
+    const QString visStr =
+        readAttr(a, QLatin1String("visibility")).trimmed().toLower();
+    if (visStr == QLatin1String("hidden") || visStr == QLatin1String("collapse"))
+        ps.hidden = true;
+    if (ps.hidden) {
+        xml.skipCurrentElement();
+        return true;
+    }
     if (!fillStr.isEmpty()) {
         QColor c;
         if (parseColor(fillStr, &c)) {
@@ -3160,7 +3292,41 @@ bool flattenElement(QXmlStreamReader& xml, const QTransform& parentTf,
                                                Qt::CaseInsensitive) == 0)
             ps.fillEvenOdd = true;
     }
-    if (tag == QLatin1String("g")) {
+    if (silentNonRendered(tag)) {
+        xml.skipCurrentElement();
+        return true;
+    }
+    if (tag == QLatin1String("switch")) {
+        // Same first-passing-child rule as the main walker (overflow path
+        // must agree; no diagnostics here, like the rest of this pass).
+        const std::string locale =
+            QLocale::system().bcp47Name().toStdString();
+        bool picked = false;
+        while (xml.readNextStartElement()) {
+            if (picked) {
+                xml.skipCurrentElement();
+                continue;
+            }
+            const QXmlStreamAttributes ca = xml.attributes();
+            pittore::svg::SwitchCond cond;
+            cond.requiredFeatures =
+                readAttr(ca, QLatin1String("requiredFeatures")).toStdString();
+            cond.requiredExtensions =
+                readAttr(ca, QLatin1String("requiredExtensions")).toStdString();
+            cond.systemLanguage =
+                readAttr(ca, QLatin1String("systemLanguage")).toStdString();
+            if (pittore::svg::switchChildOk(cond, locale)) {
+                picked = true;
+                if (!flattenElement(xml, tf, ps, res, docP, root, progress,
+                                    streamTotal))
+                    return false;
+            } else {
+                xml.skipCurrentElement();
+            }
+        }
+        return true;
+    }
+    if (tag == QLatin1String("g") || tag == QLatin1String("a")) {
         // Same inherited-clip rule as the main walker: the group's clip-path
         // joins the stack the children resolve against. `tf * root` is the
         // cumulative map a leaf's transform carries here.
@@ -3363,7 +3529,8 @@ bool svgPartsParseBudgeted(const QByteArray& xml, SvgSceneRoot* out, QString* er
     }
     const bool hasRes = !skipResWhenEmpty || in.contains("<pattern") || in.contains("<marker") ||
                         in.contains("<clipPath") || in.contains("<mask") ||
-                        in.contains("<filter") || in.contains("<meshgradient");
+                        in.contains("<filter") || in.contains("<meshgradient") ||
+                        in.contains("<solidcolor") || in.contains("<solidColor");
     if (hasRes) {
         QXmlStreamReader scan(in);
         scanResources(scan, res);

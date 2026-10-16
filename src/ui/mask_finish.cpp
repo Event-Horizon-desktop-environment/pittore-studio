@@ -166,7 +166,8 @@ bool AppState::setLayerMaskDensity(float density) {
     }
     density = std::clamp(density, 0.0f, 1.0f);
     if (l->maskDensity == density) return false;
-    // Slider contract (like opacity/adjustment sliders): live, no undo step.
+    // Slider contract (like opacity/adjustment sliders): live write; the
+    // caller holds the undo step (drag gesture or single edit).
     l->maskDensity = density;
     ++l->maskStamp;  // invalidates the finished-mask device cache
     d->rebuildComposite();

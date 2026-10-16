@@ -86,6 +86,13 @@ struct AppSettings {
     QColor transparencyDark = QColor(0xbf, 0xbf, 0xbf);
     // Tablet mode: enlarged tool strip + persona bar targets for pen taps.
     bool tabletMode = false;
+    // Display scaling, applied at startup before the UI toolkit starts
+    // (changing either needs a restart): hidpiEnabled off runs the whole
+    // interface unscaled for small screens where it would otherwise be too
+    // big; hidpiFractional keeps non-integer scales like 125/150% exact
+    // instead of rounding them to whole pixels.
+    bool hidpiEnabled = true;
+    bool hidpiFractional = true;
     // Font preview size in family combos (Interface tab): 0 = None (plain
     // list), 1 = Small, 2 = Medium, 3 = Large. See familyPreviewPx().
     int fontPreviewSize = 2;

@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "ui/canvas/paint/canvas_tile_store.h"
 #include "ui/ai_models.h"
 #include "ui/contextual_task_bar.h"
 #include "ui/icons.h"
@@ -310,6 +311,17 @@ CanvasView::CanvasView(AppState* state, QWidget* parent)
             [this](QScreen*) { refresh(); });
 
     applyToolCursor();
+}
+
+CanvasView::~CanvasView() {
+    // The bake pool deliberately outlives the GUI (a leaked static), so
+    // without this a tile bake still rasterizing when the window - and
+    // with it QApplication - goes away races the Qt/fontconfig teardown
+    // and corrupts the heap at exit. The view is the only producer of
+    // bakes, so draining here is deterministic: queued jobs are dropped,
+    // in-flight ones finish or abort at their next stillWanted() gate,
+    // and nothing touches Qt afterwards.
+    CanvasTileStore::instance().shutdown();
 }
 
 }  // namespace pittore::ui

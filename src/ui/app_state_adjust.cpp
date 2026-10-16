@@ -169,7 +169,8 @@ bool AppState::setAdjustmentCurve(const QVector<QPointF>& points) {
 }
 
 // Replace one Curves channel's control points (ch 0 = R, 1 = G, 2 = B),
-// rebuild the folded LUT and recomposite. Live, no undo step.
+// rebuild the folded LUT and recomposite. Live write; the caller holds the
+// undo step (single edit or drag gesture).
 bool AppState::setAdjustmentCurveForChannel(int ch,
                                             const QVector<QPointF>& points) {
     DocumentItem* d = activeDocument();

@@ -370,18 +370,14 @@ int ColorGradeDialog::ensureLayer(int kind) {
     // first so the trailing batch always resolves against fresh indices.
     flushWrites();
     if (!state_->addAdjustmentLayer(kind)) return -1;
-    ++created_;
     DocumentItem* d = state_->activeDocument();
     return d ? d->activeLayer : -1;
 }
 
-void ColorGradeDialog::snapshotIfFresh(int kind, int index) {
-    if (snaps_.contains(kind)) return;
-    DocumentItem* d = state_->activeDocument();
-    if (!d || index < 0 || index >= d->layers.size()) return;
-    std::array<float, 16> params{};
-    for (int i = 0; i < 16; ++i) params[i] = d->layers[index].adjustmentParams[i];
-    snaps_.insert(kind, params);
+void ColorGradeDialog::beginGradeGesture() {
+    if (gradeGesture_ || !state_->activeDocument()) return;
+    state_->beginUndoStep();
+    gradeGesture_ = true;
 }
 
 void ColorGradeDialog::writeThrough(int layer, int pi, float value) {
@@ -389,9 +385,9 @@ void ColorGradeDialog::writeThrough(int layer, int pi, float value) {
 }
 
 void ColorGradeDialog::requestWrite(int kind, int pi, float value) {
+    beginGradeGesture();
     const int index = ensureLayer(kind);
     if (index < 0) return;
-    snapshotIfFresh(kind, index);
     if (!writeTimer_->isActive()) {
         writeThrough(index, pi, value);
         writeTimer_->start();
@@ -444,23 +440,23 @@ void ColorGradeDialog::applyPreset(int preset) {
         count = 4;
     } else {
         // Default: neutralize every row through the normal write path so
-        // layers are ensured and snapshots taken like any other edit.
+        // layers are ensured inside the session step like any other edit.
         flushWrites();
+        beginGradeGesture();
         for (const Row& row : rows_) {
             const int index = ensureLayer(row.kind);
             if (index < 0) continue;
-            snapshotIfFresh(row.kind, index);
             writeThrough(index, row.pi, static_cast<float>(row.neutral));
         }
         syncRows();
         return;
     }
     flushWrites();
+    beginGradeGesture();
     for (int i = 0; i < count; ++i) {
         const int kind = static_cast<int>(items[i].kind);
         const int index = ensureLayer(kind);
         if (index < 0) continue;
-        snapshotIfFresh(kind, index);
         writeThrough(index, items[i].pi, items[i].value);
     }
     syncRows();
@@ -468,10 +464,10 @@ void ColorGradeDialog::applyPreset(int preset) {
 
 void ColorGradeDialog::resetSection(const QVector<int>& kinds) {
     flushWrites();
+    beginGradeGesture();
     for (int kind : kinds) {
         const int index = findLayer(kind);
         if (index < 0) continue;
-        snapshotIfFresh(kind, index);
         state_->resetAdjustmentAt(index);
     }
     syncRows();
@@ -509,6 +505,10 @@ void ColorGradeDialog::renderPreview() {
 
 void ColorGradeDialog::accept() {
     flushWrites();
+    if (gradeGesture_) {
+        gradeGesture_ = false;
+        state_->commitUndoStep(tr("Color Grade"), QStringLiteral("adjustments"));
+    }
     QSettings(QStringLiteral("PittoreStudio"), QStringLiteral("painter"))
         .setValue(QStringLiteral("ColorGrade/geometry"), saveGeometry());
     if (DocumentItem* d = state_->activeDocument()) {
@@ -521,16 +521,14 @@ void ColorGradeDialog::accept() {
 }
 
 void ColorGradeDialog::reject() {
-    flushWrites();
-    // Restore touched layers by kind (indices may have shifted as sections
-    // created layers; relative order never changes under a modal dialog).
-    for (auto it = snaps_.constBegin(); it != snaps_.constEnd(); ++it) {
-        const int index = findLayer(it.key());
-        if (index < 0) continue;
-        for (int i = 0; i < 16; ++i)
-            state_->setAdjustmentParamAt(index, i, it.value()[i]);
+    // Drop anything throttled but never written, then rewind the whole
+    // session (edits and created layers) like an undo of one step.
+    pending_.clear();
+    writeTimer_->stop();
+    if (gradeGesture_) {
+        gradeGesture_ = false;
+        state_->cancelUndoStep();
     }
-    for (int i = 0; i < created_; ++i) state_->undo();
     QSettings(QStringLiteral("PittoreStudio"), QStringLiteral("painter"))
         .setValue(QStringLiteral("ColorGrade/geometry"), saveGeometry());
     if (DocumentItem* d = state_->activeDocument()) {

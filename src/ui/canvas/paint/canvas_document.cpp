@@ -625,10 +625,9 @@ void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
                                 .arg(prefs.transparencyLight.name(QColor::HexArgb),
                                      prefs.transparencyDark.name(QColor::HexArgb))
                                 .arg(QString::number(useDpr, 'f', 2));
-    static QMap<QString, QPixmap> checkerCache;
-    auto it = checkerCache.find(tileKey);
-    if (it == checkerCache.end()) {
-        if (checkerCache.size() >= 8) checkerCache.clear();
+    auto it = checkerCache_.find(tileKey);
+    if (it == checkerCache_.end()) {
+        if (checkerCache_.size() >= 8) checkerCache_.clear();
         const int dev = qMax(1, qRound(2 * cell * useDpr));
         QPixmap pm(dev, dev);
         pm.setDevicePixelRatio(useDpr);
@@ -640,7 +639,7 @@ void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
         qp.fillRect(cell, cell, cell, cell, prefs.transparencyLight);
         qp.fillRect(cell, 0, cell, cell, prefs.transparencyDark);
         qp.fillRect(0, cell, cell, cell, prefs.transparencyDark);
-        it = checkerCache.insert(tileKey, pm);
+        it = checkerCache_.insert(tileKey, pm);
     }
     p.fillRect(bounds, QBrush(*it));
 

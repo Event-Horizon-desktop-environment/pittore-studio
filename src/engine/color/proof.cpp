@@ -231,6 +231,30 @@ std::string ProofManager::applyProof(const float* src, float* dst,
                            dst + y * w * 4, w);
         }
     }
+    if (st.gamutCheck) {
+        // The 16-bit alarm codes above only take effect for integer output
+        // formats: the float pipeline ignores cmsSetAlarmCodes and emits a
+        // whole-pixel -1 sentinel for out-of-gamut instead (cross-checked
+        // against the 8-bit path over a 17^3 sRGB sweep: the sentinel is
+        // always exactly -1 on all three channels and always agrees with
+        // the 8-bit alarm verdict). Substitute the configured alarm here.
+        // Small single-channel negatives are interpolation undershoot —
+        // identical with and without the flag — and must not trigger it.
+        float alarm[3];
+        for (int c = 0; c < 3; ++c)
+            alarm[c] = st.alarm[c] < 0.0f
+                           ? 0.0f
+                           : (st.alarm[c] > 1.0f ? 1.0f : st.alarm[c]);
+        const std::size_t n = static_cast<std::size_t>(w) * h;
+        for (std::size_t i = 0; i < n; ++i) {
+            float* px = dst + i * 4;
+            if (px[0] == -1.0f && px[1] == -1.0f && px[2] == -1.0f) {
+                px[0] = alarm[0];
+                px[1] = alarm[1];
+                px[2] = alarm[2];
+            }
+        }
+    }
     return "";
 }
 

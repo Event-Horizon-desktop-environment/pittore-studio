@@ -139,6 +139,10 @@ class PreferencesDialog final : public QDialog {
     Switch* gpuEnabled_ = nullptr;
     QComboBox* gpuDevice_ = nullptr;
     QComboBox* cpuDevice_ = nullptr;
+    // False when the binary enumerated no GPU backend (release builds
+    // compile CUDA/HIP out): the toggle and combo stay disabled with an
+    // explanation instead of an eternally empty dropdown.
+    bool gpuAvailable_ = true;
     // Working memory budget as a slider: 0 = unlimited, otherwise MB capped
     // at detected system RAM. ramTotalMb_ <= 0 means RAM is undetectable and
     // the slider falls back to a fixed range.
@@ -152,6 +156,8 @@ class PreferencesDialog final : public QDialog {
     Switch* reopenDocuments_ = nullptr;
     Switch* zoomWithScroll_ = nullptr;
     Switch* tabletMode_ = nullptr;
+    Switch* hidpiEnabled_ = nullptr;
+    Switch* hidpiFractional_ = nullptr;
     QComboBox* fontPreview_ = nullptr;
     Switch* twoColumnTools_ = nullptr;
     QComboBox* workspaceCombo_ = nullptr;

@@ -28,9 +28,15 @@ namespace {
 // stroke alpha, gradient stops), paint servers, markers, clips/masks,
 // meshes or filters means the layer keeps its correctly blended composite
 // raster. Same rule as the live walk; duplicated here so this module needs
-// no access to it.
+// no access to it. Layer-level compositing counts too: a translucent,
+// blended, masked, styled, filtered or clipped row must never go crisp,
+// or it prints opaque in tiles while the composite shows it faded.
 bool crispOpaque(const LayerItem& l) {
     if (!l.art || l.art->isEmpty()) return false;
+    if (l.opacity != 100 || l.fill != 100) return false;
+    if (l.blendMode != QLatin1String("Normal")) return false;
+    if (l.hasMask || !l.style.empty() || l.clipped) return false;
+    if (l.hasLiveFilter && l.liveFilterEnabled) return false;
     if (l.art->opacity < 1.0) return false;
     const auto& pt = l.art->paint;
     if (pt.hasFill && pt.fill[3] != 255) return false;

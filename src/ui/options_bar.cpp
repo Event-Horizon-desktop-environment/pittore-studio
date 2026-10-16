@@ -31,6 +31,7 @@
 #include "ui/brushes/sensor_drives_dialog.h"
 #include "ui/brush_popup_scale.h"
 #include "ui/dpi_pixmap.h"
+#include "ui/flow_layout.h"
 #include "ui/icons.h"
 #include "ui/panels/shared/panel_helpers.h"
 #include "ui/font_preview.h"
@@ -1157,11 +1158,15 @@ QImage brushBadgeThumb(AppState* state, ToolId tool) {
 OptionsBar::OptionsBar(AppState* state, QWidget* parent) : QFrame(parent), state_(state) {
     setObjectName(QStringLiteral("optionsBar"));
     setFrameShape(QFrame::NoFrame);
-    setFixedHeight(44);
+    // No fixed height: the row wraps onto extra lines when the window is
+    // narrow, so the bar's height follows its width (issue #2). One row
+    // still lands at the old fixed 44 px.
+    QSizePolicy policy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    policy.setHeightForWidth(true);
+    setSizePolicy(policy);
 
-    row_ = new QHBoxLayout(this);
+    row_ = new FlowLayout(this, 10);
     row_->setContentsMargins(12, 6, 12, 6);
-    row_->setSpacing(10);
 
     connect(state_, &AppState::toolChanged, this, [this] { rebuild(); });
     // No document = no-op strip: options act on layers/pixels, so the whole
@@ -1186,6 +1191,10 @@ OptionsBar::OptionsBar(AppState* state, QWidget* parent) : QFrame(parent), state
 }
 
 QSize OptionsBar::sizeHint() const { return {600, 34}; }
+
+bool OptionsBar::hasHeightForWidth() const { return row_->hasHeightForWidth(); }
+
+int OptionsBar::heightForWidth(int w) const { return row_->heightForWidth(w); }
 
 void OptionsBar::updateBadge() {
     if (!toolBadge_) return;
@@ -1446,7 +1455,6 @@ void OptionsBar::rebuild() {
                       spec.id, static_cast<int>(spec.kind));
     }
     tool_log(tool, "options-bar/rebuild", "row built");
-    row_->addStretch(1);
     // Disabled visual language: without a document every option is dimmed so
     // the strip teaches "nothing to act on" instead of looking live.
     setEnabled(state_->activeDocument() != nullptr);

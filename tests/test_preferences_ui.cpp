@@ -254,6 +254,18 @@ int main(int argc, char** argv) {
             std::printf("FAIL: Performance page has no History section\n");
             return 1;
         }
+        // Issue #7: a build without GPU backends still shows the GPU device
+        // combo; it must explain itself rather than sit empty.
+        auto* gpuCombo =
+            allPages->widget(6)->findChild<QComboBox*>(QStringLiteral("perf.gpuDevice"));
+        if (!gpuCombo) {
+            std::printf("FAIL: Performance page has no GPU device combo\n");
+            return 1;
+        }
+        if (gpuCombo->count() == 0) {
+            std::printf("FAIL: GPU device combo is empty with no explanation\n");
+            return 1;
+        }
     }
     std::printf("OK: canvas Show section\n");
 

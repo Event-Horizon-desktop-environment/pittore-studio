@@ -39,8 +39,10 @@ QLabel* sectionLabel(const QString& text, AppState* state, QWidget* parent) {
 // A colour well for the Character panel. An invalid or fully transparent
 // colour is drawn as a crossed-out checkerboard: "inherit the fill" for a
 // decoration, "no highlight" for the background.
-void paintColorSwatch(QToolButton* button, const QColor& c) {
-    QPixmap pm(18, 18);
+QPixmap colorSwatchPixmap(const QColor& c, qreal dpr) {
+    const qreal useDpr = dpr > 0.0 ? dpr : 1.0;
+    QPixmap pm(qMax(1, qRound(18.0 * useDpr)), qMax(1, qRound(18.0 * useDpr)));
+    pm.setDevicePixelRatio(useDpr);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     if (!c.isValid() || c.alpha() == 0) {
@@ -55,7 +57,16 @@ void paintColorSwatch(QToolButton* button, const QColor& c) {
     p.setPen(QColor(0, 0, 0, 110));
     p.drawRect(0, 0, 17, 17);
     p.end();
-    button->setIcon(QIcon(pm));
+    return pm;
+}
+
+void paintColorSwatch(QToolButton* button, const QColor& c) {
+    // Ship 1x and 2x bakes so fractional scales pick (or downscale) a
+    // crisp variant instead of stretching the 1x one.
+    QIcon icon;
+    icon.addPixmap(colorSwatchPixmap(c, 1.0));
+    icon.addPixmap(colorSwatchPixmap(c, 2.0));
+    button->setIcon(icon);
     button->setIconSize(QSize(18, 18));
 }
 

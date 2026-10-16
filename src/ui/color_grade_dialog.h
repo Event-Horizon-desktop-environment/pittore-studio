@@ -3,10 +3,10 @@
 // sections (Exposure / Enhance / White Balance) bound to real adjustment
 // layers, with a live preview, presets, and per-section reset.
 //
-// Each row ensures its backing layer on first write (created layers are
-// tracked); Cancel restores touched layers and undoes created ones, OK keeps
-// everything. Slider storms are throttled (leading + trailing) so a drag
-// never recomposites per tick.
+// Each row ensures its backing layer on first write. The whole session is
+// one undo step: the first write opens it, OK commits ("Color Grade"),
+// Cancel discards it. Slider storms are throttled (leading + trailing) so
+// a drag never recomposites per tick.
 #include <QDialog>
 #include <QMap>
 #include <QPair>
@@ -55,7 +55,9 @@ class ColorGradeDialog final : public QDialog {
 
     int findLayer(int kind) const;
     int ensureLayer(int kind);
-    void snapshotIfFresh(int kind, int index);
+    // Open the session-wide undo step on first write, so layer creation and
+    // every param edit coalesce into the single step accept() commits.
+    void beginGradeGesture();
     void writeThrough(int layer, int pi, float value);
     void requestWrite(int kind, int pi, float value);
     void flushWrites();
@@ -67,8 +69,7 @@ class ColorGradeDialog final : public QDialog {
 
     AppState* state_;
     int origActive_ = -1;
-    QMap<int, std::array<float, 16>> snaps_;
-    int created_ = 0;
+    bool gradeGesture_ = false;
     QTimer* writeTimer_ = nullptr;
     QMap<QPair<int, int>, float> pending_;
     QTimer* previewTimer_ = nullptr;

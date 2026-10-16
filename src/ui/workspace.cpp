@@ -90,6 +90,7 @@ WorkspaceSnapshot WorkspaceManager::capture(const QString& name) const {
     snapshot.dockState = window_->saveState();
     snapshot.windowGeometry = window_->saveGeometry();
     snapshot.twoColumnTools = tools_ && tools_->twoColumn();
+    snapshot.twoColumnManual = tools_ && tools_->twoColumnManual();
     if (tools_) snapshot.hiddenTools = tools_->hiddenTools();
     return snapshot;
 }
@@ -107,7 +108,7 @@ void WorkspaceManager::apply(const QString& name) {
         emit presetRequested(name, snapshot.visiblePanels);
         if (!snapshot.dockState.isEmpty()) window_->restoreState(snapshot.dockState);
         if (tools_) {
-            tools_->setTwoColumn(snapshot.twoColumnTools);
+            tools_->setTwoColumn(snapshot.twoColumnTools, snapshot.twoColumnManual);
             tools_->setHiddenTools(snapshot.hiddenTools);
         }
         current_ = name;
@@ -176,6 +177,7 @@ void WorkspaceManager::saveToDisk() const {
         object[QStringLiteral("panels")] = QJsonArray::fromStringList(snapshot.visiblePanels);
         object[QStringLiteral("hiddenTools")] = QJsonArray::fromStringList(snapshot.hiddenTools);
         object[QStringLiteral("twoColumnTools")] = snapshot.twoColumnTools;
+        object[QStringLiteral("twoColumnManual")] = snapshot.twoColumnManual;
         object[QStringLiteral("includeShortcuts")] = snapshot.includeShortcuts;
         object[QStringLiteral("includeMenus")] = snapshot.includeMenus;
         object[QStringLiteral("includeToolbar")] = snapshot.includeToolbar;
@@ -210,6 +212,7 @@ void WorkspaceManager::loadFromDisk() {
         for (const QJsonValue& tool : object[QStringLiteral("hiddenTools")].toArray())
             snapshot.hiddenTools << tool.toString();
         snapshot.twoColumnTools = object[QStringLiteral("twoColumnTools")].toBool();
+        snapshot.twoColumnManual = object[QStringLiteral("twoColumnManual")].toBool();
         snapshot.includeShortcuts = object[QStringLiteral("includeShortcuts")].toBool();
         snapshot.includeMenus = object[QStringLiteral("includeMenus")].toBool();
         snapshot.includeToolbar = object[QStringLiteral("includeToolbar")].toBool(true);

@@ -26,6 +26,7 @@
 #include "engine/vector/svg/poly_points.h"
 #include "engine/vector/svg/rect_args.h"
 #include "engine/vector/svg/rotate_list.h"
+#include "engine/vector/svg/switch_cond.h"
 #include "engine/vector/svg/unknown_keep.h"
 #include "engine/vector/svg/xml_reader.h"
 #include "test_util.h"
@@ -77,12 +78,30 @@ void test_refs() {
     CHECK(isKnownAttr("rect", "x"));
 }
 
+void test_switch() {
+    CHECK(switchChildOk(
+        {"http://www.w3.org/TR/SVG11/feature#Shape", "", ""}, "en-US"));
+    CHECK(!switchChildOk(
+        {"http://www.w3.org/TR/SVG11/feature#Script", "", ""}, "en-US"));
+    CHECK(!switchChildOk(
+        {"http://www.w3.org/TR/SVG11/feature#Shape",
+         "http://example.invalid/ext", ""},
+        "en-US"));
+    CHECK(switchChildOk({"", "", "en-US, fr"}, "en-US"));
+    CHECK(switchChildOk({"", "", "EN-us"}, "en-US"));
+    CHECK(!switchChildOk({"", "", "fr"}, "en-US"));
+    CHECK(switchChildOk({"", "", ""}, ""));
+    CHECK(!switchChildOk(
+        {"http://www.w3.org/TR/SVG11/feature#Nope", "", ""}, "en-US"));
+}
+
 }  // namespace
 
 int main() {
     test_boxes();
     test_units();
     test_refs();
+    test_switch();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),
                 pittore_test::failures());

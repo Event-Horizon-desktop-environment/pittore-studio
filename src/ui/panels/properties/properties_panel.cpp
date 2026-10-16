@@ -232,8 +232,14 @@ class PropertiesPanel final : public QWidget {
             auto* reset = new QPushButton(tr("Reset"), head);
             reset->setToolTip(tr("Reset this adjustment to its defaults."));
             reset->setAutoDefault(false);
-            connect(reset, &QPushButton::clicked, this,
-                    [this] { state_->resetAdjustmentToDefaults(); });
+            connect(reset, &QPushButton::clicked, this, [this] {
+                state_->beginUndoStep();
+                if (state_->resetAdjustmentToDefaults())
+                    state_->commitUndoStep(tr("Reset Adjustments"),
+                                           QStringLiteral("adjustments"));
+                else
+                    state_->discardUndoStep();
+            });
             hrow->addWidget(reset);
             auto* compare = footerButton(
                 state_, QStringLiteral("eye"),
@@ -245,8 +251,9 @@ class PropertiesPanel final : public QWidget {
             hrow->addWidget(compare);
             form_->addRow(head);
             // Live parameter rows, in param-index order. Slider drags write
-            // straight through to the layer (no undo step, like the opacity
-            // slider) and recomposite immediately.
+            // straight through to the layer and recomposite immediately;
+            // the drag holds one undo step (begin on press, commit on
+            // release) so Ctrl+Z undoes the whole drag at once.
             const QVector<AdjustmentParamDesc> descs =
                 adjustmentParamDescs(layer->adjustmentKind);
             for (int pi = 0; pi < descs.size(); ++pi) {
@@ -266,6 +273,23 @@ class PropertiesPanel final : public QWidget {
                 }
                 slider->setToolTip(
                     QStringLiteral("%1 (%2–%3)").arg(dd.label).arg(dd.realMin).arg(dd.realMax));
+                connect(slider, &QSlider::sliderPressed, this, [this, slider] {
+                    if (state_->activeLayer() && !state_->undoStepActive()) {
+                        state_->beginUndoStep();
+                        sliderGesture_ = true;
+                        sliderStart_ = slider->value();
+                    }
+                });
+                connect(slider, &QSlider::sliderReleased, this, [this, slider] {
+                    if (sliderGesture_) {
+                        sliderGesture_ = false;
+                        if (slider->value() == sliderStart_)
+                            state_->discardUndoStep();
+                        else
+                            state_->commitUndoStep(tr("Adjustments"),
+                                                   QStringLiteral("adjustments"));
+                    }
+                });
                 connect(slider, &QSlider::valueChanged, this,
                         [this, pi, dd, span](int v) {
                             const double real =
@@ -307,11 +331,15 @@ class PropertiesPanel final : public QWidget {
                 editor->onChanged_ = [this, editor, channel] {
                     if (!state_->activeLayer()) return;
                     const int ch = channel->currentIndex();
-                    if (ch == 0)
-                        state_->setAdjustmentCurve(editor->points());
+                    state_->beginUndoStep();
+                    const bool ok =
+                        ch == 0 ? state_->setAdjustmentCurve(editor->points())
+                                : state_->setAdjustmentCurveForChannel(ch - 1, editor->points());
+                    if (ok)
+                        state_->commitUndoStep(tr("Adjustments"),
+                                               QStringLiteral("adjustments"));
                     else
-                        state_->setAdjustmentCurveForChannel(ch - 1,
-                                                             editor->points());
+                        state_->discardUndoStep();
                 };
                 form_->addRow(tr("Curve"), editor);
             }
@@ -325,6 +353,23 @@ class PropertiesPanel final : public QWidget {
             auto* density = new QSlider(Qt::Horizontal, this);
             density->setRange(0, 100);
             density->setValue(qRound(layer->maskDensity * 100));
+            connect(density, &QSlider::sliderPressed, this, [this, density] {
+                if (state_->activeLayer() && !state_->undoStepActive()) {
+                    state_->beginUndoStep();
+                    sliderGesture_ = true;
+                    sliderStart_ = density->value();
+                }
+            });
+            connect(density, &QSlider::sliderReleased, this, [this, density] {
+                if (sliderGesture_) {
+                    sliderGesture_ = false;
+                    if (density->value() == sliderStart_)
+                        state_->discardUndoStep();
+                    else
+                        state_->commitUndoStep(tr("Mask Density"),
+                                               QStringLiteral("mask"));
+                }
+            });
             connect(density, &QSlider::valueChanged, this,
                     [this](int v) {
                         if (state_->activeLayer())
@@ -338,9 +383,13 @@ class PropertiesPanel final : public QWidget {
             feather->setSuffix(QStringLiteral(" px"));
             connect(feather, &QDoubleSpinBox::valueChanged, this,
                     [this](double v) {
-                        if (state_->activeLayer())
-                            state_->setLayerMaskFeather(
-                                static_cast<float>(v));
+                        if (!state_->activeLayer()) return;
+                        state_->beginUndoStep();
+                        if (state_->setLayerMaskFeather(static_cast<float>(v)))
+                            state_->commitUndoStep(tr("Mask Feather"),
+                                                   QStringLiteral("mask"));
+                        else
+                            state_->discardUndoStep();
                     });
             form_->addRow(tr("Feather"), feather);
         }
@@ -434,6 +483,12 @@ class PropertiesPanel final : public QWidget {
     AppState* state_;
     QLabel* title_ = nullptr;
     QFormLayout* form_ = nullptr;
+    // True while a slider drag holds an open undo step (adjustment and
+    // mask-density rows), and the dragged slider's start position: a press
+    // without movement discards instead of logging a no-op step. One drag
+    // commits as one Ctrl+Z step.
+    bool sliderGesture_ = false;
+    int sliderStart_ = 0;
 };
 
 }  // namespace

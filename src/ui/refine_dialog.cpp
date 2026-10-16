@@ -791,8 +791,14 @@ void RefineDialog::refreshPreview() {
     previewOff_ = clampViewOff(previewOff_, box, previewPx_);
     // Composite onto a label-sized board at the pan offset (transparent
     // board: every preview mode is already opaque except Transparent, whose
-    // checkerboard is baked into the image).
-    QPixmap board(box);
+    // checkerboard is baked into the image). Baked at the label's own
+    // ratio so rings and strokes stay crisp on fractional displays; all
+    // painting below stays in logical coordinates.
+    const qreal boardDpr = preview_->devicePixelRatioF();
+    const qreal useBoardDpr = boardDpr > 0.0 ? boardDpr : 1.0;
+    QPixmap board(qMax(1, qRound(box.width() * useBoardDpr)),
+                  qMax(1, qRound(box.height() * useBoardDpr)));
+    board.setDevicePixelRatio(useBoardDpr);
     board.fill(Qt::transparent);
     {
         QPainter bp(&board);

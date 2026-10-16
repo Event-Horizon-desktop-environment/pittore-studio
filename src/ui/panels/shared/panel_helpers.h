@@ -9,6 +9,7 @@ class QComboBox;
 class QToolButton;
 class QWidget;
 class QColor;
+class QPixmap;
 
 namespace pittore::ui {
 
@@ -19,6 +20,9 @@ QToolButton* footerButton(AppState* state, const QString& iconKey, const QString
 QLabel* sectionLabel(const QString& text, AppState* state, QWidget* parent);
 // Colour well used by the Character panel (defined in shared/panel_helpers.cpp).
 void paintColorSwatch(QToolButton* button, const QColor& c);
+// One well bake at an explicit ratio (18 logical px); the icon assembly
+// below ships 1x and 2x so fractional scales pick a crisp variant.
+QPixmap colorSwatchPixmap(const QColor& c, qreal dpr);
 // Makes a font-family combo searchable while keeping index semantics: editable
 // line edit + contains-match popup completer; Enter resolves exact match
 // first (case-insensitive), then first contains match, and reverts the text

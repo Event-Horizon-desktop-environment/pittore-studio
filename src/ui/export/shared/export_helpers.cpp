@@ -120,8 +120,11 @@ QColorSpace colorSpaceFor(const QString& name) {
     return QColorSpace();   // "Don't Convert" / unknown: leave pixels alone
 }
 
-QPixmap checkerboard(QSize size) {
-    QPixmap pm(size);
+QPixmap checkerboard(QSize size, qreal dpr) {
+    const qreal useDpr = dpr > 0.0 ? dpr : 1.0;
+    QPixmap pm(qMax(1, qRound(size.width() * useDpr)),
+               qMax(1, qRound(size.height() * useDpr)));
+    pm.setDevicePixelRatio(useDpr);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     const int cell = 8;

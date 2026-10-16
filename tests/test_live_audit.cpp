@@ -23,6 +23,7 @@
 #include <QScrollBar>
 #include <QWidget>
 
+#include "engine/ai/bg_remove.h"
 #include "engine/compute/paint.h"
 #include "engine/core/pixel.h"
 #include "engine/filter/filters.h"
@@ -512,7 +513,15 @@ int main(int argc, char** argv) {
                     // shapes the live frame; the commit (double-click here,
                     // Enter or Apply in the UI) is what resizes the document.
                     // Without the commit the audit would see a NO-EFFECT drag.
-                    std::snprintf(gesture, sizeof(gesture), "frame+dblclick");
+                    // The armed frame starts over the whole document, so a
+                    // press inside it only repositions (a full-document frame
+                    // has no room to slide) and the commit then correctly
+                    // refuses the unchanged frame. Ride the top-left handle
+                    // instead: that shrinks the frame to a real sub-rect for
+                    // the commit to apply.
+                    std::snprintf(gesture, sizeof(gesture), "handle+dblclick");
+                    pa = canvas->documentToView(QPointF(0, 0));
+                    pb = canvas->documentToView(QPointF(60, 45));
                     sendMouse(vp, QEvent::MouseButtonPress, pa, Qt::LeftButton,
                               Qt::LeftButton);
                     for (int i = 1; i <= 4; ++i) {
@@ -630,7 +639,10 @@ int main(int argc, char** argv) {
         const bool changed = (after != before);
         // AI selection without models refuses cleanly (status hint, no
         // selection): a missing .onnx is an environment SKIP, not a bug.
-        // With models present these must segment the painted square.
+        // The same holds for a build that links no ONNX Runtime — the
+        // model files can be present while inference is unavailable, and
+        // the tools refuse just as cleanly. With both present these must
+        // segment the painted square.
         // Generative tools gate on the generative model id the same way.
         const bool aiTool = (id == ToolId::QuickSelection ||
                              id == ToolId::ObjectSelection);
@@ -638,8 +650,9 @@ int main(int argc, char** argv) {
                               id == ToolId::GenerateBackground);
         const bool aiModelMissing =
             (aiTool &&
-             aiModelStore().state(state.settings().bgModel) !=
-                 AiModelState::Present) ||
+             (!pittore::ai::onnx_available() ||
+              aiModelStore().state(state.settings().bgModel) !=
+                  AiModelState::Present)) ||
             (genTool &&
              aiModelStore().state(
                  QString::fromUtf8(AppState::generativeModelId())) !=

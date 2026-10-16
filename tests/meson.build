@@ -263,6 +263,17 @@ if has_qt6
   test('history', history_test,
     env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-history'})
 
+  # Undo gestures for the live panel controls: a slider drag (begin, N
+  # writes, commit) is one step, spinbox/combo edits wrap singly, and a
+  # dialog session with nested layer creation coalesces. Same harness.
+  undo_gestures_test = executable('test_undo_gestures',
+    ['test_undo_gestures.cpp'],
+    dependencies : [qt6dep, qt6net, pittore_compute_dep, pittore_io_dep, tomlplusplus, pittore_ui_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('undo-gestures', undo_gestures_test,
+    env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-undogestures'})
+
   # Layer-stack surgery through AppState: group/ungroup, Arrange moves, drag
   # re-parenting, and the group transform helpers (descendants, bounds, batch
   # move/scale placements). Same harness as history.
@@ -922,6 +933,50 @@ if has_qt6
   test('tool-log', tool_log_test,
     env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-toollog'},
     timeout : 60)
+
+  # Menus always fit their content however opened (issue #5 guard).
+  menus_test = executable('test_menus',
+    ['test_menus.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('menus', menus_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-menus'})
+
+  # Issue #2: the main window fits a 1280x720 screen un-maximized.
+  window_min_size_test = executable('test_window_min_size',
+    ['test_window_min_size.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('window-min-size', window_min_size_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-minsize'})
+
+  # Tool strip: per-persona button sets plus Krita-style auto columns
+  # (double up when a single column no longer fits, never scroll).
+  tools_panel_test = executable('test_tools_panel',
+    ['test_tools_panel.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('tools-panel', tools_panel_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-toolspanel'})
+
+  # Fractional-DPR render check: forced QT_SCALE_FACTOR=1.5 proves the
+  # interface paints at fractional devicePixelRatio (viewport grab lands at
+  # device-pixel size with real content; glyphs bake at the live ratio).
+  hidpi_render_test = executable('test_hidpi_render',
+    ['test_hidpi_render.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('hidpi-render', hidpi_render_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'QT_SCALE_FACTOR' : '1.5',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-hidpi'})
 
   # Tonal/filter/rotation/slice/histogram/recovery/zoom coverage (R54, R49,
   # R22, R19, R80, R98, R14) through AppState + CanvasView, headless.

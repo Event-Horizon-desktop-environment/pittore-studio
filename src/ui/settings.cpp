@@ -155,6 +155,10 @@ bool loadSettings(AppSettings& out) {
                     out.snapTargets = std::clamp(st->value_or(31), 0, 31);
                 if (const toml::node* t = view->get("tablet_mode"))
                     out.tabletMode = t->value_or(false);
+                if (const toml::node* he = view->get("hidpi_enabled"))
+                    out.hidpiEnabled = he->value_or(true);
+                if (const toml::node* hf = view->get("hidpi_fractional"))
+                    out.hidpiFractional = hf->value_or(true);
                 if (const toml::node* f = view->get("font_preview_size"))
                     out.fontPreviewSize = std::clamp(f->value_or(2), 0, 3);
                 if (const toml::node* c = view->get("cursor_shape"))
@@ -329,6 +333,8 @@ bool saveSettings(const AppSettings& in) {
     view.insert("snap_enabled", in.snapEnabled);
     view.insert("snap_targets", in.snapTargets);
     view.insert("tablet_mode", in.tabletMode);
+    view.insert("hidpi_enabled", in.hidpiEnabled);
+    view.insert("hidpi_fractional", in.hidpiFractional);
     view.insert("font_preview_size", in.fontPreviewSize);
     view.insert("cursor_shape", in.cursorShape);
     view.insert("outline_shape", in.outlineShape);

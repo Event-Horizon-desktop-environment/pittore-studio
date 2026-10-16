@@ -1050,6 +1050,26 @@ class LayersPanel final : public QWidget {
         connect(opacitySlider_, &QSlider::valueChanged, this, [this](int v) {
             if (opacity_ && opacity_->value() != v) opacity_->setValue(v);
         });
+        // A slider drag is one undo step: begin on press, live-write through
+        // the spinbox handler below, commit on release. Without a press
+        // (keyboard nudge) the handler wraps each change singly.
+        connect(opacitySlider_, &QSlider::sliderPressed, this, [this] {
+            if (state_->activeLayer() && !state_->undoStepActive()) {
+                state_->beginUndoStep();
+                opacityGesture_ = true;
+                opacityStart_ = opacitySlider_->value();
+            }
+        });
+        connect(opacitySlider_, &QSlider::sliderReleased, this, [this] {
+            if (opacityGesture_) {
+                opacityGesture_ = false;
+                // A press without movement leaves no step behind.
+                if (opacitySlider_->value() == opacityStart_)
+                    state_->discardUndoStep();
+                else
+                    state_->commitUndoStep(tr("Layer Opacity"), QStringLiteral("opacity"));
+            }
+        });
         connect(opacity_, &QSpinBox::valueChanged, this, [this](int v) {
             if (opacitySlider_ && opacitySlider_->value() != v) {
                 const QSignalBlocker b(opacitySlider_);
@@ -1057,26 +1077,35 @@ class LayersPanel final : public QWidget {
             }
         });
         connect(opacity_, &QSpinBox::valueChanged, this, [this](int v) {
-            if (LayerItem* l = state_->activeLayer()) {
+            LayerItem* l = state_->activeLayer();
+            if (!l || l->opacity == v) return;
+            if (state_->undoStepActive()) {
                 l->opacity = v;
-                if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
-                emit state_->documentModified(state_->activeDocument());
+            } else {
+                state_->beginUndoStep();
+                l->opacity = v;
+                state_->commitUndoStep(tr("Layer Opacity"), QStringLiteral("opacity"));
             }
+            if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
+            emit state_->documentModified(state_->activeDocument());
         });
         connect(fill_, &QSpinBox::valueChanged, this, [this](int v) {
-            if (LayerItem* l = state_->activeLayer()) {
-                l->fill = v;
-                if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
-                emit state_->documentModified(state_->activeDocument());
-            }
+            LayerItem* l = state_->activeLayer();
+            if (!l || l->fill == v) return;
+            state_->beginUndoStep();
+            l->fill = v;
+            state_->commitUndoStep(tr("Fill"), QStringLiteral("fill"));
+            if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
+            emit state_->documentModified(state_->activeDocument());
         });
         connect(blendMode_, &QComboBox::currentTextChanged, this, [this](const QString& mode) {
-            if (LayerItem* l = state_->activeLayer()) {
-                if (l->blendMode == mode) return;
-                l->blendMode = mode;
-                if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
-                emit state_->documentModified(state_->activeDocument());
-            }
+            LayerItem* l = state_->activeLayer();
+            if (!l || l->blendMode == mode) return;
+            state_->beginUndoStep();
+            l->blendMode = mode;
+            state_->commitUndoStep(tr("Blend Mode"), QStringLiteral("blend"));
+            if (DocumentItem* d = state_->activeDocument()) d->rebuildComposite();
+            emit state_->documentModified(state_->activeDocument());
         });
 
         rebuild();
@@ -1449,6 +1478,10 @@ class LayersPanel final : public QWidget {
     QSpinBox* opacity_ = nullptr;
     QSlider* opacitySlider_ = nullptr;
     QSpinBox* fill_ = nullptr;
+    // True while an opacity slider drag holds an open undo step, and the
+    // slider position where it started (a press without movement discards).
+    bool opacityGesture_ = false;
+    int opacityStart_ = 0;
     QVector<QToolButton*> lockButtons_;
     // Last scrolled-to selection: rebuild() only auto-scrolls when the active
     // row actually moved (or the document changed), so expanding/collapsing a

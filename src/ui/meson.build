@@ -97,6 +97,7 @@ if has_qt6
     'export/settings/export_settings.cpp',
     'export/io/export_writers.cpp',
     'filter_dialog.cpp',
+    'flow_layout.cpp',
     'icons.cpp',
     'keymap.cpp',
     'layer_style_dialog.cpp',

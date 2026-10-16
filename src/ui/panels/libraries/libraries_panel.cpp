@@ -72,9 +72,16 @@ class LibrariesPanel final : public QWidget {
         list->setIconSize(QSize(56, 56));
         list->setResizeMode(QListView::Adjust);
         for (int i = 0; i < 9; ++i) {
-            QPixmap swatch(56, 56);
-            swatch.fill(QColor::fromHsv((i * 37) % 360, 120, 200));
-            list->addItem(new QListWidgetItem(QIcon(swatch), tr("Asset %1").arg(i + 1)));
+            // 1x + 2x bakes so the icons stay crisp on fractional scales.
+            QIcon icon;
+            for (const qreal dpr : {1.0, 2.0}) {
+                QPixmap swatch(qMax(1, qRound(56.0 * dpr)),
+                               qMax(1, qRound(56.0 * dpr)));
+                swatch.setDevicePixelRatio(dpr);
+                swatch.fill(QColor::fromHsv((i * 37) % 360, 120, 200));
+                icon.addPixmap(swatch);
+            }
+            list->addItem(new QListWidgetItem(icon, tr("Asset %1").arg(i + 1)));
         }
         column->addWidget(list, 1);
     }

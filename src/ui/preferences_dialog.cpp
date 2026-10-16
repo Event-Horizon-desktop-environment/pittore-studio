@@ -266,6 +266,9 @@ PreferencesDialog::PreferencesDialog(AppState* state, QWidget* parent,
     reopenDocuments_->setChecked(s.reopenDocuments);
     zoomWithScroll_->setChecked(s.zoomWithScroll);
     tabletMode_->setChecked(s.tabletMode);
+    hidpiEnabled_->setChecked(s.hidpiEnabled);
+    hidpiFractional_->setChecked(s.hidpiFractional);
+    hidpiFractional_->setEnabled(s.hidpiEnabled);
     fontPreview_->setCurrentIndex(
         qMax(0, fontPreview_->findData(qBound(0, s.fontPreviewSize, 3))));
     if (twoColumnTools_) twoColumnTools_->setChecked(hooks_.twoColumn);
@@ -361,6 +364,8 @@ PreferencesDialog::PreferencesDialog(AppState* state, QWidget* parent,
         next.reopenDocuments = reopenDocuments_->isChecked();
         next.zoomWithScroll = zoomWithScroll_->isChecked();
         next.tabletMode = tabletMode_->isChecked();
+        next.hidpiEnabled = hidpiEnabled_->isChecked();
+        next.hidpiFractional = hidpiFractional_->isChecked();
         next.fontPreviewSize = fontPreview_->currentData().toInt();
         if (twoColumnTools_ && hooks_.setTwoColumn)
             hooks_.setTwoColumn(twoColumnTools_->isChecked());
@@ -445,8 +450,10 @@ QWidget* PreferencesDialog::buildPerformancePage() {
     column->addWidget(cardRow(tr("Use GPU acceleration (when available)"),
                               gpuEnabled_, page));
     gpuDevice_ = new QComboBox(page);
+    gpuDevice_->setObjectName(QStringLiteral("perf.gpuDevice"));
     column->addWidget(cardRow(tr("GPU device"), gpuDevice_, page));
     cpuDevice_ = new QComboBox(page);
+    cpuDevice_->setObjectName(QStringLiteral("perf.cpuDevice"));
     column->addWidget(cardRow(tr("CPU device"), cpuDevice_, page));
 
     ramTotalMb_ = totalSystemRamMb();
@@ -548,6 +555,23 @@ QWidget* PreferencesDialog::buildInterfacePage() {
         tr("Enlarge tool strip and persona bar targets for pen taps."));
     column->addWidget(cardRow(tr("Tablet mode"), tabletMode_, page,
                               tabletMode_->toolTip()));
+
+    column->addWidget(sectionHeader(tr("Display"), page));
+    hidpiEnabled_ = new Switch(page);
+    hidpiEnabled_->setToolTip(
+        tr("Scale the interface for high-density displays. Off runs it "
+           "unscaled for small screens. Takes effect on restart."));
+    column->addWidget(cardRow(tr("Enable HiDPI support"), hidpiEnabled_, page,
+                              hidpiEnabled_->toolTip()));
+    hidpiFractional_ = new Switch(page);
+    hidpiFractional_->setToolTip(
+        tr("Keep fractional scales like 125% or 150% exact instead of "
+           "rounding them to whole pixels. Takes effect on restart."));
+    column->addWidget(cardRow(tr("Fractional display scaling"),
+                              hidpiFractional_, page,
+                              hidpiFractional_->toolTip()));
+    connect(hidpiEnabled_, &QAbstractButton::toggled, hidpiFractional_,
+            &QWidget::setEnabled);
 
     column->addWidget(sectionHeader(tr("Text"), page));
     fontPreview_ = new QComboBox(page);
@@ -1338,10 +1362,30 @@ void PreferencesDialog::rebuildDeviceCombos() {
     // Default selections: first available GPU / first available CPU.
     if (gpuDevice_->count() > 0) gpuDevice_->setCurrentIndex(0);
     if (cpuDevice_->count() > 0) cpuDevice_->setCurrentIndex(0);
+    // No GPU backend in this binary (portable release builds compile
+    // CUDA/HIP out): say so on the row instead of leaving an empty combo
+    // that reads as broken detection. A stale enabled flag from another
+    // machine heals to off on OK.
+    gpuAvailable_ = gpuDevice_->count() > 0;
+    if (!gpuAvailable_) {
+        gpuDevice_->addItem(tr("No GPU support in this build"));
+        gpuDevice_->setEnabled(false);
+    }
+    if (gpuEnabled_) {
+        if (!gpuAvailable_) {
+            gpuEnabled_->setChecked(false);
+            gpuEnabled_->setEnabled(false);
+            gpuEnabled_->setToolTip(
+                tr("This build was compiled without GPU backends; GPU "
+                   "acceleration needs a local build with a GPU toolchain."));
+        } else {
+            gpuEnabled_->setEnabled(true);
+        }
+    }
 }
 
 void PreferencesDialog::updateGpuEnabled(bool on) {
-    gpuDevice_->setEnabled(on);
+    gpuDevice_->setEnabled(on && gpuAvailable_);
 }
 
 void PreferencesDialog::filterNav(const QString& text) {

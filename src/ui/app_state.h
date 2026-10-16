@@ -1419,6 +1419,14 @@ class AppState : public QObject {
     void beginUndoStep();
     void commitUndoStep(const QString& name, const QString& iconKey);
     void discardUndoStep();
+    // Rewind a live-write gesture: restores the pre-begin snapshot (like
+    // undo) instead of merely dropping it like discardUndoStep() does.
+    // For modal sessions (Color Grade) whose Cancel must leave no trace.
+    void cancelUndoStep();
+    // True while a gesture step is open (between begin and commit/discard).
+    // Panels use this to coalesce a slider drag into one step: begin on
+    // press, live-write through the drag, commit on release.
+    bool undoStepActive() const;
     // Rewind/restore to the previous/next snapshot (undo/redo up to 100 steps).
     // Rebuilds the composite and emits layersChanged + activeLayerChanged +
     // selectionChanged + historyChanged + documentModified. No-op with a status

@@ -70,6 +70,8 @@ void test_settings() {
         in.snapEnabled = false;
         in.snapTargets = 5;  // Guides + DocumentBounds
         in.tabletMode = true;
+        in.hidpiEnabled = false;
+        in.hidpiFractional = false;
         in.cursorShape = 2;
         in.outlineShape = 3;
         in.showOutlineWhilePainting = false;
@@ -147,6 +149,8 @@ void test_settings() {
         CHECK(fresh.snapEnabled == true);
         CHECK(fresh.snapTargets == 31);
         CHECK(fresh.tabletMode == false);
+        CHECK(fresh.hidpiEnabled == true);
+        CHECK(fresh.hidpiFractional == true);
         CHECK(fresh.cursorShape == 0);
         CHECK(fresh.outlineShape == 2);
         CHECK(fresh.showOutlineWhilePainting == true);

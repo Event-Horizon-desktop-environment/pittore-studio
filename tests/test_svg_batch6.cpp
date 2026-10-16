@@ -47,6 +47,12 @@ void test_paint() {
     CHECK(isUserSpaceUnits("userSpaceOnUse"));
     CHECK(!splitImportant("red !important").value.empty());
     CHECK(specificity("#a") > specificity(".b"));
+    const SolidColor sc = parseSolidColorElem("red", "0.5");
+    CHECK(sc.valid);
+    CHECK_NEAR(sc.rgba[0], 1.0f, 1e-6);
+    CHECK_NEAR(sc.rgba[3], 0.5f, 1e-6);
+    CHECK(!parseSolidColorElem("", "").valid);
+    CHECK(!parseSolidColorElem("url(#a)", "").valid);
 }
 
 void test_refs() {

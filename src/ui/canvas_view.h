@@ -2,7 +2,9 @@
 #include <QAbstractScrollArea>
 #include <QCursor>
 #include <QImage>
+#include <QMap>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPointF>
 #include <QRectF>
 #include <QTimer>
@@ -51,6 +53,7 @@ class CanvasView final : public QAbstractScrollArea {
 
   public:
     explicit CanvasView(AppState* state, QWidget* parent = nullptr);
+    ~CanvasView() override;
 
     double zoom() const;
     void setZoom(double zoom, QPointF viewportAnchor = QPointF(-1, -1));
@@ -623,6 +626,11 @@ class CanvasView final : public QAbstractScrollArea {
     qint64 lastPressMs_ = 0;
     QPointF lastPressView_;
     bool lastPressOnCanvas_ = false;
+    // Transparency checker tiles (see paintDocument): per-view cache, not a
+    // function static — a static QPixmap outlives the QApplication on some
+    // teardown paths and corrupts the heap at exit (infinite-zoom tore
+    // down exactly there). A handful of small tiles per view is negligible.
+    QMap<QString, QPixmap> checkerCache_;
     // Last viewport DPR seen by the paint path. Moving the window across
     // mixed-DPR screens changes devicePixelRatioF without any zoom change:
     // tile buckets key on zoomEff (zoom × DPR) so they miss and rebake,

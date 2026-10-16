@@ -5,11 +5,11 @@
 #include "ui/app_state.h"
 #include "ui/tool_registry.h"
 
-class QHBoxLayout;
-
 class QToolButton;
 
 namespace pittore::ui {
+
+class FlowLayout;
 
 // The options bar: settings for the active tool, rebuilt on tool change.
 // Widgets come from OptionSpec rows, so new tools get a bar for free.
@@ -20,6 +20,10 @@ class OptionsBar final : public QFrame {
     explicit OptionsBar(AppState* state, QWidget* parent = nullptr);
 
     QSize sizeHint() const override;
+    // The row wraps when the window is narrow, so the bar is taller the
+    // less width it gets; the parent layout needs both hooks.
+    bool hasHeightForWidth() const override;
+    int heightForWidth(int width) const override;
 
   signals:
     // Bar buttons are commands; the main window runs them (Select Subject, …).
@@ -36,7 +40,7 @@ class OptionsBar final : public QFrame {
     void updateBadge();
 
     AppState* state_;
-    QHBoxLayout* row_ = nullptr;
+    FlowLayout* row_ = nullptr;
     QToolButton* toolBadge_ = nullptr;
 };
 

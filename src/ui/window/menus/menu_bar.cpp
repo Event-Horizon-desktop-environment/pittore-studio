@@ -73,6 +73,22 @@
 
 namespace pittore::ui {
 
+namespace {
+
+// A shown QMenu caches action geometry (see refitBrushMenu in
+// options_bar.cpp): a menu reshown after its content changed can keep the
+// old, shorter box and clip its bottom rows. Recompute from current
+// actions on every open, while the menu is still hidden and adjustSize
+// takes effect. A no-op when the size is already current.
+void refitMenuTree(QMenu* menu) {
+    if (!menu) return;
+    QObject::connect(menu, &QMenu::aboutToShow, menu,
+                     [menu] { menu->adjustSize(); });
+    for (QAction* action : menu->actions())
+        if (action->menu()) refitMenuTree(action->menu());
+}
+
+}  // namespace
 
 void MainWindow::buildMenuBar() {
     buildFileMenu();
@@ -88,6 +104,8 @@ void MainWindow::buildMenuBar() {
     buildPluginsMenu();
     buildWindowMenu();
     buildHelpMenu();
+    for (QAction* top : menuBar()->actions())
+        if (top->menu()) refitMenuTree(top->menu());
 }
 
 }  // namespace pittore::ui

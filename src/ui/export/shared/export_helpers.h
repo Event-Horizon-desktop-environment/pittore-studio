@@ -27,7 +27,7 @@ bool formatWritesDpi(const QString& fmt);
 bool formatWritesIcc(const QString& fmt);
 QStringList availableExportFormats();
 QColorSpace colorSpaceFor(const QString& name);
-QPixmap checkerboard(QSize size);
+QPixmap checkerboard(QSize size, qreal dpr = 1.0);
 QString dimStyle(AppState* state);
 QString presetsFilePath();
 QImage lanczosResample(const QImage& src, QSize dst);

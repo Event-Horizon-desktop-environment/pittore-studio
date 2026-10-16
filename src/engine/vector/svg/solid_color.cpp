@@ -15,4 +15,11 @@ bool solidRgba(const std::string& color, const std::string& opacity,
     return true;
 }
 
+SolidColor parseSolidColorElem(const std::string& color,
+                               const std::string& opacity) {
+    SolidColor sc;
+    sc.valid = solidRgba(color, opacity, sc.rgba);
+    return sc;
+}
+
 }  // namespace pittore::svg

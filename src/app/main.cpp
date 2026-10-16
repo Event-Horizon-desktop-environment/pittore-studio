@@ -10,6 +10,7 @@
 #include "ui/logging.h"
 #include "ui/main_window.h"
 #include "ui/mcp/mcp_bridge.h"
+#include "ui/settings.h"
 #include "ui/theme.h"
 
 namespace {
@@ -32,12 +33,20 @@ int main(int argc, char** argv) {
     if (hasFlag(argc, argv, "--fetch-model"))
         return pittore::ui::ai_model_cli(argc, argv, /*list=*/false);
 
-    // Fractional display scaling (125/150%) rounds to full pixels by
-    // default, blurring the whole UX one notch down. PassThrough keeps
-    // the real scale factor on every screen. Must run before the
-    // QApplication ctor so the first screen query already sees it.
+    // Display scaling from Settings.toml, read before the toolkit starts
+    // (it only honours these at construction). HiDPI off runs the whole
+    // interface unscaled for small screens; otherwise fractional scales
+    // like 125/150% either stay exact or round to whole pixels. An explicit
+    // environment override always wins over the stored preference.
+    pittore::ui::AppSettings early;
+    pittore::ui::loadSettings(early);
+    if (!early.hidpiEnabled &&
+        !qEnvironmentVariableIsSet("QT_ENABLE_HIGHDPI_SCALING"))
+        qputenv("QT_ENABLE_HIGHDPI_SCALING", "0");
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
-        Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+        early.hidpiFractional
+            ? Qt::HighDpiScaleFactorRoundingPolicy::PassThrough
+            : Qt::HighDpiScaleFactorRoundingPolicy::Round);
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("painter"));
     QCoreApplication::setOrganizationName(QStringLiteral("PittoreStudio"));

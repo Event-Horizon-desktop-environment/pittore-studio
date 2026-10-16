@@ -23,6 +23,8 @@
 #include "engine/vector/marker.h"
 #include "engine/vector/pattern.h"
 #include "engine/vector/svg_dom.h"
+#include "engine/vector/svg/important.h"
+#include "engine/vector/svg/specificity.h"
 #include "ui/svg_parts.h"
 
 namespace pittore::ui {
@@ -36,15 +38,40 @@ void inlineStyles(vector::SvgDocument& doc) {
                                        "marker-start",  "marker-mid",   "marker-end",
                                        "clip-path",     "mask",         "filter",
                                        "font-size",     "font-family",  "font-weight",
-                                       "stop-color",    "stop-opacity", nullptr};
+                                       "stop-color",    "stop-opacity", "display",
+                                       "visibility",    nullptr};
         for (int i = 0; kProps[i]; i++) {
-            // Stylesheet wins over attributes: write it back as an attribute
-            // so the downstream parser (attribute-first) sees the cascade.
-            bool inSheet = false;
-            for (auto& rule : doc.stylesheet)
-                if (rule.matches(*el) && rule.decls.count(kProps[i])) inSheet = true;
-            if (!inSheet) continue;
-            if (auto v = doc.resolved(*el, kProps[i])) el->set(kProps[i], *v);
+            // Stylesheet winner per CSS cascade order: !important beats
+            // normal, higher specificity beats lower, later beats earlier on
+            // ties. Written back as an attribute so the downstream parser
+            // (attribute-first) sees the cascade. Layering stays sheet >
+            // style="" > attribute; only rule-vs-rule ordering is fixed here.
+            const std::string prop = kProps[i];
+            bool have = false;
+            bool bestImp = false;
+            int bestSpec = -1;
+            size_t bestOrd = 0;
+            std::string bestVal;
+            size_t ord = 0;
+            for (auto& rule : doc.stylesheet) {
+                ++ord;
+                if (!rule.matches(*el)) continue;
+                const auto dit = rule.decls.find(prop);
+                if (dit == rule.decls.end()) continue;
+                const ::pittore::svg::DeclVal dv =
+                    ::pittore::svg::splitImportant(dit->second);
+                const int spec = ::pittore::svg::specificity(rule.selector);
+                if (!have || (dv.important && !bestImp) ||
+                    (dv.important == bestImp &&
+                     (spec > bestSpec || (spec == bestSpec && ord >= bestOrd)))) {
+                    have = true;
+                    bestImp = dv.important;
+                    bestSpec = spec;
+                    bestOrd = ord;
+                    bestVal = dv.value;
+                }
+            }
+            if (have) el->set(kProps[i], bestVal);
         }
         for (auto& c : el->children) walk(c.get());
     };

@@ -1,5 +1,5 @@
 // Tiled crisp overlay with background baking. Paint/blits run on the GUI
-// thread; tile rasterization runs on the global thread pool from immutable
+// thread; tile rasterization runs on a dedicated pool from immutable
 // geometry snapshots (shared vector nodes plus plain placement values), so
 // a bake racing an edit can only miss its revision pin and be discarded.
 #include "ui/canvas/paint/canvas_tile_store.h"
@@ -13,6 +13,7 @@
 #include <QPainterPath>
 #include <QPointer>
 #include <QRunnable>
+#include <QThread>
 #include <QThreadPool>
 #include <QWidget>
 
@@ -417,9 +418,39 @@ QObject* tileNotifier() {
     return obj;
 }
 
-// True when the crisp recipe reproduces this layer's paint exactly.
+// Dedicated bake pool: tile rasterization must never sit on the global
+// pool. Qt's own smooth-pixmap scaling borrows the global pool inside
+// QPainter::drawImage (the AppImage Qt 6.4 build does), so a zoom frame
+// that both paints tiles and queues tile jobs on that same pool can wedge
+// itself: the GUI holds the store mutex across its draws while every pool
+// thread blocks completing or starting bakes behind that mutex, and the
+// scaling subtasks queued behind them never run. A private pool keeps tile
+// pressure off whatever Qt needs internally. One thread stays free for the
+// GUI and Qt's helpers.
+QThreadPool* tilePool() {
+    static QThreadPool* pool = [] {
+        auto* p = new QThreadPool();
+        const int ideal = QThread::idealThreadCount();
+        const int n = ideal > 1 ? ideal - 1 : 1;
+        p->setMaxThreadCount(qMax(1, n));
+        return p;
+    }();
+    return pool;
+}
+
+// True when the crisp recipe reproduces this layer's paint exactly: the
+// art itself must be opaque and unfiltered, and the layer must composite
+// as plain opaque Normal with no mask, style, filter or clip. Anything
+// fancier keeps the snapshot (which already blends it exactly), because a
+// wrong blit is worse than a soft one — e.g. a 50% footer drawn crisp
+// would print opaque while zoomed in and pop translucent when its tile
+// falls back to the composite.
 bool crispReproducible(const LayerItem& l) {
     if (!l.art) return false;
+    if (l.opacity != 100 || l.fill != 100) return false;
+    if (l.blendMode != QStringLiteral("Normal")) return false;
+    if (l.hasMask || !l.style.empty() || l.clipped) return false;
+    if (l.hasLiveFilter && l.liveFilterEnabled) return false;
     const auto& pt = l.art->paint;
     return pt.patternId.empty() && pt.markerStart.empty() &&
            pt.markerMid.empty() && pt.markerEnd.empty() &&
@@ -431,6 +462,12 @@ bool crispReproducible(const LayerItem& l) {
 // veto instead of leaving "comp" as the whole story.
 const char* crispVetoReason(const LayerItem& l) {
     if (!l.art) return "no-art";
+    if (l.opacity != 100 || l.fill != 100) return "opacity";
+    if (l.blendMode != QStringLiteral("Normal")) return "blend";
+    if (l.hasMask) return "mask";
+    if (!l.style.empty()) return "style";
+    if (l.clipped) return "clip";
+    if (l.hasLiveFilter && l.liveFilterEnabled) return "filter";
     const auto& pt = l.art->paint;
     if (!pt.patternId.empty()) return "pattern";
     if (!pt.markerStart.empty() || !pt.markerMid.empty() ||
@@ -725,6 +762,34 @@ CanvasTileStore& CanvasTileStore::instance() {
     return store;
 }
 
+CanvasTileStore::~CanvasTileStore() {
+    // Static destruction runs after QApplication is gone: drain here too so
+    // no worker can be inside stillWanted() while mutex_ and the maps die.
+    shutdown();
+}
+
+void CanvasTileStore::shutdown() {
+    // Queue first, then in-flight: clear() drops the queued runnables
+    // (autoDelete frees them, so their BakedTile snapshots die here on the
+    // calling thread), waitForDone() blocks until the running bakes post
+    // their completion and exit. After this no TileJob exists, so nothing
+    // races QApplication teardown or this store's own destruction.
+    //
+    // pending_ goes first: it drops the slots of jobs clear() will delete
+    // without ever running (a later paint must re-queue them, not wait on
+    // a completion that can never come) and makes the in-flight bakes
+    // abort at stillWanted() instead of rasterizing for a dead frame.
+    //
+    // mutex_ must NOT be held across the wait: an in-flight bake takes it
+    // in stillWanted() and would deadlock against the GUI thread.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.clear();
+    }
+    tilePool()->clear();
+    tilePool()->waitForDone();
+}
+
 void CanvasTileStore::setEnabled(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);
     enabled_ = on;
@@ -812,27 +877,11 @@ bool CanvasTileStore::paintReady(QPainter& p, const DocumentItem& doc,
         };
     }
 
-    // One shared plan for every tile this frame: a single O(n) sweep, not
-    // one per tile. Tiles replace the composite for their own rect, so they
-    // paint every qualifying vector layer bottom-to-top with no overpaint
-    // hazard - interleaved in true stack order the tile matches the
-    // composite exactly where it is soft and is razor sharp everywhere the
-    // crisp recipe reproduces the paint. No zoom threshold: the same plan
-    // runs at every bucket, high zoom just rasterizes it denser. Layers
-    // whose paint the crisp recipe cannot reproduce exactly (patterns,
-    // markers, meshes, filters, clips) stay on the composite path:
-    // wrong-crisp is worse than soft.
-    std::vector<BakedTile::Layer> planned;
-    bool plannedBuilt = false;
     // Diagnostics for the tiles line: crisp vector layers vs composite
-    // blits carried per missing tile set.
+    // blits carried per missing tile set (filled when the plan builds
+    // below).
     size_t plannedLayers = 0, compLayers = 0, simpleLayers = 0;
-    auto buildPlanned = [&] {
-        if (plannedBuilt) return;
-        plannedBuilt = true;
-        buildTilePlan(doc, vis, planned, plannedLayers, compLayers,
-                      simpleLayers);
-    };
+    std::vector<BakedTile::Layer> planned;
 
     bool allReady = true;
     long readyCount = 0, missingCount = 0, staleCount = 0;
@@ -842,6 +891,23 @@ bool CanvasTileStore::paintReady(QPainter& p, const DocumentItem& doc,
     // One converted-bitmap cache per frame: plain image sources convert
     // once, not once per tile they touch.
     const auto imgCache = std::make_shared<BakedTile::ImgCache>();
+    // Draws collected under the lock, painted after it is released: holding
+    // the store mutex across QPainter::drawImage wedged zoom frames on the
+    // AppImage build (Qt 6.4 borrows the global thread pool inside the
+    // smooth-scaling draw while every pool thread blocked behind this same
+    // mutex). QImage copies are shallow (shared pixels), so this is cheap.
+    struct DrawOp {
+        QRectF dest;
+        QImage img;
+    };
+    std::vector<DrawOp> draws;
+    draws.reserve(64);
+    struct QueueOp {
+        TileKey key;
+        QRectF tileDoc;
+    };
+    std::vector<QueueOp> queues;
+    queues.reserve(64);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++tick_;
@@ -875,7 +941,7 @@ bool CanvasTileStore::paintReady(QPainter& p, const DocumentItem& doc,
                     it->second.bucket == bucket &&
                     densityClose(it->second.density, zoomEff)) {
                     it->second.tick = tick_;
-                    drawTileImage(p, tileDoc, it->second.img);
+                    draws.push_back(DrawOp{tileDoc, it->second.img});
                     ++readyCount;
                     continue;
                 }
@@ -893,55 +959,78 @@ bool CanvasTileStore::paintReady(QPainter& p, const DocumentItem& doc,
                     it->second.bucket <= bucket * 4.0) {
                     const double staleSide = tileDocPxFor(it->second.bucket);
                     it->second.tick = tick_;
-                    drawTileImage(
-                        p, QRectF((qreal)tx * staleSide, (qreal)ty * staleSide,
-                                  staleSide, staleSide),
-                        it->second.img);
+                    draws.push_back(DrawOp{
+                        QRectF((qreal)tx * staleSide, (qreal)ty * staleSide,
+                               staleSide, staleSide),
+                        it->second.img});
                     ++staleCount;
                 }
                 allReady = false;
                 ++missingCount;
+                if (!bucketBakeable) continue;
                 const quint64 rev = doc.revision;
                 const auto pit = pending_.find(key);
                 const bool wanted =
-                    bucketBakeable &&
                     (pit == pending_.end() || pit->second.revision != rev ||
                      pit->second.bucket != bucket ||
                      !densityClose(pit->second.density, zoomEff));
-                if (wanted && (int)pending_.size() < kMaxPendingPerDoc) {
-                    buildPlanned();
-                    BakedTile job;
-                    job.doc = &doc;
-                    job.tx = tx;
-                    job.ty = ty;
-                    job.revision = rev;
-                    job.bucket = bucket;
-                    job.density = zoomEff;
-                    job.docRect = tileDoc;
-                    job.pathCache = pathCache;
-                    job.imgCache = imgCache;
-                    // Composite snapshot backing the composite-tier blits:
-                    // one doc-resolution copy per tile, taken on the GUI
-                    // thread so workers never race a rebuild.
-                    if (!doc.composite.isNull()) {
-                        job.compRect =
-                            tileDoc.toAlignedRect().intersected(
-                                doc.composite.rect());
-                        if (!job.compRect.isEmpty())
-                            job.comp = doc.composite.copy(job.compRect);
-                    }
-                    for (const BakedTile::Layer& b : planned) {
-                        if (b.box.intersects(tileDoc))
-                            job.layers.push_back(b);
-                    }
+                if (wanted) queues.push_back(QueueOp{key, tileDoc});
+            }
+        }
+    }
+    for (const DrawOp& d : draws) drawTileImage(p, d.dest, d.img);
+    // One shared plan for every tile this frame: a single O(n) sweep, not
+    // one per tile. Built unlocked: it only reads the GUI-owned document.
+    if (!queues.empty()) {
+        buildTilePlan(doc, vis, planned, plannedLayers, compLayers,
+                      simpleLayers);
+        for (const QueueOp& q : queues) {
+            BakedTile job;
+            job.doc = &doc;
+            job.tx = q.key.tx;
+            job.ty = q.key.ty;
+            job.revision = doc.revision;
+            job.bucket = bucket;
+            job.density = zoomEff;
+            job.docRect = q.tileDoc;
+            job.pathCache = pathCache;
+            job.imgCache = imgCache;
+            // Composite snapshot backing the composite-tier blits:
+            // one doc-resolution copy per tile, taken on the GUI
+            // thread so workers never race a rebuild.
+            if (!doc.composite.isNull()) {
+                job.compRect = q.tileDoc.toAlignedRect().intersected(
+                    doc.composite.rect());
+                if (!job.compRect.isEmpty())
+                    job.comp = doc.composite.copy(job.compRect);
+            }
+            for (const BakedTile::Layer& b : planned) {
+                if (b.box.intersects(q.tileDoc))
+                    job.layers.push_back(b);
+            }
+            // Re-check under the lock: another frame may have queued this
+            // tile (or filled the pending cap) while the snapshot copied.
+            bool start = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if ((int)pending_.size() >= kMaxPendingPerDoc) break;
+                const auto pit = pending_.find(q.key);
+                if (pit == pending_.end() ||
+                    pit->second.revision != job.revision ||
+                    pit->second.bucket != job.bucket ||
+                    !densityClose(pit->second.density, job.density)) {
                     // The frame that queued the bake owns its repaint: the
                     // callback fires when this bake publishes.
                     pending_.insert_or_assign(
-                        key, Pending{rev, bucket, zoomEff, guarded});
-                    QThreadPool::globalInstance()->start(
-                        new TileJob(std::move(job), tileNotifier()));
+                        q.key,
+                        Pending{job.revision, job.bucket, job.density,
+                                guarded});
+                    start = true;
                 }
             }
+            if (start)
+                tilePool()->start(new TileJob(std::move(job),
+                                              tileNotifier()));
         }
     }
     if (readyCount > 0 || missingCount > 0)

@@ -156,7 +156,10 @@ void Walker::emitRaster(const Node* node, const Mat& ctm, int indent, bool clipp
     }
 
     // Rebuild a live shape ("ShpN") or free path ("PCrv") into pixels.
-void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clipped) {
+    // True when the shape produced a pixel layer (children are then emitted
+    // as clipped rows by finishImageLayer). False when the shape itself had
+    // nothing to paint; the caller may still keep its children.
+bool Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clipped) {
     using namespace pittore::vector;
     const std::uint32_t kind = g.typeTag(node);
     const std::string display = strOf(g, node, "Desc");
@@ -170,7 +173,7 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
         const std::vector<double>* b = f64s(g, node, "ShpB");
         if (!shpe || !b || b->size() < 4) {
             noteSkip(node, "shape has no geometry");
-            return;
+            return false;
         }
         const float x0 = static_cast<float>(std::min((*b)[0], (*b)[2]));
         const float y0 = static_cast<float>(std::min((*b)[1], (*b)[3]));
@@ -180,12 +183,12 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
         const double dh = (y1 - y0) * matScaleY(lctm);
         if (dw < 0.5 || dh < 0.5 || dw > 1e6 || dh > 1e6) {
             noteSkip(node, "shape is degenerate or too large");
-            return;
+            return false;
         }
         auto geo = shapeGeometry(g, shpe, x0, y0, x1, y1);
         if (!geo) {
             noteSkip(node, "shape geometry is not supported");
-            return;
+            return false;
         }
         if (displayName.empty()) displayName = geo->name;
         evenOdd = geo->subpaths.size() > 1;
@@ -196,7 +199,7 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
         auto path = pathFromCurveRecords(g, node, lctm);
         if (!path) {
             noteSkip(node, "path has no curve data");
-            return;
+            return false;
         }
         // Even-odd, so a path layer's nested contours punch holes — unless
         // the curve asks for winding fill: `CvWi` 1 fills same-direction
@@ -214,12 +217,12 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
         auto shape = vectorPaint(g, node, lctm, std::move(draw), evenOdd, gradient);
         if (!shape) {
             noteSkip(node, "vector layer is invisible");
-            return;
+            return false;
         }
         auto img = rasterizeShape(*shape, gradient ? &*gradient : nullptr);
         if (!img) {
             noteSkip(node, "vector shape is empty or too large");
-            return;
+            return false;
         }
         const IntRect rect{img->rect.left, img->rect.top, img->rect.right, img->rect.bottom};
         // Keep the true geometry: shift document-space anchors into the layer's
@@ -234,19 +237,19 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
         rimg.px = std::move(img->rgba);
         finishImageLayer(node, ctm, indent, clipped, displayName, "", std::move(rimg), rect,
                          false, nullptr, std::move(art));
-        return;
+        return true;
     }
 
     std::optional<GradientFill> gradient;
     auto shape = vectorPaint(g, node, lctm, std::move(path), evenOdd, gradient);
     if (!shape) {
         noteSkip(node, "vector layer is invisible");
-        return;
+        return false;
     }
     auto img = rasterizeShape(*shape, gradient ? &*gradient : nullptr);
     if (!img) {
         noteSkip(node, "vector shape is empty or too large");
-        return;
+        return false;
     }
     const IntRect rect{img->rect.left, img->rect.top, img->rect.right, img->rect.bottom};
     // Keep the true geometry: shift document-space anchors into the layer's
@@ -261,6 +264,7 @@ void Walker::emitShape(const Node* node, const Mat& ctm, int indent, bool clippe
     rimg.px = std::move(img->rgba);
     finishImageLayer(node, ctm, indent, clipped, displayName, "", std::move(rimg), rect,
                      false, nullptr, std::move(art));
+    return true;
 }
 
     // Rebuild a text layer ("TxtA" artistic, "TxtF" frame) by re-setting its
@@ -646,7 +650,37 @@ void Walker::emit(const Node* node, const Mat& ctm, int indent, bool clipped) {
         return;
     }
     if (kind == tag4("ShpN") || kind == tag4("PCrv")) {
-        emitShape(node, ctm, indent, clipped);
+        const std::size_t skipBefore = doc.skippedLayers;
+        const std::size_t logBefore = doc.log.size();
+        if (emitShape(node, ctm, indent, clipped)) return;
+        // The shape itself had nothing to paint (unfilled artboard, guide,
+        // transparent container). When it owns children those are the real
+        // content — keep them under a group row instead of dropping the
+        // subtree with the parent. Observed on Designer files where each
+        // page is an unpainted "ShpN" artboard holding text and placed
+        // images.
+        std::vector<Node*> kids = g.children(node, "Chld");
+        if (!kids.empty()) {
+            if (doc.skippedLayers == skipBefore + 1 && doc.log.size() == logBefore + 1) {
+                doc.log.pop_back();
+                doc.skippedLayers = skipBefore;
+            }
+            std::string display = strOf(g, node, "Desc");
+            AfLayer layer;
+            layer.indent = indent;
+            layer.clipped = clipped;
+            layer.isGroup = true;
+            layer.name = display.empty() ? "Group" : display;
+            applyCommon(node, layer);
+            layer.masks = placeMasks(node, ctm);
+            const bool maskedGroup = !layer.masks.empty();
+            doc.layers.push_back(std::move(layer));
+            const Mat childCtm = nodeCtm(node, ctm);
+            if (maskedGroup) ++maskedAncestors;
+            for (Node* ch : kids) emit(ch, childCtm, indent + 1, false);
+            if (maskedGroup) --maskedAncestors;
+            doc.log.push_back("group '" + display + "': unpainted shape kept as container");
+        }
         return;
     }
     if (kind == tag4("TxtA") || kind == tag4("TxtF")) {

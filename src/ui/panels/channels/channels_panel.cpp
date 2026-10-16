@@ -97,10 +97,17 @@ class ChannelsPanel final : public QWidget {
             {"Blue", "Ctrl+5", QColor(0x40, 0x60, 0xd0)},
         };
         for (const auto& ch : channels) {
-            QPixmap swatch(34, 24);
-            swatch.fill(ch.tint);
-            auto* item = new QListWidgetItem(QIcon(swatch),
-                                             QStringLiteral("%1\t%2").arg(ch.name, ch.shortcut));
+            // 1x + 2x bakes so the icons stay crisp on fractional scales.
+            QIcon icon;
+            for (const qreal dpr : {1.0, 2.0}) {
+                QPixmap swatch(qMax(1, qRound(34.0 * dpr)),
+                               qMax(1, qRound(24.0 * dpr)));
+                swatch.setDevicePixelRatio(dpr);
+                swatch.fill(ch.tint);
+                icon.addPixmap(swatch);
+            }
+            auto* item = new QListWidgetItem(
+                icon, QStringLiteral("%1\t%2").arg(ch.name, ch.shortcut));
             item->setForeground(c.text);
             list_->addItem(item);
         }

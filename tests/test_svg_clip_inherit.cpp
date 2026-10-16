@@ -191,6 +191,146 @@ void test_group_transform_maps_clip() {
     CHECK(painted(img) > 1000);
 }
 
+// display="none" culls the element and its subtree, visibility hidden (and
+// inherited hidden) paints nothing, and display:none also arrives through
+// the stylesheet pre-pass. Honored content: no rows, verdict stays clean.
+QByteArray displayNoneSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"120\">"
+        "<style>.gone { display: none; }</style>"
+        "<g id=\"hidden-group\" display=\"none\">"
+        "<rect id=\"h1\" x=\"0\" y=\"0\" width=\"120\" height=\"120\" "
+        "fill=\"#ff0000\"/>"
+        "</g>"
+        "<g id=\"hgroup\" visibility=\"hidden\">"
+        "<rect id=\"hchild\" x=\"0\" y=\"0\" width=\"60\" height=\"60\" "
+        "fill=\"#ff0000\"/>"
+        "</g>"
+        "<rect id=\"shown\" x=\"0\" y=\"0\" width=\"60\" height=\"60\" "
+        "fill=\"#00ff00\"/>"
+        "<rect id=\"styled\" class=\"gone\" x=\"60\" y=\"60\" width=\"60\" "
+        "height=\"60\" fill=\"#0000ff\"/>"
+        "<rect id=\"invis\" x=\"0\" y=\"60\" width=\"60\" height=\"60\" "
+        "fill=\"#ff00ff\" visibility=\"hidden\"/>"
+        "</svg>");
+}
+
+void test_display_none_culls_subtree() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(displayNoneSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    CHECK(findLayer(r, QStringLiteral("hidden-group")) == nullptr);
+    CHECK(findLayer(r, QStringLiteral("h1")) == nullptr);
+    CHECK(findLayer(r, QStringLiteral("hgroup")) == nullptr);
+    CHECK(findLayer(r, QStringLiteral("hchild")) == nullptr);
+    CHECK(findLayer(r, QStringLiteral("styled")) == nullptr);
+    CHECK(findLayer(r, QStringLiteral("invis")) == nullptr);
+    const SvgPartLayer* shown = findLayer(r, QStringLiteral("shown"));
+    CHECK(shown != nullptr);
+    if (!shown) return;
+    CHECK(painted(shown->pixels) > 1000);
+    // Only the shown leaf survives as a pixel row.
+    int leafRows = 0;
+    for (const SvgPartLayer& l : r.layers)
+        if (!l.group && !l.pixels.isNull()) ++leafRows;
+    CHECK_EQ(leafRows, 1);
+}
+
+// clip-rule governs clip children (fill-rule is ignored there): an evenodd
+//nested square knocks a hole, the same geometry as nonzero stays solid.
+QByteArray clipRuleSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"250\" height=\"120\">"
+        "<defs>"
+        "<clipPath id=\"hole\"><path d=\"M10 10 H110 V110 H10 Z "
+        "M40 40 H80 V80 H40 Z\" clip-rule=\"evenodd\"/></clipPath>"
+        "<clipPath id=\"solid\"><path d=\"M140 10 H240 V110 H140 Z "
+        "M170 40 H210 V80 H170 Z\" clip-rule=\"nonzero\"/></clipPath>"
+        "</defs>"
+        "<rect id=\"donut\" x=\"10\" y=\"10\" width=\"100\" height=\"100\" "
+        "clip-path=\"url(#hole)\" fill=\"#c04030\"/>"
+        "<rect id=\"full\" x=\"140\" y=\"10\" width=\"100\" height=\"100\" "
+        "clip-path=\"url(#solid)\" fill=\"#3050c0\"/>"
+        "</svg>");
+}
+
+void test_clip_rule_evenodd_cuts_hole() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(clipRuleSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    CHECK(findLayer(r, QStringLiteral("donut")) != nullptr);
+    CHECK(findLayer(r, QStringLiteral("full")) != nullptr);
+    const QImage img = composite(r);
+    // Donut: painted rim, empty hole.
+    CHECK(qAlpha(img.pixel(20, 20)) > 8);
+    CHECK_EQ(qAlpha(img.pixel(60, 60)), 0);
+    // Nonzero with same winding: the inner square stays painted.
+    CHECK(qAlpha(img.pixel(190, 60)) > 8);
+}
+
+// <a> renders its children like a group; linking has no raster effect.
+QByteArray linkGroupSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"120\">"
+        "<a id=\"link\" xlink:href=\"https://example.invalid/\" "
+        "xmlns:xlink=\"http://www.w3.org/1999/xlink\">"
+        "<rect id=\"linked\" x=\"10\" y=\"10\" width=\"100\" height=\"100\" "
+        "fill=\"#c04030\"/>"
+        "</a>"
+        "</svg>");
+}
+
+void test_link_group_renders_children() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(linkGroupSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    const SvgPartLayer* linked = findLayer(r, QStringLiteral("linked"));
+    CHECK(linked != nullptr);
+    if (!linked) return;
+    CHECK(painted(linked->pixels) > 1000);
+}
+
+// Non-rendered and timed elements are honored silently: metadata, font and
+// color definitions, base-frame animation, and the consumed <style> leave
+// no skip or dangling counts behind.
+QByteArray silentTagsSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"120\">"
+        "<style>.t { fill: #3050c0; }</style>"
+        "<title>silent</title>"
+        "<desc>silent</desc>"
+        "<metadata>silent</metadata>"
+        "<rect id=\"box\" class=\"t\" x=\"10\" y=\"10\" width=\"100\" "
+        "height=\"100\">"
+        "<animate attributeName=\"x\" from=\"10\" to=\"20\" dur=\"1s\"/>"
+        "</rect>"
+        "<animate attributeName=\"opacity\" values=\"1;0\" dur=\"1s\"/>"
+        "<cursor/>"
+        "</svg>");
+}
+
+void test_silent_tags_stay_clean() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(silentTagsSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    CHECK(r.diag.skippedLeaves == 0);
+    CHECK(r.diag.skipTags.isEmpty());
+    CHECK(r.diag.missingRefs.isEmpty());
+    CHECK_EQ(r.diag.imagesDropped, 0);
+    const SvgPartLayer* box = findLayer(r, QStringLiteral("box"));
+    CHECK(box != nullptr);
+    if (!box) return;
+    CHECK(painted(box->pixels) > 1000);
+}
+
 void test_unclipped_leaf_unaffected() {
     // Same shapes with no clip anywhere: the bars must reach the edges, so
     // the clip fix only bites when a clip is actually in effect.
@@ -214,6 +354,41 @@ void test_unclipped_leaf_unaffected() {
     if (bar->art) CHECK(bar->art->paint.clipId.empty());
 }
 
+// <switch> walks the first child whose conditions hold; untaken siblings
+// are alternatives, not loss. An all-failing switch is counted once.
+QByteArray switchSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"120\">"
+        "<switch id=\"sw\">"
+        "<rect id=\"animated\" x=\"10\" y=\"10\" width=\"100\" height=\"100\" "
+        "fill=\"#ff0000\" requiredFeatures=\"http://www.w3.org/TR/SVG11/"
+        "feature#Animation\"/>"
+        "<rect id=\"fallback\" x=\"10\" y=\"10\" width=\"100\" height=\"100\" "
+        "fill=\"#00ff00\"/>"
+        "</switch>"
+        "<switch id=\"empty\">"
+        "<rect id=\"never\" x=\"10\" y=\"10\" width=\"100\" height=\"100\" "
+        "fill=\"#0000ff\" requiredFeatures=\"http://www.w3.org/TR/SVG11/"
+        "feature#Script\"/>"
+        "</switch>"
+        "</svg>");
+}
+
+void test_switch_picks_first_passing_child() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(switchSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    CHECK(findLayer(r, QStringLiteral("animated")) == nullptr);
+    const SvgPartLayer* fallback = findLayer(r, QStringLiteral("fallback"));
+    CHECK(fallback != nullptr);
+    if (!fallback) return;
+    CHECK(painted(fallback->pixels) > 1000);
+    CHECK(findLayer(r, QStringLiteral("never")) == nullptr);
+    CHECK(r.diag.skipTags.contains(QStringLiteral("switch")));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -221,6 +396,11 @@ int main(int argc, char** argv) {
     test_group_clip_cuts_descendants();
     test_leaf_clip_intersects_group_clip();
     test_group_transform_maps_clip();
+    test_display_none_culls_subtree();
+    test_clip_rule_evenodd_cuts_hole();
+    test_link_group_renders_children();
+    test_silent_tags_stay_clean();
+    test_switch_picks_first_passing_child();
     test_unclipped_leaf_unaffected();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),

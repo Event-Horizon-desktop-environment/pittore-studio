@@ -48,6 +48,15 @@ public:
     void setEnabled(bool on);
     qint64 usageBytes() const;
 
+    // Drop every queued bake and wait for the in-flight ones. CanvasView
+    // calls this from its destructor: bakes run on a pool that outlives
+    // QApplication, so a bake still rasterizing during application teardown
+    // races the GUI/fontconfig shutdown (exit-time heap corruption). After
+    // this returns no worker touches Qt or the store. Idempotent; safe to
+    // call from the GUI thread while bakes are mid-flight (they only take
+    // mutex_ in stillWanted, which is not held across the wait).
+    void shutdown();
+
     using ReadySlot = std::function<void()>;
 
     // Blit the baked overlay for the visible region. Returns true when
@@ -92,6 +101,7 @@ public:
 
 private:
     CanvasTileStore() = default;
+    ~CanvasTileStore();
     struct TileKey {
         const DocumentItem* doc = nullptr;
         int tx = 0;

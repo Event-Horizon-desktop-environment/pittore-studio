@@ -7,12 +7,16 @@
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <functional>
+
+#include <algorithm>
+#include <vector>
 
 #include "ui/icons.h"
 #include "ui/tools/log/tool_log.h"
@@ -22,9 +26,16 @@ namespace {
 
 constexpr int kButton = 26;
 constexpr int kIcon = 20;
+// Auto mode may stack up to this many columns on short windows: the
+// smallest whole-strip height a 720p-class screen can still fit with the
+// chrome around it (issue #2). The grip / Preferences still pin one or two.
+constexpr int kMaxColumns = 4;
 // Tablet mode (pen taps): roomier strip targets, same icons.
 constexpr int kTabletButton = 40;
 constexpr int kTabletIcon = 32;
+// Grid gap every decision is measured at; the strip never spreads rows to
+// chase leftover room (that looks gappy) and never scrolls.
+constexpr int kGridSpacing = 4;
 // Hold duration before a press becomes a flyout (replaces DelayedPopup so the
 // menu position is ours, conventional, instead of Qt's below-button default
 // that spills a 38-row flyout over the strip).
@@ -188,6 +199,7 @@ ToolsPanel::ToolsPanel(AppState* state, QWidget* parent) : QFrame(parent), state
     setFrameShape(QFrame::NoFrame);
 
     auto* outer = new QVBoxLayout(this);
+    outer_ = outer;
     outer->setContentsMargins(4, 6, 4, 8);
     outer->setSpacing(4);
 
@@ -197,14 +209,14 @@ ToolsPanel::ToolsPanel(AppState* state, QWidget* parent) : QFrame(parent), state
     grip->setIconSize(QSize(14, 14));
     grip->setToolTip(tr("Toggle one/two column layout"));
     grip->setCursor(Qt::PointingHandCursor);
-    connect(grip, &QToolButton::clicked, this, [this] { setTwoColumn(!twoColumn_); });
+    connect(grip, &QToolButton::clicked, this, [this] { setTwoColumn(!twoColumn()); });
     outer->addWidget(grip, 0, Qt::AlignHCenter);
     grip->setProperty("roleKey", QStringLiteral("columns"));
 
     toolArea_ = new QWidget(this);
     grid_ = new QGridLayout(toolArea_);
     grid_->setContentsMargins(0, 0, 0, 0);
-    grid_->setSpacing(4);
+    grid_->setSpacing(kGridSpacing);
     outer->addWidget(toolArea_, 0, Qt::AlignHCenter);
 
     outer->addStretch(1);
@@ -259,10 +271,73 @@ ToolsPanel::ToolsPanel(AppState* state, QWidget* parent) : QFrame(parent), state
     applyTheme();
 }
 
-void ToolsPanel::setTwoColumn(bool on) {
-    if (twoColumn_ == on) return;
-    twoColumn_ = on;
+void ToolsPanel::setTwoColumn(bool on, bool manual) {
+    twoColumnManual_ = manual;
+    setColumns(on ? 2 : 1);
+}
+
+void ToolsPanel::setColumns(int n) {
+    n = qBound(1, n, kMaxColumns);
+    if (columns_ == n) return;
+    columns_ = n;
     rebuild();
+}
+
+void ToolsPanel::resizeEvent(QResizeEvent* event) {
+    QFrame::resizeEvent(event);
+    updateAutoColumns();
+}
+
+QSize ToolsPanel::minimumSizeHint() const {
+    // Floor at the COMPACT form, not the current one: if the minimum tracked
+    // the live layout, the window could never shrink far enough for
+    // auto-columns to engage — it would stay taller than the screen instead
+    // (issues #2/#4). Automatic mode floors at the quadruple-up form, the
+    // shortest the whole set fits without scrolling. A pinned strip keeps
+    // the doubled floor: that height is the user's own explicit choice.
+    if (sectionSizes_.isEmpty()) return QWidget::minimumSizeHint();
+    if (twoColumnManual_) return {columns_ * kButton + 12, needHeight(2)};
+    return {kMaxColumns * kButton + 12, needHeight(kMaxColumns)};
+}
+
+int ToolsPanel::needHeight(int columns) const {
+    if (sectionSizes_.isEmpty() || !outer_ || !grid_) return 0;
+    // Exact row packing, separators included. Buttons pack densely with no
+    // stranded holes (a new section completes the partial row first), so
+    // the button rows are exactly ceil(total/columns); every separator is
+    // one full row on top of that.
+    int total = 0;
+    for (int s : sectionSizes_) total += s;
+    const int buttonRowCount = (total + columns - 1) / columns;
+    const int gridRows = buttonRowCount + sepRows_;
+    const int gridH = buttonRowCount * buttonSize() + sepRows_ * 1 +
+                      std::max(0, gridRows - 1) * kGridSpacing;
+    int rest = 0;
+    const int n = outer_->count();
+    for (int i = 0; i < n; ++i) {
+        QLayoutItem* item = outer_->itemAt(i);
+        if (!item || item->widget() == toolArea_) continue;
+        rest += item->sizeHint().height();
+    }
+    int top = 0, bottom = 0;
+    outer_->getContentsMargins(nullptr, &top, nullptr, &bottom);
+    return gridH + rest + std::max(0, n - 1) * outer_->spacing() + top + bottom;
+}
+
+void ToolsPanel::updateAutoColumns() {
+    if (twoColumnManual_ || fitting_ || !isVisible() || height() <= 0) return;
+    // Smallest column count that fits: one while it fits, doubling up only
+    // as far as needed (never scrolling) and no further, capped at the
+    // compact floor's count so the strip always fits the minimum window.
+    // The strip stays top-aligned and compact; any leftover room sits above
+    // the pinned footer.
+    int want = 1;
+    while (want < kMaxColumns && needHeight(want) > height()) ++want;
+    if (want == columns_) return;
+    fitting_ = true;
+    columns_ = want;
+    rebuild();
+    fitting_ = false;
 }
 
 QStringList ToolsPanel::hiddenTools() const {
@@ -429,13 +504,45 @@ void ToolsPanel::rebuild() {
     }
     buttons_.clear();
 
-    const int columns = twoColumn_ ? 2 : 1;
+    const int columns = columns_;
     int row = 0;
     int column = 0;
-    ToolSection previous = ToolSection::Selection;
-    bool first = true;
+    bool dividerPending = false;
+    sectionSizes_.clear();
+    sepRows_ = 0;
+
+    // Visible groups up front: the fill-up flow below needs an indexable
+    // list (lookahead for the trailing-divider guard).
+    std::vector<const ToolGroup*> vis;
+    for (const ToolGroup& group : allGroups()) {
+        if (hidden_.contains(static_cast<int>(group.leader))) continue;
+        vis.push_back(&group);
+    }
+    {
+        std::string dump;
+        ToolSection prev = vis.empty() ? ToolSection::Selection : vis[0]->section;
+        int run = 0;
+        for (const ToolGroup* g : vis) {
+            if (g->section != prev) {
+                dump += "[" + std::to_string(run) + "]";
+                prev = g->section;
+                run = 0;
+            }
+            ++run;
+        }
+        dump += "[" + std::to_string(run) + "]";
+        std::fprintf(stderr, "[tools-panel] sections%s columns=%d\n", dump.c_str(),
+                     columns_);
+    }
 
     auto addSeparator = [&] {
+        // A section can end mid-row in two-column mode: finish the partial
+        // row first, otherwise the full-width line lands on top of the
+        // button already sitting at (row, 0).
+        if (column != 0) {
+            ++row;
+            column = 0;
+        }
         auto* line = new QFrame(toolArea_);
         line->setFrameShape(QFrame::NoFrame);
         line->setFixedHeight(1);
@@ -443,22 +550,39 @@ void ToolsPanel::rebuild() {
                                 .arg(cssColor(colorsFor(state_->theme()).divider)));
         grid_->addWidget(line, row, 0, 1, columns);
         ++row;
+        ++sepRows_;
         column = 0;
     };
 
-    for (const ToolGroup& group : allGroups()) {
-        if (hidden_.contains(static_cast<int>(group.leader))) continue;
-
-        if (!first && group.section != previous) addSeparator();
-        first = false;
-        previous = group.section;
+    for (size_t gi = 0; gi < vis.size(); ++gi) {
+        const ToolGroup& group = *vis[gi];
+        const bool lastGroup = (gi + 1 == vis.size());
+        if (gi == 0 || group.section != vis[gi - 1]->section) {
+            // Section boundary. On a fresh row the divider takes its own
+            // row; on a partial row (two-column odd section above) the new
+            // section's buttons first complete the shared row so no hole is
+            // stranded mid-strip, and the divider goes below it.
+            if (gi != 0) {
+                if (columns == 1 || column == 0) {
+                    addSeparator();
+                } else {
+                    dividerPending = true;
+                }
+            }
+            sectionSizes_.append(0);
+        }
 
         QToolButton* button = makeToolButton(group);
         buttons_.insert(static_cast<int>(group.leader), button);
         grid_->addWidget(button, row, column);
+        ++sectionSizes_.last();
         if (++column >= columns) {
             column = 0;
             ++row;
+            // A completed shared row earns its divider — unless this was
+            // the final button, which must never leave a trailing line.
+            if (dividerPending && !lastGroup) addSeparator();
+            dividerPending = false;
         }
     }
     // New buttons start hidden; show them before measuring (layout skips hidden).
@@ -468,8 +592,11 @@ void ToolsPanel::rebuild() {
     grid_->invalidate();
     grid_->activate();
     toolArea_->adjustSize();
-    setFixedWidth(twoColumn_ ? 2 * kButton + 12 : kButton + 12);
+    setFixedWidth(columns_ * kButton + 12);
     tool_log(state_->activeTool(), "tools-panel/rebuild", "done");
+    // Persona switches and tablet-mode changes alter the button count while
+    // the height stands still: re-fit the columns to the current height.
+    if (!fitting_) updateAutoColumns();
 }
 
 void ToolsPanel::applyTheme() {

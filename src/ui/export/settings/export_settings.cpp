@@ -268,7 +268,11 @@ void ExportDialog::applyTargetSize() {
 void ExportDialog::refreshPreview() {
     if (!preview_) return;
     const QSize box(320, 260);
-    QPixmap board = checkerboard(box);
+    // Bake at the label's own ratio: a 1x board shown on a 150/200%
+    // display upscales soft. Logical painting below is untouched.
+    const qreal dpr = preview_->devicePixelRatioF();
+    const qreal useDpr = dpr > 0.0 ? dpr : 1.0;
+    QPixmap board = checkerboard(box, useDpr);
 
     const int target = currentTarget();
     QImage content;

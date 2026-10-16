@@ -138,11 +138,101 @@ void test_gradient_stroke_paints() {
     CHECK(out.find("stop-color=\"#ff0000\"") != std::string::npos);
 }
 
+// Single-colour paint server: fill="url(#sc)" paints the flattened colour
+// with its opacity; a dangling ref keeps inherited paint and is reported.
+QByteArray solidFillSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">"
+        "<defs>"
+        "<solidcolor id=\"sc\" solid-color=\"#ff0000\" solid-opacity=\"0.5\"/>"
+        "</defs>"
+        "<rect id=\"solid\" x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"url(#sc)\"/>"
+        "<rect id=\"dangling\" x=\"10\" y=\"60\" width=\"80\" height=\"30\" fill=\"url(#nope)\"/>"
+        "</svg>");
+}
+
+void test_solidcolor_fill() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(solidFillSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+
+    const SvgPartLayer* solid = findLayer(r, QStringLiteral("solid"));
+    const SvgPartLayer* dangling = findLayer(r, QStringLiteral("dangling"));
+    CHECK(solid != nullptr);
+    CHECK(dangling != nullptr);
+    if (!solid || !dangling) return;
+
+    CHECK(painted(solid->pixels) > 1000);
+    CHECK(hasRed(solid->pixels));
+    // Half-alpha red over transparency: centre sample lands near 128.
+    const int lx = 50 - qRound(solid->offset.x());
+    const int ly = 50 - qRound(solid->offset.y());
+    CHECK(lx >= 0 && ly >= 0 && lx < solid->pixels.width() &&
+          ly < solid->pixels.height());
+    if (lx >= 0 && ly >= 0 && lx < solid->pixels.width() &&
+        ly < solid->pixels.height()) {
+        const QColor c = solid->pixels.pixelColor(lx, ly);
+        CHECK(c.red() > 200);
+        CHECK(c.alpha() > 90 && c.alpha() < 170);
+    }
+    // Dangling server: inherited paint still draws, miss is reported.
+    CHECK(painted(dangling->pixels) > 100);
+    CHECK(r.diag.missingRefs.contains(QStringLiteral("fill#nope")));
+}
+
+// Stylesheet cascade through the normalize pre-pass: id beats class beats
+// tag (specificity), and !important beats all of them.
+QByteArray cascadeSvg() {
+    return QByteArray(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">"
+        "<style>"
+        "#winner { fill: #ff0000; } "
+        "#imp { fill: #ff00ff !important; } "
+        "rect { fill: #0000ff; } "
+        ".hot { fill: #00ff00; }"
+        "</style>"
+        "<rect id=\"winner\" class=\"hot\" x=\"10\" y=\"10\" width=\"30\" height=\"30\"/>"
+        "<rect id=\"plain\" x=\"50\" y=\"10\" width=\"30\" height=\"30\"/>"
+        "<rect id=\"imp\" class=\"hot\" x=\"10\" y=\"50\" width=\"30\" height=\"30\"/>"
+        "</svg>");
+}
+
+void checkFill(const SvgPartLayer* l, int rLo, int rHi, int gLo, int gHi,
+               int bLo, int bHi) {
+    CHECK(l != nullptr);
+    CHECK(l->art != nullptr);
+    if (!l || !l->art) return;
+    const auto& f = l->art->paint.fill;
+    CHECK(l->art->paint.hasFill);
+    CHECK(f[0] >= rLo && f[0] <= rHi);
+    CHECK(f[1] >= gLo && f[1] <= gHi);
+    CHECK(f[2] >= bLo && f[2] <= bHi);
+}
+
+void test_sheet_cascade() {
+    SvgImportResult r;
+    int dpi = 96;
+    QString error;
+    CHECK(svgPartsImport(cascadeSvg(), &r, &dpi, &error));
+    CHECK(error.isEmpty());
+    CHECK(r.diag.normNote == QStringLiteral("expanded"));
+    // #winner (100) beats .hot (10) beats rect (1): red.
+    checkFill(findLayer(r, QStringLiteral("winner")), 200, 255, 0, 100, 0, 100);
+    // Tag rule alone: blue.
+    checkFill(findLayer(r, QStringLiteral("plain")), 0, 100, 0, 100, 200, 255);
+    // !important magenta beats the class green.
+    checkFill(findLayer(r, QStringLiteral("imp")), 200, 255, 0, 100, 200, 255);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     test_gradient_stroke_paints();
+    test_solidcolor_fill();
+    test_sheet_cascade();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),
                 pittore_test::failures());

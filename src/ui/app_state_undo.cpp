@@ -141,6 +141,23 @@ void AppState::discardUndoStep() {
     if (DocumentItem* d = activeDocument()) d->discardUndoAction();
 }
 
+bool AppState::undoStepActive() const { return undoGestureDepth_ > 0; }
+
+void AppState::cancelUndoStep() {
+    if (undoGestureDepth_ == 0) return;
+    if (--undoGestureDepth_ != 0) return;  // an inner step stays in the gesture
+    if (DocumentItem* d = activeDocument()) {
+        if (d->pendingUndo_) d->restoreSnapshot(*d->pendingUndo_);
+        d->dirty = true;
+        d->rebuildComposite();
+        emit activeLayerChanged();
+        emit layersChanged();
+        emit selectionChanged();
+        emit historyChanged();
+        emit documentModified(d);
+    }
+}
+
 bool AppState::canUndo() const {
     const DocumentItem* d = activeDocument();
     return d && d->canUndo();

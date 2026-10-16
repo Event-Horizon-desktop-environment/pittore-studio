@@ -125,6 +125,9 @@ struct SvgShapeRef {
 };
 struct SvgResources {
     QHash<QString, std::shared_ptr<SvgGradient>> grads;
+    // Single-color paint servers (`<solidcolor>`): id to resolved flat
+    // colour. Flattens at the fill site like a one-stop gradient.
+    QHash<QString, QColor> solids;
     QHash<QString, SvgPatternCell> patterns;
     QHash<QString, SvgMarkerCell> markers;
     QHash<QString, SvgClipCell> clips;

@@ -23,6 +23,10 @@ struct WorkspaceSnapshot {
     QStringList visiblePanels;
     QStringList hiddenTools;
     bool twoColumnTools = false;
+    // True when the column count was an explicit choice (grip toggle,
+    // Preferences): restores keep it, otherwise the strip auto-fits and old
+    // snapshots without this key auto-fit too.
+    bool twoColumnManual = false;
     bool includeShortcuts = false;
     bool includeMenus = false;
     bool includeToolbar = true;
