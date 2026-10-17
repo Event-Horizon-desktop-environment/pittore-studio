@@ -422,13 +422,26 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     }
     const Mat lctm = nodeCtm(node, ctm);
     const bool rotated = !matAxisAligned(lctm);
-    const double docScale = std::max(std::hypot(lctm.m[1], lctm.m[4]), 1e-6);
+    // The run size and frame box are units of the text node's own space;
+    // every transform above it — including one that stretches the axes
+    // differently (the Disney cards carry a 1.5-y artboard under a 0.837-y
+    // text scale) — belongs to the placed raster, not to the glyph size.
+    // Layout therefore happens in a uniform layout space at the larger axis
+    // scale, and the recorded warp resamples the result. Baking a net axis
+    // scale into the size itself would widen the advances as well.
+    double docScale = std::max(std::hypot(lctm.m[1], lctm.m[4]), 1e-6);
+    const double frmWl = std::abs((*frmb)[2] - (*frmb)[0]);
+    const double frmHl = std::abs((*frmb)[3] - (*frmb)[1]);
+    bool stretched = false;
+    if (!rotated) {
+        const double netX = std::hypot(lctm.m[0], lctm.m[3]);
+        stretched = std::abs(netX - docScale) > 0.004 * std::max(netX, docScale);
+        docScale = std::max(netX, docScale);
+    }
     int frameLeft = 0, frameTop = 0, frameWidth = 0, frameHeight = 0;
     if (rotated) {
-        frameWidth =
-            static_cast<int>(std::llround(std::abs((*frmb)[2] - (*frmb)[0]) * docScale));
-        frameHeight =
-            static_cast<int>(std::llround(std::abs((*frmb)[3] - (*frmb)[1]) * docScale));
+        frameWidth = static_cast<int>(std::llround(frmWl * docScale));
+        frameHeight = static_cast<int>(std::llround(frmHl * docScale));
     } else {
         const auto p0 = matApply(lctm, (*frmb)[0], (*frmb)[1]);
         const auto p1 = matApply(lctm, (*frmb)[2], (*frmb)[1]);
@@ -440,10 +453,13 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         const double maxy = std::max({p0.second, p1.second, p2.second, p3.second});
         frameLeft = static_cast<int>(std::llround(minx));
         frameTop = static_cast<int>(std::llround(miny));
-        frameWidth = static_cast<int>(std::llround(maxx - minx));
-        frameHeight = static_cast<int>(std::llround(maxy - miny));
+        // In layout units, so the wrap needs no further conversion.
+        frameWidth = static_cast<int>(std::llround(stretched ? frmWl * docScale
+                                                             : maxx - minx));
+        frameHeight = static_cast<int>(std::llround(stretched ? frmHl * docScale
+                                                              : maxy - miny));
     }
-    const float effSize = static_cast<float>(size * std::hypot(lctm.m[1], lctm.m[4]));
+    const float effSize = static_cast<float>(size * docScale);
     if (!(effSize >= 0.5f && effSize <= 10000.0f)) {
         noteSkip(node, "text size is out of range");
         return;
@@ -581,11 +597,11 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     IntRect rect;
     const int bx = raster->bounds.left + ox;
     const int by = raster->bounds.top + oy;
-    // A non-rotated layer can be handed back to the UI as a live spec: the
-    // origin the editable render expects is the frame's left for wrapped
-    // (frame) text, and the pen box for artistic text.
+    // A non-rotated, unstretched layer can be handed back to the UI as a
+    // live spec: the origin the editable render expects is the frame's left
+    // for wrapped (frame) text, and the pen box for artistic text.
     TextPayload payload;
-    const bool editable = !rotated;
+    const bool editable = !rotated && !stretched;
     if (editable) {
         payload.spec = spec;
         payload.originX =
@@ -608,6 +624,44 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         auto placed = affineResample(img, map);
         if (!placed) {
             noteSkip(node, "text rotation failed");
+            return;
+        }
+        img = std::move(placed->img);
+        rect = placed->rect;
+    } else if (stretched) {
+        // The ink offsets computed above are canvas coords for a uniform
+        // placement; here the anchor is the frame's own corner in layout
+        // space (frameLeft/Top are 0 there), then the recorded warp places
+        // it — like the rotation branch, without the shear components.
+        int px = 0, py = 0;
+        if (raster->layoutWidth > 1.0f) {
+            const int lw = static_cast<int>(std::llround(raster->layoutWidth));
+            if (spec.align == pittore::text::Align::Center && frameWidth > 8)
+                px = (frameWidth - lw) / 2;
+            else if (spec.align == pittore::text::Align::Right && frameWidth > 8)
+                px = frameWidth - lw;
+        } else {
+            px = -raster->bounds.left;
+        }
+        if (!frameText && raster->firstBaseline > 0.0f) {
+            const std::size_t n = lineCount > 0 ? lineCount : 1;
+            const float lastBaseline =
+                raster->firstBaseline + static_cast<float>(n - 1) * raster->lineAdvance;
+            py = frameHeight - static_cast<int>(std::llround(lastBaseline));
+        } else {
+            py = -raster->bounds.top;
+        }
+        const auto c0 = matApply(lctm, std::min((*frmb)[0], (*frmb)[2]),
+                                 std::min((*frmb)[1], (*frmb)[3]));
+        const double inv = 1.0 / docScale;
+        const Mat lin{{lctm.m[0] * inv, 0.0, 0.0, lctm.m[3] * inv, lctm.m[4] * inv, 0.0}};
+        const auto o = matApply(lin, static_cast<double>(raster->bounds.left + px),
+                                static_cast<double>(raster->bounds.top + py));
+        const Mat map{{lin.m[0], lin.m[1], o.first + c0.first, lin.m[3], lin.m[4],
+                       o.second + c0.second}};
+        auto placed = affineResample(img, map);
+        if (!placed) {
+            noteSkip(node, "text placement failed");
             return;
         }
         img = std::move(placed->img);

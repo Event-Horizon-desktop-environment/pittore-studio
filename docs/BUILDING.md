@@ -149,6 +149,28 @@ Check what a configured build picked up:
 just backends
 ```
 
+## Build cache (ccache)
+
+Install `ccache` and cold rebuilds (fresh `meson setup`, branch switches,
+CI) replay from the compiler cache instead of recompiling. Nothing here is
+required for a working build; when the tool is absent everything compiles
+directly as before.
+
+- C/C++: opt in explicitly, because meson does not use ccache on its own
+  and a stale cached wrapper would break rebuilds (see `build.sh`):
+
+  ```sh
+  CC='ccache gcc' CXX='ccache g++' ./build.sh
+  ```
+
+- CUDA and HIP kernels: picked up automatically, no flags needed — the
+  kernel targets locate `ccache` themselves and wrap `nvcc` / `hipcc`
+  when it is on PATH. The CI packaging jobs rely on this to reuse the
+  multi-arch fat-object compile between runs.
+
+`ccache` runs the real compiler for anything it cannot cache, so a
+combination it does not support only costs time, never output.
+
 ## Commands
 
 The `justfile` wraps the common operations. Install `just` from your

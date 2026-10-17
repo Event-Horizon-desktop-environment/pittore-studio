@@ -27,6 +27,14 @@ compute_sources = files(
 compute_args = []
 compute_deps = []
 
+# Kernel TUs compile through nvcc / hipcc in custom_target commands, which
+# meson's compiler setup never touches — neither does a CC/CXX wrapper set by
+# a CI job. Wrap them in ccache here instead, when it exists: on CI, repeat
+# builds of unchanged kernel sources then reuse the fat-object compile across
+# runs. ccache executes the real compiler for anything it cannot cache, so an
+# unsupported combination changes no output.
+kernel_ccache = find_program('ccache', required : false)
+
 # --- CUDA backend (NVIDIA) ------------------------------------------------
 # Meson's cuda language hunts for nvcc on PATH only (no env var, no extra
 # search dirs), while toolkit installers put it in /usr/local/cuda/bin
@@ -51,6 +59,10 @@ if cuda_feature.allowed()
   if nvcc.found()
     if cuda_root == ''
       cuda_root = fs.parent(fs.parent(nvcc.full_path()))
+    endif
+    nvcc_cmd = [nvcc]
+    if kernel_ccache.found()
+      nvcc_cmd = [kernel_ccache, nvcc]
     endif
     compute_args += '-DPITTORE_HAS_CUDA=1'
     pittore_cuda_enabled = true
@@ -131,7 +143,7 @@ if cuda_feature.allowed()
     cuda_obj = custom_target('cuda_backend_obj',
       input : files('cuda_backend.cu'),
       output : 'cuda_backend.o',
-      command : [nvcc, '-c',
+      command : nvcc_cmd + ['-c',
                  '-std=c++20',
                  '--expt-relaxed-constexpr',
                  '-DPITTORE_HAS_CUDA=1',
@@ -173,6 +185,10 @@ if hip_feature.allowed()
   if hipcc.found()
     if hip_root == ''
       hip_root = fs.parent(fs.parent(hipcc.full_path()))
+    endif
+    hipcc_cmd = [hipcc]
+    if kernel_ccache.found()
+      hipcc_cmd = [kernel_ccache, hipcc]
     endif
     compute_args += '-DPITTORE_HAS_HIP=1'
     pittore_hip_enabled = true
@@ -231,7 +247,7 @@ if hip_feature.allowed()
     hip_backend_obj = custom_target('hip_backend_obj',
       input : files('hip_backend.cpp'),
       output : 'hip_backend.hip.o',
-      command : [hipcc, '-c',
+      command : hipcc_cmd + ['-c',
                  '-DPITTORE_HAS_HIP=1',
                  '-std=c++20',
                  '-fPIC',
@@ -246,7 +262,7 @@ if hip_feature.allowed()
     hip_plugin_obj = custom_target('hip_plugin_obj',
       input : files('hip_plugin.cpp'),
       output : 'hip_plugin.o',
-      command : [hipcc, '-c',
+      command : hipcc_cmd + ['-c',
                  '-DPITTORE_HAS_HIP=1',
                  '-std=c++20',
                  '-fPIC',

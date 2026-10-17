@@ -589,18 +589,12 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     doc->colorMode = QStringLiteral("RGB/8");
     doc->importSourcePath = QFileInfo(path).absoluteFilePath();
 
-    // The embedded flattened preview is ground truth for whatever the decoder
-    // could not rebuild (a deleted linked file, an unsupported layer kind), so
-    // it is never discarded. It becomes the VISIBLE base only when no pixel
-    // layer was recovered at all — a pure vector/group tree, or a document
-    // with no raster content — because there is then nothing else to render.
-    //
-    // Otherwise the recovered layers ARE the canvas: they keep the file's own
-    // visibility so an enabled layer opens enabled, and the preview sits in
-    // the panel as a hidden bottom row for the skipped content. Hiding the
-    // recovered stack behind the preview (what this did when any layer was
-    // skipped) cost the whole layer list its state and left only a
-    // full-resolution-less preview on screen.
+    // The embedded flattened preview is never imported as a panel layer, in
+    // any state: over a recovered stack it is a redundant raster duplicate of
+    // the same content, and with nothing recovered it would be a
+    // low-resolution stand-in for content the decoder could not rebuild. The
+    // document opens with exactly the recovered tree (possibly empty) and the
+    // drop is reported in the log.
     bool hasPixelLayer = false;
     for (const pittore::io::AfLayer& l : pd.layers)
         if (!l.isGroup && !l.rgba.empty()) {
@@ -609,7 +603,6 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         }
     const bool hasFlat = !flattenedBase.isNull() && flattenedBase.width() > 0 &&
                          flattenedBase.height() > 0;
-    const bool useFlatBase = hasFlat && !hasPixelLayer;
 
     // Same nesting emission as openPsdLayers: layers are file order (bottom →
     // top); the panel wants top-first with group folders above their children.
@@ -634,9 +627,8 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         if (li.name.isEmpty()) li.name = l.isGroup ? tr("Group") : tr("Layer");
         li.kind = l.isGroup ? LayerItem::Kind::Group : LayerItem::Kind::Pixel;
         li.isText = !l.isGroup && l.isText;
-        // Behind the flattened base there is nothing to show; otherwise the
-        // layer opens exactly as the file recorded it, enabled or not.
-        li.visible = useFlatBase ? false : l.visible;
+        // The layer opens exactly as the file recorded it, enabled or not.
+        li.visible = l.visible;
         li.opacity = qBound(1, qRound(l.opacity * 100.0 / 255.0), 100);
         li.blendMode = QString::fromStdString(l.blend);
         if (li.blendMode.isEmpty()) li.blendMode = QStringLiteral("Normal");
@@ -775,58 +767,34 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         };
     for (int i = roots.size() - 1; i >= 0; --i) emitNode(roots[i], 1.0, false);
 
-    // Ground-truth base: the flattened render, scaled to fill the canvas.
-    // Kept only when it carries information the recovered stack lacks: the
-    // render itself (nothing else recovered) or the reference copy of
-    // skipped content. A clean import drops it instead of leaving a
-    // confusing extra row in the panel. Both incomplete signals count:
-    // skippedLayers is the authoritative count, while complete==false covers
-    // docs that predate the counter (the codec defines complete as
-    // skippedLayers==0, so they agree on real decodes).
-    const bool keepFlat =
-        hasFlat && (useFlatBase || pd.skippedLayers > 0 || !pd.complete);
-    if (keepFlat) {
-        // Ground-truth base: the flattened render, scaled to fill the canvas.
-        LayerItem base;
-        base.name = tr("Background (flattened)");
-        base.kind = LayerItem::Kind::Pixel;
-        // It IS the render when nothing else was recovered; otherwise it is
-        // the reference copy of whatever the decoder had to skip, so it stays
-        // in the panel instead of being discarded — just not in the way.
-        base.visible = useFlatBase;
-        base.opacity = 100;
-        base.blendMode = QStringLiteral("Normal");
-        base.indent = 0;
-        base.groupExpanded = false;
-        base.offset = QPointF(0, 0);
-        base.scaleX = double(dw) / double(flattenedBase.width());
-        base.scaleY = double(dh) / double(flattenedBase.height());
-        auto px = straightRgba64ToImage(flattenedBase);
-        if (px) {
-            base.pixels = std::move(px);
-            ++base.sourceStamp;
-        }
-        panel.append(base);
-        if (useFlatBase) {
-            ::pittore::core::log::log_info(
-                "[import] AF %s: no recovered pixel layers; flattened base "
-                "(%dx%d -> canvas %dx%d) is the render",
-                QFileInfo(path).fileName().toUtf8().constData(),
-                flattenedBase.width(), flattenedBase.height(), dw, dh);
-        } else {
+    // The embedded flattened preview is dropped in every state: the recovered
+    // tree IS the document, and a preview row under it — a hidden reference
+    // copy when something was skipped, the visible render when nothing
+    // was — is a stray row the panel must never show. The drop is reported
+    // here; the per-node skip notes above already name what was not rebuilt.
+    if (hasFlat && hasPixelLayer) {
+        if (pd.skippedLayers > 0) {
             ::pittore::core::log::log_info(
                 "[import] AF %s: %zu recovered layers shown with the file's own "
-                "visibility; flattened preview (%dx%d -> canvas %dx%d) kept as a "
-                "hidden layer for the %d skipped",
-                QFileInfo(path).fileName().toUtf8().constData(), pd.layers.size(),
-                flattenedBase.width(), flattenedBase.height(), dw, dh,
+                "visibility; flattened preview (%dx%d) dropped — %d skipped "
+                "layers are named above and exist only in that preview",
+                QFileInfo(path).fileName().toUtf8().constData(),
+                pd.layers.size(), flattenedBase.width(), flattenedBase.height(),
                 pd.skippedLayers);
+        } else {
+            ::pittore::core::log::log_info(
+                "[import] AF %s: all %zu layers recovered, nothing skipped; "
+                "flattened preview (%dx%d) dropped",
+                QFileInfo(path).fileName().toUtf8().constData(),
+                pd.layers.size(), flattenedBase.width(), flattenedBase.height());
         }
     } else if (hasFlat) {
         ::pittore::core::log::log_info(
-            "[import] AF %s: all %zu layers recovered, nothing skipped; "
-            "flattened preview dropped",
-            QFileInfo(path).fileName().toUtf8().constData(), pd.layers.size());
+            "[import] AF %s: no pixel content recovered (%zu rows, %d "
+            "skipped); flattened preview (%dx%d) dropped — document opens "
+            "with the recovered tree only",
+            QFileInfo(path).fileName().toUtf8().constData(), pd.layers.size(),
+            pd.skippedLayers, flattenedBase.width(), flattenedBase.height());
     } else {
         ::pittore::core::log::log_info(
             "[import] AF %s: no flattened base, showing recovered layers",
@@ -835,7 +803,9 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
 
     doc->layers = std::move(panel);
     doc->selectedLayers.clear();
-    doc->activeLayer = 0;
+    // Empty trees are legal (nothing recoverable); -1 keeps the active-layer
+    // accessors out of an out-of-range index until a layer is added.
+    doc->activeLayer = doc->layers.isEmpty() ? -1 : 0;
     deriveCanvasPaper(*doc);
     doc->dirty = false;
     doc->rebuildComposite();

@@ -17,15 +17,26 @@ env:
 
 jobs:
   test:
-    name: build (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
+    name: build (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v6
+      # ccache carries compiled objects across runs: restore keys match any
+      # recent same-platform cache (this job populates; the packaging jobs run
+      # after it via `needs` and reuse the hit set). Each job re-saves under a
+      # run-unique key so misses propagate; old entries rotate out with the
+      # repo's cache quota.
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-ubuntu-test-${{ github.run_id }}
+          restore-keys: ccache-ubuntu-
       - name: Install dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config ccache \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
             libtomlplusplus-dev liblcms2-dev \
             qt6-base-dev libqt6svg6-dev \
@@ -35,7 +46,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -48,10 +59,13 @@ jobs:
           # small hip-runtime-amd package instead of any toolkit.
           curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
-          # outranks AMD's (1.1.1) by version number; without this apt
-          # mixes the two stacks and the old compiler rejects new GPU
-          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          # AMD publishes the 7.2 apt line for jammy and noble only; the
+          # noble-stage packages are forward-compatible on this runner
+          # (newer libc, self-contained toolchain). Ubuntu's universe may
+          # carry its own ROCm copy with version numbers outranking AMD's;
+          # pin AMD's repo above everything so apt cannot mix two stacks
+          # — a mixed stack ships an old hipcc that rejects new GPU
+          # targets.
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
@@ -64,6 +78,13 @@ jobs:
           fc-cache -f
       - name: Configure
         run: meson setup build ${{ env.MESON_OPTS }}
+        env:
+          # ccache wraps the host toolchain (kernel targets get their own
+          # ccache via compute/meson.build). A plain toolchain keeps working
+          # unchanged wherever ccache is absent.
+          CC: 'ccache gcc'
+          CXX: 'ccache g++'
+          CCACHE_MAXSIZE: 1500M
       - name: Build
         run: |
           set -euo pipefail
@@ -73,21 +94,30 @@ jobs:
           [ "$j" -gt "$n" ] && j=$n
           echo "Building with -j$j"
           ninja -C build -j"$j"
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
       # Tests are disabled in CI: the full meson suite (notably the heavy
       # UI cases like tools-ux) times out on hosted runners. They still run
       # locally via `just test`, which stays the pre-merge gate.
 
   deb:
-    name: deb (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
+    name: deb (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
     needs: test
     steps:
       - uses: actions/checkout@v6
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-ubuntu-deb-${{ github.run_id }}
+          restore-keys: ccache-ubuntu-
       - name: Install dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config ccache \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
             libtomlplusplus-dev liblcms2-dev \
             qt6-base-dev libqt6svg6-dev \
@@ -97,7 +127,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -110,10 +140,13 @@ jobs:
           # small hip-runtime-amd package instead of any toolkit.
           curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
-          # outranks AMD's (1.1.1) by version number; without this apt
-          # mixes the two stacks and the old compiler rejects new GPU
-          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          # AMD publishes the 7.2 apt line for jammy and noble only; the
+          # noble-stage packages are forward-compatible on this runner
+          # (newer libc, self-contained toolchain). Ubuntu's universe may
+          # carry its own ROCm copy with version numbers outranking AMD's;
+          # pin AMD's repo above everything so apt cannot mix two stacks
+          # — a mixed stack ships an old hipcc that rejects new GPU
+          # targets.
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
@@ -150,28 +183,42 @@ jobs:
           Depends: libc6, libstdc++6, libqt6widgets6, libqt6network6, libqt6svg6, zlib1g, libharfbuzz0b, libfreetype6, libfontconfig1, liblcms2-2, libwebp7, libtiff6, libjpeg-turbo8, libzstd1, libqrencode4, libtomlplusplus3t64
           Recommends: hip-runtime-amd
           EOF
+        env:
+          # ccache wraps the host toolchain; meson resolves these at setup.
+          CC: 'ccache gcc'
+          CXX: 'ccache g++'
+          CCACHE_MAXSIZE: 1500M
       - name: Pack deb
         run: |
           set -euo pipefail
           dpkg-deb --build staging "dist/pittore-studio_${VERSION}_amd64.deb"
           ls -l dist
-      - uses: actions/upload-artifact@v5
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+      - uses: actions/upload-artifact@v7
         with:
           name: deb
           path: dist/*.deb
 
   rpm:
     name: rpm (Fedora 44)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: test
     container:
       image: fedora:44
     steps:
       - uses: actions/checkout@v6
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-fedora-rpm-${{ github.run_id }}
+          restore-keys: ccache-fedora-
       - name: Install dependencies
         run: |
           set -euo pipefail
-          dnf -y install gcc-c++ meson ninja-build git pkgconf rpm-build tar gzip \
+          dnf -y install gcc-c++ meson ninja-build git pkgconf rpm-build tar gzip ccache \
             zlib-ng-compat-devel harfbuzz-devel freetype-devel fontconfig-devel \
             tomlplusplus-devel lcms2-devel \
             qt6-qtbase-devel qt6-qtsvg-devel \
@@ -217,6 +264,12 @@ jobs:
             VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Reuse toolchain work across runs: C/C++ through ccache (meson
+          # resolves these env vars at setup; rpmbuild passes its environment
+          # into the %build script). Cache under the workspace: the post-job
+          # cache save runs on the host and cannot reach a container HOME.
+          export CC='ccache gcc' CXX='ccache g++'
+          export CCACHE_DIR="$PWD/.ccache" CCACHE_MAXSIZE=1500M
           mkdir -p dist rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           sed -e "s/^Version:.*/Version:        $VERSION/" packaging/rpm/pittore-studio.spec > rpmbuild/SPECS/pittore-studio.spec
           # rpmbuild %prep expects a source tarball; pack the checked-out
@@ -225,24 +278,35 @@ jobs:
           tar -czf "rpmbuild/SOURCES/pittore-studio-$VERSION.tar.gz" \
             --transform "s,^,pittore-studio-$VERSION/," \
             --exclude=./build --exclude=./rpmbuild --exclude=./dist \
-            --exclude=./.git .
+            --exclude=./.ccache --exclude=./.git .
           rpmbuild -bb --define "_topdir $PWD/rpmbuild" --define "_version $VERSION" rpmbuild/SPECS/pittore-studio.spec
           cp rpmbuild/RPMS/x86_64/*.rpm dist/
           ls -l dist
-      - uses: actions/upload-artifact@v5
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm
           path: dist/*.rpm
 
   arch:
     name: pacman package (Arch)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: test
     container:
       image: archlinux:latest
       options: --privileged
     steps:
       - uses: actions/checkout@v6
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-arch-pkg-${{ github.run_id }}
+          restore-keys: ccache-arch-
       - name: Build pacman package
         run: |
           set -euo pipefail
@@ -253,7 +317,7 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed base-devel meson ninja git pkgconf sudo \
+          pacman -S --noconfirm --needed base-devel meson ninja git pkgconf sudo ccache \
             zlib harfbuzz freetype2 fontconfig tomlplusplus lcms2 \
             qt6-base qt6-svg \
             libwebp libtiff libjpeg-turbo zstd qrencode \
@@ -268,29 +332,42 @@ jobs:
           tar -czf "pkgwork/pittore-studio-$VERSION.tar.gz" \
             --transform "s,^,pittore-studio-$VERSION/," \
             --exclude=./build --exclude=./pkgwork --exclude=./dist \
-            --exclude=./.git .
+            --exclude=./.ccache --exclude=./.git .
           sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" pkgwork/PKGBUILD
           chown -R builder:builder "$PWD"
           cd pkgwork
-          sudo -u builder makepkg --syncdeps --noconfirm --needed
+          sudo -u builder env CC='ccache gcc' CXX='ccache g++' \
+            CCACHE_DIR="$GITHUB_WORKSPACE/.ccache" CCACHE_MAXSIZE=1500M \
+            makepkg --syncdeps --noconfirm --needed
           cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
           ls -l "$GITHUB_WORKSPACE/dist"
-      - uses: actions/upload-artifact@v5
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+      - uses: actions/upload-artifact@v7
         with:
           name: arch
           path: dist/*.pkg.tar.zst
 
   tarball:
     name: portable tarball
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: test
     steps:
       - uses: actions/checkout@v6
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-ubuntu-tarball-${{ github.run_id }}
+          restore-keys: ccache-ubuntu-
       - name: Install dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config ccache \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
             libtomlplusplus-dev liblcms2-dev \
             qt6-base-dev libqt6svg6-dev \
@@ -300,7 +377,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -313,10 +390,13 @@ jobs:
           # small hip-runtime-amd package instead of any toolkit.
           curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
-          # outranks AMD's (1.1.1) by version number; without this apt
-          # mixes the two stacks and the old compiler rejects new GPU
-          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          # AMD publishes the 7.2 apt line for jammy and noble only; the
+          # noble-stage packages are forward-compatible on this runner
+          # (newer libc, self-contained toolchain). Ubuntu's universe may
+          # carry its own ROCm copy with version numbers outranking AMD's;
+          # pin AMD's repo above everything so apt cannot mix two stacks
+          # — a mixed stack ships an old hipcc that rejects new GPU
+          # targets.
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
@@ -340,22 +420,35 @@ jobs:
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
           tar -czf "dist/pittore-studio-${VERSION}-x86_64.tar.gz" -C staging usr
           ls -l dist
-      - uses: actions/upload-artifact@v5
+        env:
+          CC: 'ccache gcc'
+          CXX: 'ccache g++'
+          CCACHE_MAXSIZE: 1500M
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+      - uses: actions/upload-artifact@v7
         with:
           name: tarball
           path: dist/*.tar.gz
 
   appimage:
-    name: AppImage (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
+    name: AppImage (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
     needs: test
     steps:
       - uses: actions/checkout@v6
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-ubuntu-appimage-${{ github.run_id }}
+          restore-keys: ccache-ubuntu-
       - name: Install dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential meson ninja-build git pkg-config \
+          sudo apt-get install -y build-essential meson ninja-build git pkg-config ccache \
             file wget \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
             libtomlplusplus-dev liblcms2-dev \
@@ -366,7 +459,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -379,10 +472,13 @@ jobs:
           # small hip-runtime-amd package instead of any toolkit.
           curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/rocm.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          # Ubuntu's universe carries an older ROCm whose hipcc (5.7.1)
-          # outranks AMD's (1.1.1) by version number; without this apt
-          # mixes the two stacks and the old compiler rejects new GPU
-          # targets. Pin AMD's repo above everything for a coherent 7.2.
+          # AMD publishes the 7.2 apt line for jammy and noble only; the
+          # noble-stage packages are forward-compatible on this runner
+          # (newer libc, self-contained toolchain). Ubuntu's universe may
+          # carry its own ROCm copy with version numbers outranking AMD's;
+          # pin AMD's repo above everything so apt cannot mix two stacks
+          # — a mixed stack ships an old hipcc that rejects new GPU
+          # targets.
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
@@ -435,14 +531,21 @@ jobs:
           mkdir -p dist
           mv Pittore*.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage" 2>/dev/null || mv *.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage"
           ls -l dist
-      - uses: actions/upload-artifact@v5
+        env:
+          CC: 'ccache gcc'
+          CXX: 'ccache g++'
+          CCACHE_MAXSIZE: 1500M
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+      - uses: actions/upload-artifact@v7
         with:
           name: appimage
           path: dist/*.AppImage
 
   flatpak:
     name: Flatpak
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: test
     steps:
       - uses: actions/checkout@v6
@@ -466,14 +569,14 @@ jobs:
           flatpak-builder --force-clean --repo=repo flatpak-build packaging/flatpak/studio.pittore.painter.yml
           flatpak build-bundle repo "dist/pittore-studio-${VERSION}-x86_64.flatpak" studio.pittore.painter
           ls -l dist
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak
           path: dist/*.flatpak
 
   snap:
     name: Snap
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: test
     steps:
       - uses: actions/checkout@v6
@@ -494,14 +597,14 @@ jobs:
           mkdir -p dist
           cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"
           ls -l dist
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: snap
           path: dist/*.snap
 
   release:
     name: publish GitHub Release
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     permissions:
@@ -534,7 +637,7 @@ jobs:
               git push origin "$TAG"
             fi
           fi
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -552,7 +655,7 @@ jobs:
 
   release-latest:
     name: publish rolling release
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:
@@ -563,7 +666,7 @@ jobs:
         run: |
           git tag -f rolling ${{ github.sha }}
           git push -f origin rolling
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

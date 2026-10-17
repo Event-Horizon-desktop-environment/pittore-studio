@@ -271,7 +271,7 @@ static void test_stashed_pixels() {
     pittore::io::AfLayersDoc pd;
     pd.width = kW;
     pd.height = kH;
-    pd.complete = false;  // something was skipped -> flattened base wins
+    pd.complete = false;  // content was skipped; the preview is not imported
     pittore::io::AfLayer l;
     l.name = "packed";
     l.width = kW;
@@ -290,17 +290,16 @@ static void test_stashed_pixels() {
     DocumentItem* d = state.activeDocument();
     CHECK(d != nullptr);
     if (!d) return;
-    // Top-first panel: the recovered layer first, the flattened base below it.
-    CHECK_EQ(d->layers.size(), 2);
-    if (d->layers.size() != 2) return;
+    // Top-first panel: the recovered layer, and no flattened base row after
+    // it — the panel never shows the embedded preview.
+    CHECK_EQ(d->layers.size(), 1);
+    if (d->layers.size() != 1) return;
     // Visibility contract: recovered layers open with the file's own
-    // visibility and realise from the packed stash on the first composite;
-    // the flattened preview stays as the hidden reference copy below them.
+    // visibility and realise from the packed stash on the first composite.
     LayerItem& recovered = d->layers[0];
     CHECK(recovered.visible);
     CHECK(recovered.pixels != nullptr);
     CHECK(!hasDeferredPixels(recovered));
-    CHECK(!d->layers[1].visible);
     // The decode buffer it came from was released as it was consumed.
     CHECK(pd.layers.empty() || pd.layers[0].rgba.empty());
 
@@ -317,7 +316,7 @@ static void test_stashed_pixels() {
 
     // Save straight out of the packed state.
     const ProjectFileData saved = projectDataFromDocument(*d);
-    CHECK_EQ(saved.layers.size(), 2);
+    CHECK_EQ(saved.layers.size(), 1);
     CHECK(!saved.layers[0].pixels.isNull());
     CHECK_EQ(saved.layers[0].pixels.width(), kW);
     CHECK_EQ(saved.layers[0].pixels.height(), kH);
@@ -360,7 +359,7 @@ static void test_stashed_pixels() {
         bool sawLayer = false;
         if (dec) {
             // File order is bottom-first, so find ours by name rather than
-            // by position (the flattened base is exported too).
+            // by position.
             for (const auto& el : dec->layers) {
                 if (el.name != "packed") continue;
                 sawLayer = true;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -24,9 +25,10 @@ namespace af_detail {
 // ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
-struct AfError {
+struct AfError : std::exception {
     std::string msg;
     explicit AfError(std::string m) : msg(std::move(m)) {}
+    const char* what() const noexcept override { return msg.c_str(); }
 };
 [[noreturn]] inline void fail(const std::string& m) { throw AfError(m); }
 

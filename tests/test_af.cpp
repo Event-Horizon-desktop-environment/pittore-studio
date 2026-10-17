@@ -428,7 +428,7 @@ void testLayeredDecode() {
 
     // layer_test: fifty nested groups with no leaf content at all. The walk
     // must still report the canvas and the tree and produce no frames; the UI
-    // keeps its flattened base because no pixel layer was recovered.
+    // imports the group tree itself and drops the flattened preview.
     {
         const std::string path = affinityFixture("layer_test.afdesign");
         if (!path.empty()) {
@@ -693,8 +693,9 @@ void testRealFile() {
     // external path (a Windows path for files written by the Windows app); when
     // that file is present (Wine's Z: is /) it decodes too, so the counts below
     // are lower bounds. Text and shape layers are re-built in place; the
-    // remaining adjustment kinds are skipped and logged, so the UI keeps the
-    // flattened preview as the authoritative base.
+    // remaining adjustment kinds are skipped and logged. The flattened
+    // preview is not imported as a panel row either way, so skipped pixels
+    // exist only in the log.
     auto layers = pittore::io::afDecodeLayers(data, nullptr);
     check(layers.has_value(), "d.af layered decode");
     if (layers) {
