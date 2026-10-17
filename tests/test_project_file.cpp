@@ -405,6 +405,61 @@ static void test_v4_psd_blocks() {
     CHECK(!pittore::io::projectDecode(cut, &error).has_value());
 }
 
+// Spacing recorded from imported formats (v6) round trips; a live-text layer
+// without it stays on the old version so old readers still load the file.
+static void test_v6_text_spacing() {
+    std::string error;
+    ProjectFileDoc p = sampleProject();
+    ProjectLayerFile& top = p.layers[0];
+    top.hasTextSpec = true;
+    top.text = "Hello";
+    top.textFamily = "sans-serif";
+    top.textSize = 48;
+    top.textLineHeight = 1;
+    top.textWrapWidth = 200;
+    top.textEmLeading = 0.8;
+    top.textParagraphGap = 25;
+    auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) {
+        std::fprintf(stderr, "    v6 encode error: %s\n", error.c_str());
+        return;
+    }
+    CHECK_EQ(fileVersion(*bytes), 6u);
+    auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(back.has_value());
+    if (!back) {
+        std::fprintf(stderr, "    v6 decode error: %s\n", error.c_str());
+        return;
+    }
+    if (back->layers.size() != 2) return;
+    CHECK(back->layers[0].hasTextSpec);
+    CHECK_NEAR(back->layers[0].textEmLeading, 0.8, 1e-12);
+    CHECK_NEAR(back->layers[0].textParagraphGap, 25.0, 1e-12);
+    // The pixel layer carries no spec.
+    CHECK(!back->layers[1].hasTextSpec);
+    // Re-encode is byte-identical and the scan accepts v6.
+    auto again = pittore::io::projectEncode(*back, &error);
+    CHECK(again.has_value() && *again == *bytes);
+    auto info = pittore::io::projectScan(*bytes, &error);
+    CHECK(info.has_value());
+    if (info) CHECK(info->name == "Round Trip");
+
+    // Plain live text with no recorded spacing stays v1.
+    ProjectFileDoc plain = sampleProject();
+    plain.layers[0].hasTextSpec = true;
+    plain.layers[0].text = "Plain";
+    auto old = pittore::io::projectEncode(plain, &error);
+    CHECK(old.has_value());
+    if (!old) return;
+    CHECK_EQ(fileVersion(*old), 1u);
+    auto plainBack = pittore::io::projectDecode(*old, &error);
+    CHECK(plainBack.has_value());
+    if (!plainBack) return;
+    CHECK_NEAR(plainBack->layers[0].textEmLeading, 0.0, 1e-12);
+    CHECK_NEAR(plainBack->layers[0].textParagraphGap, 0.0, 1e-12);
+}
+
 int main() {
     test_round_trip();
     test_cmyk_payload_round_trip();
@@ -416,6 +471,7 @@ int main() {
     test_v2_curves_channels();
     test_v3_wide_params();
     test_v4_psd_blocks();
+    test_v6_text_spacing();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),
                 pittore_test::failures());

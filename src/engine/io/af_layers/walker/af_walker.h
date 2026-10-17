@@ -44,6 +44,13 @@ struct Walker {
     // their group rows (not baked), but a masked ancestor still means vector
     // geometry alone cannot reproduce a descendant.
     int maskedAncestors = 0;
+    // Designer artboards detected by the document walk: artboard node to its
+    // page index in doc.pages. The board-set branch in emit() toggles
+    // `boardSplit` once the document prologue qualifies the file, and tags
+    // every layer it descends into with `currentBoard` (AfLayer::board).
+    std::unordered_map<const Node*, int> boardIndex;
+    bool boardSplit = false;
+    int currentBoard = -1;
     Mat nodeCtm(const Node* node, const Mat& parent) const;
     std::optional<Bitmap> sourceImage(const Node* bitm, std::uint32_t w, std::uint32_t h,
                                   std::string& why);

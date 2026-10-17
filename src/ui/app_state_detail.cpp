@@ -852,6 +852,8 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
             meta.textAlign = li.textSpec.align;
             meta.textSize = li.textSpec.size;
             meta.textLineHeight = li.textSpec.lineHeight;
+            meta.textEmLeading = li.textSpec.emLeading;
+            meta.textParagraphGap = li.textSpec.paragraphGap;
             meta.textTracking = li.textSpec.tracking;
             meta.textWrapWidth = li.textSpec.wrapWidth;
             meta.textFrameHeight = li.textSpec.frameHeight;

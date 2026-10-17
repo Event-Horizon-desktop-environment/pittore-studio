@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -41,11 +42,11 @@ namespace pittore::ui {
 // compositing samples moved/scaled layers straight from these (fused
 // composite_many_into) instead of re-uploading the photo and re-sampling on
 // the host every frame of a move/resize drag. Entries are keyed by the
-// layer's pixels pointer + sourceStamp + byte count so a brush dab or a
+// layer's pixels serial + sourceStamp + byte count so a brush dab or a
 // reallocated Image is re-uploaded before it is sampled.
 struct DocumentItem::PaintStage {
     struct PlacedSource {
-        const void* key = nullptr;   // l.pixels->data() when cached
+        const void* key = nullptr;   // Image serial (see imageKey) or null
         std::uint64_t stamp = 0;     // LayerItem::sourceStamp at cache time
         std::uint64_t rev = 0;       // LayerItem::styledRev at cache time
         std::size_t bytes = 0;
@@ -56,13 +57,14 @@ struct DocumentItem::PaintStage {
     // buffer pairs. Recursion depth indexes it, so nested groups never share
     // temporaries. Grown lazily inside the rebuild; persists across rebuilds.
     std::vector<std::unique_ptr<pittore::compute::Buffer>> toneScratch;
-    // Keyed by l.pixels->data() so the per-layer device-texture lookup is O(1)
-    // instead of a linear scan over 4k cached layers. Each full-canvas
-    // recomposite was doing ~16.8M pointer compares (~4 ms) hunting for its
-    // own layers — the dominant cost of a background/large-layer toggle.
+    // Keyed by Image serial (see imageKey) so the per-layer device-texture
+    // lookup is O(1) instead of a linear scan over 4k cached layers. Each
+    // full-canvas recomposite was doing ~16.8M pointer compares (~4 ms)
+    // hunting for its own layers — the dominant cost of a background/large-
+    // layer toggle.
     std::unordered_map<const void*, PlacedSource> sources;
-    // Parallel cache for opaque-grey mask coverage, keyed by l.mask->data()
-    // plus LayerItem::maskStamp. Pruned alongside `sources`.
+    // Parallel cache for opaque-grey mask coverage, keyed by the mask Image
+    // serial plus LayerItem::maskStamp. Pruned alongside `sources`.
     std::unordered_map<const void*, PlacedSource> masks;
     // Finished (density/feather-baked) mask images, keyed by the raw mask
     // pointer. The device upload in `masks` above always copies from here
@@ -74,8 +76,9 @@ struct DocumentItem::PaintStage {
         float feather = 0.0f;
     };
     std::unordered_map<const void*, FinishedMask> finishedMasks;
-    // Parallel cache for Curves LUT uploads (256 floats), keyed by
-    // l.adjustmentLUT.data() plus LayerItem::adjustStamp.
+    // Parallel cache for Curves LUT uploads (under 3 KB), keyed by
+    // l.adjustmentLUT.data() plus LayerItem::adjustStamp; the hit also
+    // verifies content, small as the table is.
     std::unordered_map<const void*, PlacedSource> auxs;
 };
 
@@ -83,6 +86,18 @@ pittore::compute::ComputeBackend& cpuBackend() {
     static std::unique_ptr<pittore::compute::ComputeBackend> backend =
         pittore::compute::make_backend(pittore::compute::BackendType::CPU);
     return *backend;
+}
+
+// Cache identity for an Image: its allocation serial, cast into the map key.
+// The raw data address cannot serve as identity — a freed image's heap block
+// can be handed to a later allocation of the same size, so a surviving stale
+// slot would see the same address (and often the same stamp and byte count)
+// while holding the previous image's bytes. Serials never repeat while a
+// stale entry survives the prune.
+const void* imageKey(const std::shared_ptr<pittore::Image>& img) {
+    if (!img) return nullptr;
+    return reinterpret_cast<const void*>(
+        static_cast<std::uintptr_t>(img->serial()));
 }
 
 std::size_t layerBytes(const QSize& size) {
@@ -1343,7 +1358,7 @@ const pittore::compute::Buffer& DocumentItem::placedSourceFor(const LayerItem& l
     // Keyed on the layer's own pixels (stable across style edits) even when the
     // uploaded bytes are the styled render, so a dragged slider refreshes one
     // device slot instead of accumulating a new one per frame.
-    const void* key = l.pixels ? static_cast<const void*>(l.pixels->data()) : nullptr;
+    const void* key = imageKey(l.pixels);
     const std::size_t nbytes =
         s.img ? static_cast<std::size_t>(s.img->width()) * s.img->height() *
                     sizeof(pittore::RGBAf)
@@ -1397,7 +1412,7 @@ const pittore::Image* DocumentItem::finishedMaskFor(const LayerItem& l) {
     if (!mask || (l.maskFeather <= 0.0f && l.maskDensity == 1.0f))
         return nullptr;
     ensurePainter();
-    const void* fkey = static_cast<const void*>(mask->data());
+    const void* fkey = imageKey(l.mask);
     auto fit = stage_->finishedMasks.find(fkey);
     if (fit != stage_->finishedMasks.end() &&
         fit->second.stamp == l.maskStamp &&
@@ -1422,7 +1437,7 @@ const pittore::compute::Buffer* DocumentItem::maskSourceFor(const LayerItem& l) 
     if (const pittore::Image* fin = finishedMaskFor(l)) upload = fin;
     // Keyed by the raw mask (stamp-invalidated); the uploaded bytes are the
     // finished image when density/feather apply (identical dimensions).
-    const void* key = static_cast<const void*>(mask->data());
+    const void* key = imageKey(l.mask);
     const std::size_t nbytes = static_cast<std::size_t>(mask->width()) *
                                mask->height() * sizeof(pittore::RGBAf);
     pittore::compute::ComputeBackend& be = backend ? *backend : cpuBackend();
@@ -1455,10 +1470,10 @@ void DocumentItem::refreshPlacedRegion(LayerItem& l, const QRect& layerRect) {
     }
     ensurePainter();
     // Direct iff the compositor samples the native pixels themselves (no
-    // live filter/style render in between). Pointer comparison is exact:
-    // filtered/styled renders are separate Images.
+    // live filter/style render in between). Object comparison is exact:
+    // filtered/styled renders are separate shared Images, both alive here.
     const LayerDrawSource s = layerDrawSource(l);  // cheap on valid stamps
-    if (!s.img || s.img->data() != l.pixels->data()) {
+    if (!s.img || s.img.get() != l.pixels.get()) {
         ++l.sourceStamp;  // filtered/styled: full refresh on next gather
         return;
     }
@@ -1471,7 +1486,7 @@ void DocumentItem::refreshPlacedRegion(LayerItem& l, const QRect& layerRect) {
     const int y1 = std::min<std::uint32_t>(h, static_cast<std::uint32_t>(
         std::max(0, layerRect.top() + layerRect.height())));
     if (x0 >= x1 || y0 >= y1) return;  // dab missed: pixels provably untouched
-    const void* key = static_cast<const void*>(l.pixels->data());
+    const void* key = imageKey(l.pixels);
     const std::size_t nbytes =
         static_cast<std::size_t>(w) * h * sizeof(pittore::RGBAf);
     auto it = stage_->sources.find(key);
@@ -1522,7 +1537,7 @@ void DocumentItem::refreshMaskRegion(LayerItem& l, const QRect& maskRect) {
     }
     ensurePainter();
     const pittore::Image* mask = effectiveMaskImage(size, l);
-    if (!mask || mask->data() != l.mask->data()) {
+    if (!mask || mask != l.mask.get()) {
         ++l.maskStamp;
         return;
     }
@@ -1549,7 +1564,7 @@ void DocumentItem::refreshMaskRegion(LayerItem& l, const QRect& maskRect) {
     const int y1 = std::min<std::uint32_t>(h, static_cast<std::uint32_t>(
         std::max(0, maskRect.top() + maskRect.height())));
     if (x0 >= x1 || y0 >= y1) return;
-    const void* key = static_cast<const void*>(mask->data());
+    const void* key = imageKey(l.mask);
     const std::size_t nbytes =
         static_cast<std::size_t>(w) * h * sizeof(pittore::RGBAf);
     auto it = stage_->masks.find(key);
@@ -1581,13 +1596,18 @@ const pittore::compute::Buffer* DocumentItem::adjAuxSourceFor(
     const std::size_t want = adjustmentAuxSize(l);
     if (want == 0 || l.adjustmentLUT.size() != want) return nullptr;
     ensurePainter();
+    // Keyed by the LUT bytes' address, whose vector block can be handed to a
+    // later same-size table after a layer goes away; the stamp does not always
+    // differ between the two. Content settles it: the slot's host copy is the
+    // staged truth, and the whole table is under 3 KB.
     const void* key = static_cast<const void*>(l.adjustmentLUT.data());
     const std::size_t nbytes = want * sizeof(float);
     pittore::compute::ComputeBackend& be = backend ? *backend : cpuBackend();
     auto it = stage_->auxs.find(key);
     if (it != stage_->auxs.end()) {
         PaintStage::PlacedSource& e = it->second;
-        if (e.dev && e.stamp == l.adjustStamp && e.bytes == nbytes)
+        if (e.dev && e.stamp == l.adjustStamp && e.bytes == nbytes &&
+            std::memcmp(e.dev->host(), l.adjustmentLUT.data(), nbytes) == 0)
             return e.dev.get();
         if (!e.dev || e.bytes != nbytes) e.dev = be.make_buffer(nbytes);
         e.stamp = l.adjustStamp;
@@ -1614,10 +1634,9 @@ void DocumentItem::prunePlacedSources() {
     ownedMasks.reserve(layers.size());
     for (const LayerItem& l : layers) {
         if (l.kind == LayerItem::Kind::Pixel && l.pixels)
-            ownedPixels.push_back(static_cast<const void*>(l.pixels->data()));
+            ownedPixels.push_back(imageKey(l.pixels));
         if (effectiveMaskImage(size, l))
-            ownedMasks.push_back(
-                static_cast<const void*>(l.mask->data()));
+            ownedMasks.push_back(imageKey(l.mask));
     }
     std::sort(ownedPixels.begin(), ownedPixels.end());
     std::sort(ownedMasks.begin(), ownedMasks.end());

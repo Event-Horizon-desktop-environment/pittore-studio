@@ -374,6 +374,8 @@ bool saveProjectFile(const QString& path, const ProjectFileData& data,
             layer.textAlign = static_cast<std::uint8_t>(qBound(0, m.textAlign, 2));
             layer.textSize = m.textSize;
             layer.textLineHeight = m.textLineHeight;
+            layer.textEmLeading = m.textEmLeading;
+            layer.textParagraphGap = m.textParagraphGap;
             layer.textTracking = m.textTracking;
             layer.textWrapWidth = m.textWrapWidth;
             layer.textFrameHeight = m.textFrameHeight;
@@ -578,6 +580,8 @@ bool loadProjectFile(const QString& path, ProjectFileData* out, QString* error) 
             m.textAlign = l.textAlign;
             m.textSize = l.textSize;
             m.textLineHeight = l.textLineHeight;
+            m.textEmLeading = l.textEmLeading;
+            m.textParagraphGap = l.textParagraphGap;
             m.textTracking = l.textTracking;
             m.textWrapWidth = l.textWrapWidth;
             m.textFrameHeight = l.textFrameHeight;

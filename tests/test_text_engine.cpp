@@ -155,6 +155,57 @@ void test_layout_spans_and_carets() {
     CHECK_NEAR(big.x, ce.x, 0.01);
 }
 
+void test_leading_recorded_overrides_the_face_step() {
+    // A document whose story records an explicit leading gets exactly that
+    // line step, not the face's own line box.
+    TextSpec s = base("One\nTwo");
+    auto r = rasterize(s);
+    CHECK(r.has_value());
+    if (r) CHECK(r->lineCount == 2);
+    s.emLeading = 0.5f;  // half the em: 24 px at size 48
+    auto laid = layoutText(s);
+    CHECK(laid.has_value());
+    if (!laid) return;
+    CHECK_NEAR(laid->lineAdvance, 24.0f, 0.01);
+    CHECK(laid->lines.size() == 2u);
+    // The step alone moves line 2; no paragraph spacing applies to '\n'.
+    CHECK_NEAR(laid->lines[1].top, laid->lineAdvance, 0.01);
+}
+
+void test_paragraph_break_carries_the_recorded_gap() {
+    TextSpec s = base("One\vTwo");
+    s.paragraphGap = 15.0f;
+    auto laid = layoutText(s);
+    CHECK(laid.has_value());
+    if (!laid) return;
+    // The break splits lines and its byte stays out of both ranges.
+    CHECK(laid->lines.size() == 2u);
+    if (laid->lines.size() != 2u) return;
+    CHECK(laid->lines[0].end == 3u);
+    CHECK(laid->lines[1].start == 4u);
+    // Line 2 sits one step plus the recorded paragraph spacing lower.
+    TextSpec plain = base("One\nTwo");
+    auto natural = layoutText(plain);
+    CHECK(natural.has_value());
+    if (!natural) return;
+    CHECK_NEAR(laid->lines[1].top - laid->lines[0].top,
+               natural->lines[1].top - natural->lines[0].top + 15.0f, 0.01);
+}
+
+void test_plain_newline_never_carries_the_gap() {
+    TextSpec s = base("One\nTwo");
+    s.paragraphGap = 15.0f;
+    auto laid = layoutText(s);
+    CHECK(laid.has_value());
+    if (!laid) return;
+    TextSpec plain = base("One\nTwo");
+    auto natural = layoutText(plain);
+    CHECK(natural.has_value());
+    if (!natural) return;
+    CHECK_NEAR(laid->lines[1].top - laid->lines[0].top,
+               natural->lines[1].top - natural->lines[0].top, 0.01);
+}
+
 void test_hit_test_round_trips_character_pens() {
     TextSpec s = base("abc");
     std::optional<TextLayout> laid = layoutText(s);
@@ -322,6 +373,9 @@ void run() {
     test_style_variants_still_rasterize();
     test_utf8_text_rasterizes();
     test_layout_spans_and_carets();
+    test_leading_recorded_overrides_the_face_step();
+    test_paragraph_break_carries_the_recorded_gap();
+    test_plain_newline_never_carries_the_gap();
     test_hit_test_round_trips_character_pens();
     test_wrapped_layout_spans_cover_the_run();
     test_hscale_stretches_advances();

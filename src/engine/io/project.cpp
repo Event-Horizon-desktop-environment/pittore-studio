@@ -173,12 +173,18 @@ std::vector<std::uint8_t> inflateExpected(const std::vector<std::uint8_t>& src,
 
 bool readPixelBlock(Reader& in, std::size_t sampleCount,
                     std::vector<std::uint16_t>* outSamples, const char* what,
-                    std::string* error) {
+                    std::string* error, bool allowEmpty = false) {
     const std::uint8_t compId = in.u8();
     const std::uint32_t dataLen = in.u32();
     if (!in.ok || compId > 1) {
         if (error) *error = what;
         return false;
+    }
+    if (compId == 0 && dataLen == 0 && sampleCount != 0 && allowEmpty) {
+        // Marker slot: the layer carries no native samples (written as a
+        // none-compression block with zero length).
+        outSamples->clear();
+        return true;
     }
     const std::uint8_t* data = in.take(dataLen);
     if (!data) {
@@ -213,11 +219,13 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
         return fail(error, "project dimensions out of range");
 
     // v2 when any layer needs it; v3 for widened adjustment params; v4 for
-    // foreign PSD blocks; v5 for native CMYK layer samples.
+    // foreign PSD blocks; v5 for native CMYK layer samples; v6 for recorded
+    // text leading/paragraph spacing from imported formats.
     bool v2 = false;
     bool v3 = false;
     bool v4 = false;
     bool v5 = false;
+    bool v6 = false;
     std::uint64_t psdBlockBytes = 0;
     for (const ProjectLayerFile& l : p.layers) {
         if (l.hasMask || l.clipped || l.lockTransparency || l.indent != 0 ||
@@ -248,16 +256,19 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
             v4 = true;
         }
         if (!l.cmyk.empty()) v5 = true;
-        if (v2 && v3 && v4 && v5) break;
+        if (l.hasTextSpec && (l.textEmLeading != 0.0 || l.textParagraphGap != 0.0))
+            v6 = true;
+        if (v2 && v3 && v4 && v5 && v6) break;
     }
-    v4 = v4 || v5;
+    v5 = v5 || v6;  // v6 is a strict superset of v5 below.
+    v4 = v4 || v5;  // v5 is a strict superset of v4 below.
     v3 = v3 || v4;  // v4 is a strict superset of v3 below.
     v2 = v2 || v3;  // v3 is a strict superset of v2 below.
 
     std::vector<std::uint8_t> out;
     // ── header ──────────────────────────────────────────────────────────────
     putBytes(out, "INFIPROJ", 8);
-    putU32(out, v5 ? 5 : (v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1))));  // version
+    putU32(out, v6 ? 6 : (v5 ? 5 : (v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1)))));  // version
     putU32(out, p.width);
     putU32(out, p.height);
     putU16(out, 4);                  // channels (RGBA)
@@ -398,6 +409,10 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
             putF64(layers, l.textOriginX);
             putF64(layers, l.textOriginY);
             putU32(layers, l.textColor);
+            if (v6) {
+                putF64(layers, l.textEmLeading);
+                putF64(layers, l.textParagraphGap);
+            }
         }
         if (l.hasTextExtras) {
             layers.push_back(l.textUnderline);
@@ -581,7 +596,7 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version < 1 || version > 5)
+    if (version < 1 || version > 6)
         return fail(error, "unsupported project version");
     if (channels != 4 || depth != 16)
         return fail(error, "unsupported project channel layout");
@@ -684,6 +699,10 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
                 layer.textOriginX = l.f64();
                 layer.textOriginY = l.f64();
                 layer.textColor = l.u32();
+                if (version >= 6) {
+                    layer.textEmLeading = l.f64();
+                    layer.textParagraphGap = l.f64();
+                }
                 if (!l.ok) return fail(error, "corrupt layer text record");
             }
             if (layer.hasTextExtras) {
@@ -826,7 +845,8 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
                     static_cast<std::uint64_t>(layer.width) * layer.height;
                 if (cp > kMaxPixels ||
                     !readPixelBlock(l, cp * 4, &layer.cmyk,
-                                    "corrupt layer CMYK data", error))
+                                    "corrupt layer CMYK data", error,
+                                    /*allowEmpty=*/true))
                     return std::nullopt;
             }
             layers.push_back(std::move(layer));
@@ -877,7 +897,7 @@ std::optional<ProjectScanInfo> projectScan(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version < 1 || version > 5)
+    if (version < 1 || version > 6)
         return fail(error, "unsupported project version");
     if (in.remaining() < static_cast<std::size_t>(metaLen) + layersLen + previewLen)
         return fail(error, "truncated project sections");

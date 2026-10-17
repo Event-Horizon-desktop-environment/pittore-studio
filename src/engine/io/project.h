@@ -54,6 +54,10 @@ struct ProjectLayerFile {
     double textOriginY = 0;
     std::uint32_t textColor = 0xff000000;  // 0xAARRGGBB
 
+    // v6: spacing imported from foreign formats (0 = natural step / none).
+    double textEmLeading = 0;     // line advance as an em fraction, when set
+    double textParagraphGap = 0;  // distance after every paragraph break, px
+
     // Char-panel extras (flag-gated so old files still parse).
     bool hasTextExtras = false;
     std::uint8_t textUnderline = 0;   // 0 none, 1 single, 2 double

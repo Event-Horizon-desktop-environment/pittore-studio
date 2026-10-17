@@ -100,6 +100,9 @@ struct TextItem {
     double size = 48.0;      // em size, document pixels
     int align = 0;           // 0 = left, 1 = centre, 2 = right
     double lineHeight = 1.0; // multiple of the face's natural line step
+    double emLeading = 0.0;  // > 0 = line advance as an em fraction, replaces
+                             // the natural step entirely
+    double paragraphGap = 0.0;  // distance after every paragraph break, px
     double tracking = 0.0;   // extra spacing per character, document pixels
     double wrapWidth = 0.0;  // > 0 = frame text that reflows, 0 = artistic
     double frameHeight = 0.0;  // frame text box height (overlay only)

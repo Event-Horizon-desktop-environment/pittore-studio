@@ -45,6 +45,13 @@ struct TextSpec {
     float size = 48.0f;  // em size, in pixels
     Align align = Align::Left;
     float lineHeight = 1.0f;  // multiple of the face's natural line step
+    // Explicit vertical metrics from document formats that record them.
+    // When `emLeading` is positive it replaces the natural step entirely
+    // (some display faces are set with leading below their own line box,
+    // which the hhea step cannot express); `paragraphGap` is added after
+    // a paragraph break ('\v' in `text`), not after an ordinary '\n'.
+    float emLeading = 0.0f;     // line advance as a fraction of the em size
+    float paragraphGap = 0.0f;  // distance between paragraphs, in px
     float tracking = 0.0f;    // extra spacing between characters, in pixels
     std::optional<float> wrapWidth;  // px; nullopt never wraps
 
@@ -92,6 +99,8 @@ struct TextRaster {
     float firstBaseline = 0.0f;
     // Baseline-to-baseline distance actually used.
     float lineAdvance = 0.0f;
+    // Number of laid lines, including wraps.
+    int lineCount = 0;
     // The widest line's advance (pen) width; the pen box spans 0..layoutWidth.
     float layoutWidth = 0.0f;
     // The face's capital height at the requested size, when it declares one.

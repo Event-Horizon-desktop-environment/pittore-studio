@@ -194,6 +194,10 @@ bool applyTextItemOption(TextItem& t, const QString& id, const QVariant& value) 
         const double v = qBound(0.1, value.toDouble(), 10.0);
         if (qFuzzyCompare(v, t.lineHeight)) return false;
         t.lineHeight = v;
+        // The panel's leading is a natural-step multiple; a recorded em
+        // leading (imported text) would silently override it, so the edit
+        // takes over by clearing it.
+        t.emLeading = 0.0;
     } else if (id == QStringLiteral("underline") || id == QStringLiteral("strike")) {
         const int v = qBound(0, value.toInt(), 2);
         int& slot = id == QStringLiteral("underline") ? t.underline : t.strike;
@@ -333,6 +337,8 @@ pittore::text::TextSpec textSpecFor(const TextItem& t) {
                  : t.align == 2 ? pittore::text::Align::Right
                                 : pittore::text::Align::Left;
     spec.lineHeight = static_cast<float>(std::max(0.1, t.lineHeight));
+    spec.emLeading = static_cast<float>(std::max(0.0, t.emLeading));
+    spec.paragraphGap = static_cast<float>(std::max(0.0, t.paragraphGap));
     spec.tracking = static_cast<float>(t.tracking);
     if (t.wrapWidth > 0.5) spec.wrapWidth = static_cast<float>(t.wrapWidth);
     spec.underline = qBound(0, t.underline, 2);

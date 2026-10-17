@@ -17,6 +17,7 @@
 #include "ui/app_state.h"
 
 using pittore::ui::AppState;
+using pittore::ui::LayerItem;
 using pittore::ui::DocumentItem;
 
 int main(int argc, char** argv) {
@@ -47,6 +48,31 @@ int main(int argc, char** argv) {
             ++failures;
             continue;
         }
+
+        // Every document this open produced, not just the active one.
+        const int docsAdded = static_cast<int>(state.documents().size());
+        for (int di = 0; di < docsAdded; ++di) {
+            DocumentItem* doc = state.documents()[di];
+            std::printf("    doc %d  \"%s\" %dx%d layers=%d\n", di,
+                        qPrintable(doc->title), doc->size.width(),
+                        doc->size.height(), static_cast<int>(doc->layers.size()));
+            for (const auto& l : doc->layers) {
+                std::printf("      %-32s %6.1f,%.1f  %5dx%-5d %s\n",
+                            qPrintable(l.name), l.offset.x(), l.offset.y(),
+                            l.deferredWidth > 0 ? int(l.deferredWidth)
+                                                : (l.pixels ? int(l.pixels->width()) : 0),
+                            l.deferredHeight > 0 ? int(l.deferredHeight)
+                                                 : (l.pixels ? int(l.pixels->height()) : 0),
+                            l.isText ? "text" : (l.kind == LayerItem::Kind::Group
+                                                     ? "group"
+                                                     : "pixel"));
+            }
+            const QString png =
+                QStringLiteral("/tmp/opencode/af-open-doc-%1-%2.png").arg(di);
+            doc->composite.save(png, "PNG");
+            std::printf("      composite -> %s\n", qPrintable(png));
+        }
+        break;
 
         std::printf("    ok  \"%s\" %dx%d layers=%d\n", qPrintable(d->title),
                     d->size.width(), d->size.height(),

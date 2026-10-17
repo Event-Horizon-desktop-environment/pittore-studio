@@ -138,6 +138,8 @@ bool AppState::openProject(const QString& path, QString* error) {
             li.textSpec.align = qBound(0, m.textAlign, 2);
             li.textSpec.size = m.textSize;
             li.textSpec.lineHeight = m.textLineHeight;
+            li.textSpec.emLeading = m.textEmLeading;
+            li.textSpec.paragraphGap = m.textParagraphGap;
             li.textSpec.tracking = m.textTracking;
             li.textSpec.wrapWidth = m.textWrapWidth;
             li.textSpec.frameHeight = m.textFrameHeight;
@@ -559,6 +561,15 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     // The embedded preview is only a downscaled render of the same page and is
     // kept as the flattened base layer, not as a size source. Fall back to the
     // preview, then to the layer extents, only when the decoder named no page.
+    //
+    // Designer artboards ("ShNR"+"AbSz" pages) split the open: one document
+    // per board page, its canvas exactly the board's recorded rect — the
+    // board is the viewport, as Affinity shows it. A layer that overhangs
+    // the rect keeps its file pixels but composites clipped at the page
+    // edge (nothing is moved or dropped), so the page fills its tab at its
+    // real size. Content outside every artboard opens as one extra
+    // document over the stacked canvas. Without artboards this opens
+    // exactly one document, as before.
     int dw = static_cast<int>(pd.width), dh = static_cast<int>(pd.height);
     if (dw <= 0 || dh <= 0) {
         dw = canvasHint.width();
@@ -571,16 +582,86 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
             dh = std::max(dh, l.top + static_cast<int>(l.height));
         }
     }
-    // 1<<28 is the decoder's own per-bitmap pixel cap; a larger page is a
-    // misread, not a document.
-    if (dw <= 0 || dh <= 0 || std::uint64_t(dw) * dh > (1ull << 28)) {
-        if (error) *error = tr("Affinity layer canvas (%1×%2) is beyond the document size cap.")
-                                .arg(dw)
-                                .arg(dh);
-        return false;
+    const std::size_t layerCount = pd.layers.size();
+    bool hasPixelLayer = false;
+    for (const pittore::io::AfLayer& l : pd.layers)
+        if (!l.isGroup && !l.rgba.empty()) {
+            hasPixelLayer = true;
+            break;
+        }
+    const bool hasFlat = !flattenedBase.isNull() && flattenedBase.width() > 0 &&
+                         flattenedBase.height() > 0;
+
+    struct AfOpenPass {
+        QString title;
+        QSize size;
+        std::vector<pittore::io::AfLayer> layers;
+    };
+    std::vector<AfOpenPass> passes;
+    const bool anyBoard =
+        std::any_of(pd.pages.begin(), pd.pages.end(),
+                    [](const pittore::io::AfPage& p) { return p.artboard; });
+    const QString baseTitle = QFileInfo(path).completeBaseName();
+    std::size_t boardPassCount = 0;
+    if (anyBoard) {
+        for (std::size_t i = 0; i < pd.pages.size(); ++i) {
+            const pittore::io::AfPage& page = pd.pages[i];
+            if (!page.artboard) continue;
+            AfOpenPass pass;
+            // Board bounds: the recorded page rect, exactly. Origins floor,
+            // extents ceil (rounding may add a hair of margin but never
+            // removes a file-placed pixel).
+            const double x0 = page.x0, y0 = page.y0;
+            const double x1 = page.x1, y1 = page.y1;
+            const int ox = int(std::floor(x0)), oy = int(std::floor(y0));
+            const int pw = int(std::ceil(x1)) - ox;
+            const int ph = int(std::ceil(y1)) - oy;
+            if (std::uint64_t(pw) * ph > (1ull << 28)) {
+                if (error)
+                    *error = tr("Affinity artboard '%1' (%2×%3) is beyond the "
+                                "document size cap.")
+                                 .arg(QString::fromStdString(page.name))
+                                 .arg(pw)
+                                 .arg(ph);
+                return false;
+            }
+            QString boardTitle = QString::fromStdString(page.name);
+            if (boardTitle.isEmpty())
+                boardTitle = tr("Artboard %1").arg(++boardPassCount);
+            pass.title = boardTitle == baseTitle ? boardTitle
+                                                 : baseTitle + " — " + boardTitle;
+            pass.size = QSize(pw, ph);
+            for (std::size_t k = 0; k < pd.layers.size(); ++k) {
+                if (pd.layers[k].board != static_cast<int>(i)) continue;
+                pass.layers.push_back(std::move(pd.layers[k]));
+                pass.layers.back().left -= ox;
+                pass.layers.back().top -= oy;
+            }
+            pd.layers.erase(std::remove_if(pd.layers.begin(), pd.layers.end(),
+                                           [i](const pittore::io::AfLayer& l) {
+                                               return l.board == static_cast<int>(i);
+                                           }),
+                            pd.layers.end());
+            passes.push_back(std::move(pass));
+        }
+        if (!pd.layers.empty()) {
+            // Untagged residue over the decode's stacked canvas.
+            AfOpenPass pass;
+            pass.title = baseTitle + " — other";
+            pass.size = QSize(dw, dh);
+            pass.layers = std::move(pd.layers);
+            passes.push_back(std::move(pass));
+        }
+    } else {
+        AfOpenPass pass;
+        pass.title = baseTitle;
+        pass.size = QSize(dw, dh);
+        pass.layers = std::move(pd.layers);
+        passes.push_back(std::move(pass));
     }
-    const QString title = QFileInfo(path).completeBaseName();
-    DocumentItem* doc = addDocument(title, QSize(dw, dh), 72);
+
+    for (AfOpenPass& pass : passes) {
+    DocumentItem* doc = addDocument(pass.title, pass.size, 72);
     if (!doc) {
         if (error)
             *error = tr("Could not create the document (check the RAM limit in Preferences).");
@@ -595,14 +676,6 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     // low-resolution stand-in for content the decoder could not rebuild. The
     // document opens with exactly the recovered tree (possibly empty) and the
     // drop is reported in the log.
-    bool hasPixelLayer = false;
-    for (const pittore::io::AfLayer& l : pd.layers)
-        if (!l.isGroup && !l.rgba.empty()) {
-            hasPixelLayer = true;
-            break;
-        }
-    const bool hasFlat = !flattenedBase.isNull() && flattenedBase.width() > 0 &&
-                         flattenedBase.height() > 0;
 
     // Same nesting emission as openPsdLayers: layers are file order (bottom →
     // top); the panel wants top-first with group folders above their children.
@@ -617,7 +690,7 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     QVector<int> roots;
     QVector<int> open;
     std::vector<std::vector<pittore::io::AfMask>> activeGroupMasks;
-    for (pittore::io::AfLayer& l : pd.layers) {
+    for (pittore::io::AfLayer& l : pass.layers) {
         while (!open.isEmpty() && nodes[open.back()].item.indent >= l.indent) {
             open.pop_back();
             activeGroupMasks.pop_back();
@@ -720,6 +793,8 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                     : l.textSpec.align == pittore::text::Align::Right ? 2
                                                                        : 0;
                 li.textSpec.lineHeight = l.textSpec.lineHeight;
+                li.textSpec.emLeading = l.textSpec.emLeading;
+                li.textSpec.paragraphGap = l.textSpec.paragraphGap;
                 li.textSpec.tracking = l.textSpec.tracking;
                 li.textSpec.wrapWidth = l.textSpec.wrapWidth.value_or(0.0f);
                 li.textSpec.frameHeight = l.textFrameHeight;
@@ -779,21 +854,21 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                 "visibility; flattened preview (%dx%d) dropped — %d skipped "
                 "layers are named above and exist only in that preview",
                 QFileInfo(path).fileName().toUtf8().constData(),
-                pd.layers.size(), flattenedBase.width(), flattenedBase.height(),
+                layerCount, flattenedBase.width(), flattenedBase.height(),
                 pd.skippedLayers);
         } else {
             ::pittore::core::log::log_info(
                 "[import] AF %s: all %zu layers recovered, nothing skipped; "
                 "flattened preview (%dx%d) dropped",
                 QFileInfo(path).fileName().toUtf8().constData(),
-                pd.layers.size(), flattenedBase.width(), flattenedBase.height());
+                layerCount, flattenedBase.width(), flattenedBase.height());
         }
     } else if (hasFlat) {
         ::pittore::core::log::log_info(
             "[import] AF %s: no pixel content recovered (%zu rows, %d "
             "skipped); flattened preview (%dx%d) dropped — document opens "
             "with the recovered tree only",
-            QFileInfo(path).fileName().toUtf8().constData(), pd.layers.size(),
+            QFileInfo(path).fileName().toUtf8().constData(), layerCount,
             pd.skippedLayers, flattenedBase.width(), flattenedBase.height());
     } else {
         ::pittore::core::log::log_info(
@@ -811,6 +886,13 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     doc->rebuildComposite();
     emit layersChanged();
     emit documentModified(doc);
+    }
+    // One open, many documents: land on the first board the file lists,
+    // matching Affinity's "open on page 1" behaviour.
+    if (passes.size() > 1) {
+        const int idx = documents_.size() - static_cast<int>(passes.size());
+        setActiveDocumentIndex(idx);
+    }
     noteRecentProject(path);
     return true;
 }

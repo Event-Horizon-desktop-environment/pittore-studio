@@ -80,14 +80,32 @@ std::optional<ShapeGeometry> shapeGeometry(const Graph& g, const Node* shpe,
         std::array<std::uint16_t, 4> cornerTypes = {0, 0, 0, 0};
         const Value* ctyp = g.field(shpe, "CTyp");
         const bool hasCtyp = ctyp && ctyp->k == Value::K::Array;
+        // Corner type encodings come in two generations, flagged by the
+        // record's "Lgcy" marker. The current enum is 0 = rounded arc, 1 =
+        // bevel, 2 = inverted curve, 3 = notch; a square corner is simply a
+        // zero radius. Legacy documents (observed in the Disney birthday-card
+        // template: a ShNR v0 rectangle carrying CTyp [0,4,4,4] whose card
+        // background rounds three corners and keeps one sharp) instead store
+        // 0 = square and 4 = rounded arc, and except for those two codes the
+        // meaning of a legacy value is unknown, so it renders sharp rather
+        // than guessed.
+        const bool legacyEnums = boolOf(g, shpe, "Lgcy").value_or(false);
         if (hasCtyp) {
             for (int i = 0; i < 4; ++i) {
                 const Value* it =
                     static_cast<std::size_t>(i) < ctyp->arr.size() ? &ctyp->arr[i] : nullptr;
-                if (it && it->k == Value::K::Enum && it->u <= 3)
-                    cornerTypes[i] = static_cast<std::uint16_t>(it->u);
-                else
+                if (!it || it->k != Value::K::Enum) {
                     radii[i] = 0.0f;
+                    continue;
+                }
+                if (legacyEnums) {
+                    if (it->u == 4) cornerTypes[i] = 0;  // legacy rounded arc
+                    else radii[i] = 0.0f;                // square or unknown
+                } else if (it->u <= 3) {
+                    cornerTypes[i] = static_cast<std::uint16_t>(it->u);
+                } else {
+                    radii[i] = 0.0f;
+                }
             }
         } else if (tag == tag4("ShNR")) {
             radii = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -600,13 +618,14 @@ std::string trimmed(const std::string& s) {
 
 
 // A line count matching the way a story's line endings are counted: a trailing
-// newline does not open another line.
+// newline does not open another line, and paragraph breaks ('\v') are breaks
+// like any other.
 std::size_t textLineCount(const std::string& s) {
     if (s.empty()) return 0;
     std::size_t count = 0;
     for (char c : s)
-        if (c == '\n') ++count;
-    if (s.back() != '\n') ++count;
+        if (c == '\n' || c == '\v') ++count;
+    if (s.back() != '\n' && s.back() != '\v') ++count;
     return count;
 }
 

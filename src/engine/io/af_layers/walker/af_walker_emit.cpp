@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -290,8 +291,10 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         raw += s;
         firstBlock = false;
     }
-    // Paragraph and line separators, and the vertical tab the format writes
-    // for a soft return, all become newlines; CR/CRLF normalize with them.
+    // Line separators, the vertical tab the format writes for a soft
+    // return, and CR/CRLF all become plain breaks. The paragraph
+    // separator U+2029 becomes '\v', which the layout engine treats as a
+    // paragraph break carrying the story's recorded paragraph spacing.
     std::string text;
     text.reserve(raw.size());
     for (std::size_t i = 0; i < raw.size();) {
@@ -305,9 +308,13 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
             ++i;
         } else if (c == 0xE2 && i + 2 < raw.size() &&
                    static_cast<unsigned char>(raw[i + 1]) == 0x80 &&
-                   (static_cast<unsigned char>(raw[i + 2]) == 0xA8 ||
-                    static_cast<unsigned char>(raw[i + 2]) == 0xA9)) {
-            text += '\n';
+                   static_cast<unsigned char>(raw[i + 2]) == 0xA9) {
+            text += '\v';  // U+2029 paragraph separator
+            i += 3;
+        } else if (c == 0xE2 && i + 2 < raw.size() &&
+                   static_cast<unsigned char>(raw[i + 1]) == 0x80 &&
+                   static_cast<unsigned char>(raw[i + 2]) == 0xA8) {
+            text += '\n';  // U+2028 line separator
             i += 3;
         } else {
             text += raw[i++];
@@ -318,8 +325,11 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         return;
     }
 
-    // The first block's paragraph attributes give the alignment.
+    // The first block's paragraph attributes give the alignment, plus the
+    // explicit vertical metrics the record carries.
     int align = 0;
+    double paraGapUnits = 0.0;  // spacing between paragraphs, text-space units
+    double leadEm = 0.0;        // line advance as a fraction of the em size
     for (Node* b : blocks) {
         Node* patt = g.child(b, "PAtt");
         if (!patt) continue;
@@ -331,8 +341,22 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         if (ints && ints->k == Value::K::Array && !ints->arr.empty() &&
             ints->arr[0].k == Value::K::I32) {
             align = static_cast<int>(ints->arr[0].u);
-            break;
         }
+        const Value* pd = g.field(item, "Doub");
+        if (pd && pd->k == Value::K::Array && pd->arr.size() > 10) {
+            // Slot semantics read off the observed layouts these records
+            // belong to: index 6 is the spacing between paragraphs (25 in
+            // these documents, matching the gap rendered at the one break
+            // in the story); index 8 is the leading as a fraction of the
+            // em size (0.8 here, where the faces' natural line steps are
+            // ~1.17 and would double-space the design). Remaining slots
+            // held zeros or values that matched nothing rendered.
+            const double gap = pd->arr[6].f;
+            const double lead = pd->arr[8].f;
+            if (gap > 0.0 && gap < 10000.0) paraGapUnits = gap;
+            if (lead > 0.05 && lead < 8.0) leadEm = lead;
+        }
+        break;
     }
 
     // The first run's character attributes speak for the whole layer.
@@ -479,6 +503,14 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
                               : pittore::text::Align::Left;
     spec.lineHeight = 1.0f;
     spec.tracking = 0.0f;
+    // Frame text honours the story's recorded leading and paragraph
+    // spacing; artistic text keeps solving its line step from the
+    // recorded pen box below.
+    if (frameText) {
+        if (leadEm > 0.0) spec.emLeading = static_cast<float>(leadEm);
+        if (paraGapUnits > 0.0)
+            spec.paragraphGap = static_cast<float>(paraGapUnits * docScale);
+    }
     // Frame text fills its box and wraps there; artistic text runs on one line.
     if (frameText && frameWidth > 8) spec.wrapWidth = static_cast<float>(frameWidth);
     // The engine bakes decorations/background with the ink colour, so hand
@@ -487,8 +519,10 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         spec.inkColor[i] = static_cast<float>(color[i]) / 255.0f;
 
     auto raster = pittore::text::rasterize(spec);
+    bool defaultFont = false;
     if (!raster) {
         spec.family = pittore::text::defaultFamily();
+        defaultFont = true;
         raster = pittore::text::rasterize(spec);
         if (!raster) {
             noteSkip(node, "no installed font for text");
@@ -565,12 +599,36 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     std::string display = strOf(g, node, "Desc");
     std::string displayName = display;
     if (displayName.empty()) {
-        const std::size_t nl = text.find('\n');
+        const std::size_t nl = text.find_first_of("\n\v");
         const std::string firstLine =
             trimmed(text.substr(0, nl == std::string::npos ? text.size() : nl));
         std::string label = utf8Prefix(firstLine, 32);
         if (label.size() < firstLine.size()) label += "\xE2\x80\xA6";
         displayName = label.empty() ? "Text" : label;
+    }
+
+    // Import log: what the story asked for and what this machine laid
+    // out, so a shortfall in the vertical metrics is auditable from the
+    // log alone, without a debugger or a second application.
+    {
+        auto mag = [](double v) {
+            char b[32];
+            std::snprintf(b, sizeof b, "%.4g", v);
+            return std::string(b);
+        };
+        std::string line = "text '" + displayName + "': size " + mag(size);
+        if (std::abs(spec.size - size) > 0.005) line += " laid " + mag(spec.size);
+        line += ", font '" + family + "'";
+        if (defaultFont) line += " (unresolved, using '" + spec.family + "')";
+        line += leadEm > 0.0 ? ", leading " + mag(leadEm) + " em"
+                             : ", leading face natural";
+        line += paraGapUnits > 0.0 ? ", para-gap " + mag(paraGapUnits)
+                                   : ", no para-gap";
+        if (spec.wrapWidth) line += ", wrap " + mag(*spec.wrapWidth);
+        line += ", frame " + std::to_string(frameWidth) + "x" +
+                std::to_string(frameHeight) + ", lines " +
+                std::to_string(raster->lineCount);
+        doc.log.push_back(line);
     }
 
     const int rw = raster->bounds.width();
@@ -704,6 +762,29 @@ void Walker::emit(const Node* node, const Mat& ctm, int indent, bool clipped) {
         return;
     }
     if (kind == tag4("ShpN") || kind == tag4("PCrv")) {
+        if (boardSplit) {
+            if (auto it = boardIndex.find(node); it != boardIndex.end()) {
+                // Designer artboard: the board itself is a page, not a panel
+                // group. Its content rows join the board's page (indent
+                // unchanged), and the board's own paint — its background
+                // fill, when the file gives the shape one — stays below them.
+                const int saved = currentBoard;
+                currentBoard = it->second;
+                const std::size_t skipBefore = doc.skippedLayers;
+                const std::size_t logBefore = doc.log.size();
+                if (!emitShape(node, ctm, indent, clipped) &&
+                    doc.skippedLayers == skipBefore + 1 &&
+                    doc.log.size() == logBefore + 1) {
+                    // An unpainted board is a page bounds, not a skip.
+                    doc.log.pop_back();
+                    doc.skippedLayers = skipBefore;
+                }
+                const Mat childCtm = nodeCtm(node, ctm);
+                for (Node* ch : g.children(node, "Chld")) emit(ch, childCtm, indent, false);
+                currentBoard = saved;
+                return;
+            }
+        }
         const std::size_t skipBefore = doc.skippedLayers;
         const std::size_t logBefore = doc.log.size();
         if (emitShape(node, ctm, indent, clipped)) return;

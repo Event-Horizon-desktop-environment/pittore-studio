@@ -67,6 +67,7 @@ std::optional<TextRaster> rasterize(const TextSpec& spec) {
     if (face->capRatio) raster.capHeight = *face->capRatio * spec.size;
     raster.firstBaseline = laid.firstBaseline;
     raster.lineAdvance = laid.lineAdvance;
+    raster.lineCount = static_cast<int>(laid.lines.size());
     raster.layoutWidth = laid.layoutWidth;
 
     struct Done {

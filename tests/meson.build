@@ -51,6 +51,7 @@ host_tests = [
   'test_tiff',
   'test_af',
   'test_af_pages',
+  'test_af_artboard',
   'test_xcf',
   'test_project_file',
   'test_vector_path',
@@ -595,6 +596,24 @@ if has_qt6
   executable('object_select_probe',
     ['object_select_probe.cpp', '../src/ui/selection_mask.cpp'],
     dependencies : [pittore_ai_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+
+  # TEMPORARY .af font/text/shape record dumper (NOT a test): lists the doc.dat
+  # class census, large blobs, representative class trees, per-text decode log
+  # lines and raw TxtH/Xfrm records. Supports the issue #3 text investigation.
+  executable('af_font_probe',
+    ['af_font_probe.cpp'],
+    dependencies : [pittore_io_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+
+  # TEMPORARY artboard tab-switch probe (NOT a test): opens a multi-artboard
+  # .af through the real MainWindow and simulates selecting the second tab.
+  # Remove once the per-artboard open is proven in the live window.
+  executable('af_tab_probe',
+    ['af_tab_probe.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
     include_directories : [src_inc],
     cpp_args : ['-fPIC'])
 

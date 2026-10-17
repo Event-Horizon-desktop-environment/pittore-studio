@@ -294,6 +294,7 @@ void Walker::noteSkip(const Node* node, const std::string& why) {
 }
 
 void Walker::applyCommon(const Node* node, AfLayer& layer) {
+    layer.board = currentBoard;
     if (const auto v = boolOf(g, node, "Visi")) layer.visible = *v;
     if (const auto o = f32Of(g, node, "Opac"))
         layer.opacity = static_cast<std::uint16_t>(std::clamp(*o, 0.0f, 1.0f) * 255.0f + 0.5f);

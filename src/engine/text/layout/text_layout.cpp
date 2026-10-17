@@ -80,7 +80,13 @@ Layout layout(const TextSpec& spec, Face& face) {
         face.ft->units_per_EM > 0 ? static_cast<float>(face.ft->units_per_EM) : 1000.0f;
     const float ascent = static_cast<float>(face.ft->ascender) * spec.size / upem;
     const float lineStep = static_cast<float>(face.ft->height) * spec.size / upem;
-    const float lineAdvance = lineStep * std::max(0.1f, spec.lineHeight);
+    // A document that records its leading explicitly overrides the face's
+    // natural line step; paragraph breaks ('\v') additionally add the
+    // recorded spacing between paragraphs.
+    const float lineAdvance =
+        spec.emLeading > 0.0f
+            ? spec.emLeading * spec.size
+            : lineStep * std::max(0.1f, spec.lineHeight);
     const std::string text = displayText(spec);
 
     struct Line {
@@ -88,12 +94,13 @@ Layout layout(const TextSpec& spec, Face& face) {
         float width = 0.0f;
         std::size_t start = 0;  // byte offset of the line's first character
         std::size_t end = 0;    // byte offset one past its last character
+        float gapAfter = 0.0f;  // paragraph spacing before the next line
     };
     std::vector<Line> lines;
 
     std::size_t pos = 0;
     while (true) {
-        const std::size_t nl = text.find('\n', pos);
+        const std::size_t nl = text.find_first_of("\n\v", pos);
         const std::string rawLine = text.substr(
             pos, nl == std::string::npos ? std::string::npos : nl - pos);
 
@@ -133,6 +140,11 @@ Layout layout(const TextSpec& spec, Face& face) {
         if (nl == std::string::npos) break;
         pos = nl + 1;
     }
+    // A line whose next byte is the paragraph separator ends a paragraph
+    // and carries the recorded spacing before the next one.
+    for (Line& l : lines)
+        if (l.end < text.size() && text[l.end] == '\v' && spec.paragraphGap > 0.0f)
+            l.gapAfter = spec.paragraphGap;
 
     out.layoutWidth = 0.0f;
     for (const Line& l : lines) out.layoutWidth = std::max(out.layoutWidth, l.width);
@@ -171,7 +183,7 @@ Layout layout(const TextSpec& spec, Face& face) {
             x += g.xAdvance * gs.hScale + spec.tracking * gs.hScale;
         }
         out.lines.push_back(span);
-        top += lineAdvance;
+        top += lineAdvance + line.gapAfter;
     }
     return out;
 }

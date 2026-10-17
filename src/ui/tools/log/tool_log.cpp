@@ -194,6 +194,14 @@ const char* signalName(int sig) {
     }
 }
 
+#ifndef _WIN32
+void emitBytes(int fd, const void* buf, std::size_t n) {
+    // write() is warn_unused_result, but a crashing process cannot act on
+    // the outcome: consume the return value and keep the dump best effort.
+    [[maybe_unused]] const ssize_t unused = ::write(fd, buf, n);
+}
+#endif
+
 void writeCrash(const char* header) {
     char buf[1536];
     int n = std::snprintf(
@@ -210,8 +218,10 @@ void writeCrash(const char* header) {
     if (n > static_cast<int>(sizeof buf)) n = static_cast<int>(sizeof buf);
 #ifndef _WIN32
     const int fd = g_crashFd >= 0 ? g_crashFd : 2;
-    ::write(fd, buf, static_cast<std::size_t>(n));
-    if (fd != 2) ::write(2, buf, static_cast<std::size_t>(n));
+    emitBytes(fd, buf, static_cast<std::size_t>(n));
+    if (fd != 2) {
+        emitBytes(2, buf, static_cast<std::size_t>(n));
+    }
 #else
     std::fwrite(buf, 1, static_cast<std::size_t>(n), stderr);
 #endif
@@ -224,7 +234,7 @@ void writeBacktrace() {
     if (n <= 0) return;
     const int fd = g_crashFd >= 0 ? g_crashFd : 2;
     static const char kTag[] = "\n  backtrace (innermost frame first):\n";
-    ::write(fd, kTag, sizeof kTag - 1);
+    emitBytes(fd, kTag, sizeof kTag - 1);
     ::backtrace_symbols_fd(frames, n, fd);
 #endif
 }

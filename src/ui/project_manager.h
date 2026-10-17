@@ -117,6 +117,9 @@ struct ProjectLayerMeta {
     int textAlign = 0;              // 0 left, 1 centre, 2 right
     double textSize = 48;
     double textLineHeight = 1;
+    // Recorded spacing from imported formats (0 = natural step / none).
+    double textEmLeading = 0;
+    double textParagraphGap = 0;
     double textTracking = 0;
     double textWrapWidth = 0;
     double textFrameHeight = 0;
