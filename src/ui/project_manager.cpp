@@ -327,6 +327,7 @@ bool saveProjectFile(const QString& path, const ProjectFileData& data,
     doc.colorModeName = toStd(data.colorMode);
     doc.background = toStd(data.background);
     doc.icc.assign(data.iccProfile.cbegin(), data.iccProfile.cend());
+    doc.boardIdCounter = data.boardIdCounter;
     for (const ProjectLayerMeta& m : data.layers) {
         pittore::io::ProjectLayerFile layer;
         layer.name = toStd(m.name);
@@ -343,6 +344,18 @@ bool saveProjectFile(const QString& path, const ProjectFileData& data,
         layer.lockTransparency = m.lockTransparency;
         layer.clipped = m.clipped;
         layer.indent = m.indent;
+        layer.isBoard = m.isBoard;
+        if (m.isBoard) {
+            layer.boardId = m.boardId;
+            layer.boardX = m.boardRect.x();
+            layer.boardY = m.boardRect.y();
+            layer.boardW = m.boardRect.width();
+            layer.boardH = m.boardRect.height();
+            layer.boardHasFill = m.boardHasFill;
+            layer.boardFillColor =
+                static_cast<std::uint32_t>(m.boardFill.rgba());
+            layer.boardFillOpacity = static_cast<float>(m.boardFillOpacity);
+        }
         if (m.hasMask && !m.mask.isNull() && m.mask.width() > 0 &&
             m.mask.height() > 0) {
             const std::vector<std::uint16_t> cov =
@@ -538,6 +551,7 @@ bool loadProjectFile(const QString& path, ProjectFileData* out, QString* error) 
         QByteArray(reinterpret_cast<const char*>(doc->icc.data()),
                    static_cast<qsizetype>(doc->icc.size()));
     data.background = fromStd(doc->background);
+    data.boardIdCounter = doc->boardIdCounter;
     for (const pittore::io::ProjectLayerFile& l : doc->layers) {
         ProjectLayerMeta m;
         m.name = fromStd(l.name);
@@ -553,6 +567,14 @@ bool loadProjectFile(const QString& path, ProjectFileData* out, QString* error) 
         m.lockTransparency = l.lockTransparency;
         m.clipped = l.clipped;
         m.indent = l.indent;
+        m.isBoard = l.isBoard;
+        if (l.isBoard) {
+            m.boardId = l.boardId;
+            m.boardRect = QRectF(l.boardX, l.boardY, l.boardW, l.boardH);
+            m.boardHasFill = l.boardHasFill;
+            m.boardFill = QColor::fromRgba(l.boardFillColor);
+            m.boardFillOpacity = l.boardFillOpacity;
+        }
         if (l.hasMask && l.maskWidth > 0 && l.maskHeight > 0 &&
             l.mask.size() == static_cast<std::size_t>(l.maskWidth) *
                                  l.maskHeight) {

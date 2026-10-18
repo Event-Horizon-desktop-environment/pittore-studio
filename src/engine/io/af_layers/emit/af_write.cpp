@@ -598,21 +598,49 @@ std::vector<std::uint8_t> writeContainer(const std::vector<OutEntry>& entries,
         totalComp += entries[i].payload.size();
     }
 
-    // Single #FT4 savepoint.
+    // Single #FT4 savepoint (the verified v12 directory layout).
     out.insert(out.end(), 4, 0xff);
     const std::uint64_t fatOffset = out.size();
     out.insert(out.end(), {'#', 'F', 'T', '4'});
     const std::size_t headAt = out.size();
-    putU64le(out, 0);              // next FAT offset
+    putU64le(out, 0);              // next FAT offset (single savepoint)
     putU64le(out, creationDate);   // savepoint
-    out.insert(out.end(), 8, 0);   // thumb offset (patched below)
-    putU64le(out, totalComp);
-    putU64le(out, 0);
-    putU32le(out, static_cast<std::uint32_t>(entries.size()));
-    putU32le(out, 0);
+    out.insert(out.end(), 8, 0);   // thumbnail record offset (patched below)
+    putU64le(out, totalComp);      // document extent (informational)
+    putU64le(out, 0);              // unknown
+    putU64le(out, static_cast<std::uint64_t>(entries.size()));  // row count
     const std::size_t tableSizeAt = out.size();
-    out.insert(out.end(), 4, 0);  // table size (patched below)
-    // Collect the distinct directory prefixes and how many files each holds.
+    putU32le(out, 0);  // directory size (patched below)
+    putU32le(out, 0);  // family flags (informational)
+    putU32le(out, 0);  // unknown
+    putU32le(out, offsets.empty() ? 0 : static_cast<std::uint32_t>(offsets[0]));
+    putU32le(out, 0);  // unknown
+    // Rows: [uncompressed][compressed][crc32][compression byte | kind 0x21 |
+    // u16][payload type u8][stored-bytes crc32][name]; every row but the last
+    // carries a 13-byte tail naming the next row's record tag. Names are
+    // always written here (the terminal row's name field is optional).
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const OutEntry& e = entries[i];
+        putU64le(out, e.plainSize);
+        putU64le(out, e.payload.size());
+        putU32le(out, e.crc);
+        out.push_back(e.comp);
+        out.push_back(0x21);  // payload kind, as observed for named records
+        putU16le(out, 0);
+        out.push_back(0);  // payload type
+        uLong ccrc = crc32(0, Z_NULL, 0);
+        if (!e.payload.empty())
+            ccrc = crc32(ccrc, e.payload.data(), static_cast<uInt>(e.payload.size()));
+        putU32le(out, static_cast<std::uint32_t>(ccrc));
+        putU16le(out, static_cast<std::uint16_t>(e.name.size()));
+        out.insert(out.end(), e.name.begin(), e.name.end());
+        if (i + 1 < entries.size()) {
+            putU32le(out, static_cast<std::uint32_t>(i + 1));  // row id
+            out.push_back(0);
+            putU64le(out, offsets[i + 1]);  // next row's record tag
+        }
+    }
+    // Trailing directory: one 14-byte summary per name prefix (c/ before d/).
     std::vector<std::pair<std::string, std::uint64_t>> dirs;
     for (const auto& e : entries) {
         const std::size_t slash = e.name.find('/');
@@ -626,33 +654,15 @@ std::vector<std::uint8_t> writeContainer(const std::vector<OutEntry>& entries,
             }
         if (!found) dirs.emplace_back(prefix, 1);
     }
-    putU16le(out, static_cast<std::uint16_t>(dirs.size()));
-    out.push_back(0);
-    const std::size_t tableStart = out.size();
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const OutEntry& e = entries[i];
-        putU32le(out, static_cast<std::uint32_t>(i + 1));  // id
-        out.push_back(0);                                 // flag 0: named
-        putU64le(out, offsets[i]);
-        putU64le(out, e.plainSize);
-        putU64le(out, e.payload.size());
-        putU32le(out, e.crc);
-        out.push_back(e.comp);
-        putU32le(out, 32);  // #FT2+ constant
-        uLong ccrc = crc32(0, Z_NULL, 0);
-        if (!e.payload.empty())
-            ccrc = crc32(ccrc, e.payload.data(), static_cast<uInt>(e.payload.size()));
-        putU32le(out, static_cast<std::uint32_t>(ccrc));
-        putU16le(out, static_cast<std::uint16_t>(e.name.size()));
-        out.insert(out.end(), e.name.begin(), e.name.end());
-    }
+    std::sort(dirs.begin(), dirs.end());
     for (const auto& d : dirs) {
-        putU16le(out, static_cast<std::uint16_t>(d.first.size()));
-        putU16le(out, 0);
-        putU64le(out, d.second);
-        out.insert(out.end(), d.first.begin(), d.first.end());
+        putU32le(out, 2);
+        putU32le(out, static_cast<std::uint32_t>(d.second));
+        putU32le(out, 0);
+        out.push_back(d.first.size() > 0 ? d.first[0] : '\0');
+        out.push_back(d.first.size() > 1 ? d.first[1] : '\0');
     }
-    const std::uint32_t tableSize = static_cast<std::uint32_t>(out.size() - tableStart);
+    const std::uint32_t tableSize = static_cast<std::uint32_t>(out.size() - fatOffset - 59);
     out[tableSizeAt + 0] = static_cast<std::uint8_t>(tableSize & 0xff);
     out[tableSizeAt + 1] = static_cast<std::uint8_t>((tableSize >> 8) & 0xff);
     out[tableSizeAt + 2] = static_cast<std::uint8_t>((tableSize >> 16) & 0xff);

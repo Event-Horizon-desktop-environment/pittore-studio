@@ -17,11 +17,15 @@ namespace pittore::ui {
 // Vector = Designer-persona subset (curves, shapes, fills, text).
 // Draw = freehand painting (brushes, eraser, smudge, tone paint, fills).
 // Color = grade, balance and scopes (levels/curves/HSL/LUT live, realtime).
-// Layout is reserved for later; do not add it until a workspace exists.
-enum class Persona { Pixel = 0, Vector = 1, Draw = 2, Color = 3 };
+// Artboard = document structure and layout (create/size/reorder boards,
+//            board properties, per-board export) plus the vector work a
+//            layout needs: Pen/Node/Rectangle drawing, Place, Vector Crop,
+//            Fill, Transparency and the colour picker. Paint, selection and
+//            retouch groups stay hidden, so nothing here can touch pixels.
+enum class Persona { Pixel = 0, Vector = 1, Draw = 2, Color = 3, Artboard = 4 };
 
-QString personaName(Persona p);  // "Pixel" / "Vector" / "Draw" / "Color"
-QString personaId(Persona p);    // "pixel" / "vector" / "draw" / "color" (settings value)
+QString personaName(Persona p);  // "Pixel" / "Vector" / "Draw" / "Color" / "Artboard"
+QString personaId(Persona p);    // "pixel" / "vector" / "draw" / "color" / "artboard"
 bool personaFromId(const QString& id, Persona* out);
 
 // Group leaders visible in the Vector tab (existing ToolIds only; vector-only
@@ -44,6 +48,14 @@ std::vector<ToolId> drawHiddenLeaders();
 std::vector<ToolId> colorVisibleLeaders();
 // Group leaders hidden in the Color tab (= all leaders minus visible).
 std::vector<ToolId> colorHiddenLeaders();
+// Group leaders visible in the Artboard tab: Move (which hosts the Artboard
+// tool), the vector set a layout needs — Pen, Node, Rectangle, Place, Vector
+// Crop, Fill, Transparency — the Eyedropper colour picker, and the shared
+// Hand/Zoom navigation. Paint, selection and retouch stay hidden, so no tool
+// here can alter a layer's pixels.
+std::vector<ToolId> artboardVisibleLeaders();
+// Group leaders hidden in the Artboard tab (= all leaders minus visible).
+std::vector<ToolId> artboardHiddenLeaders();
 // ToolsPanel::setHiddenTools payload for a persona.
 QStringList hiddenToolsFor(Persona p);
 
@@ -69,5 +81,11 @@ QStringList colorPanels();
 QStringList colorOnlyPanels();
 // Fallback when entering Color with no captured layout yet.
 QStringList colorFallbackPanels();
+// Artboard-first layout: the Artboards panel leads, then the board context.
+QStringList artboardPanels();
+// Artboard-exclusive panels: hidden when leaving Artboard.
+QStringList artboardOnlyPanels();
+// Fallback when entering Artboard with no captured layout yet.
+QStringList artboardFallbackPanels();
 
 }  // namespace pittore::ui

@@ -790,6 +790,7 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
     data.dpi = doc.dpi;
     data.colorMode = doc.colorMode;
     data.iccProfile = doc.iccProfile;
+    data.boardIdCounter = doc.boardIdCounter;
     // Background label is derived from the bottom-most realised pixel layer so
     // the start page can restate it after a reload.
     data.background = QStringLiteral("white");
@@ -831,6 +832,14 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
         meta.lockTransparency = li.lockTransparency;
         meta.clipped = li.clipped;
         meta.indent = li.indent;
+        meta.isBoard = li.isBoard();
+        if (li.isBoard()) {
+            meta.boardId = li.boardId;
+            meta.boardRect = li.boardRect;
+            meta.boardHasFill = li.boardHasFill;
+            meta.boardFill = li.boardFill;
+            meta.boardFillOpacity = li.boardFillOpacity;
+        }
         if (li.hasMask && li.mask && li.mask->width() > 0 &&
             li.mask->height() > 0) {
             meta.hasMask = true;

@@ -50,6 +50,9 @@ struct HostPlacedLayer {
     int adjKind = 0;
     float adjP[16] = {};
     const float* adjAux = nullptr;
+    // Solid fill (D1): constant `fillColor` over the window instead of `src`.
+    bool isFill = false;
+    RGBAf fillColor;
 };
 
 // Sample mask coverage at a document pixel. A null/invalid mask reveals

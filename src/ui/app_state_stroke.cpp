@@ -195,6 +195,12 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                 .toStdString();
         const auto mixOp =
             pittore::compute::dabmix::mix_from_id(mixId.c_str());
+        // Tool blend mode ("Mode" combo). Wash strokes accumulate coverage
+        // into the scratch buffer at Normal and apply the mode once at
+        // bake/preview time; direct buildup dabs blend per dab.
+        const pittore::compute::BlendMode dabBlend =
+            toScratch ? pittore::compute::BlendMode::Normal
+                      : paintBlendFor(activeTool_);
         pittore::compute::NativeCmykPaint nativePaint;
         pittore::compute::NativeCmykPaint* nativePaintPtr = nullptr;
         const bool useNativeCmyk =
@@ -218,7 +224,7 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                 static_cast<float>(std::clamp(opacity, 0.0, 1.0)),
                 pittore::RGBAf{color.redF(), color.greenF(), color.blueF(), 1.0f},
                 selPtr, &paintTex, &dabDenPaint, &maskPaint, grainPtr, mixOp,
-                nativePaintPtr);
+                nativePaintPtr, dabBlend);
         } else {
             pittore::compute::AutoTip tip;
             tip.silhouette = squareTip
@@ -255,7 +261,7 @@ bool AppState::paintDab(const QPointF& docPos, double radius, double hardness,
                 static_cast<float>(std::clamp(opacity, 0.0, 1.0)),
                 pittore::RGBAf{color.redF(), color.greenF(), color.blueF(), 1.0f},
                 selPtr, &paintTex, &dabDenPaint, &maskPaint, grainPtr, mixOp,
-                nativePaintPtr);
+                nativePaintPtr, dabBlend);
         }
         if (!toScratch) {
             // Incremental device refresh (region upload, no stamp churn);

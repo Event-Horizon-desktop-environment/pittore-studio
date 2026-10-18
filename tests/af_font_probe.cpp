@@ -336,7 +336,7 @@ int main(int argc, char** argv) {
                             "lead=%.3f gap=%.1f frameH=%.1f origin=(%.1f,%.1f) "
                             "layer=(%d,%d)%ux%u hasText=%d isText=%d\n",
                             l.name.c_str(), l.textSpec.family.c_str(), l.textSpec.size,
-                            l.textSpec.wrapWidth, (int)l.textSpec.align,
+                            l.textSpec.wrapWidth.value_or(0.0f), (int)l.textSpec.align,
                             l.textSpec.emLeading, l.textSpec.paragraphGap,
                             l.textFrameHeight, l.textOriginX, l.textOriginY,
                             l.left, l.top, l.width, l.height, l.hasText ? 1 : 0,

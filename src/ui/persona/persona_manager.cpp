@@ -81,12 +81,17 @@ void PersonaManager::apply(Persona p) {
         // separate windows stay uninvited).
         capturePixel();
         for (const QString& id : pixelOnlyPanels()) showPanel_(id, false);
+        for (const QString& id : artboardOnlyPanels()) showPanel_(id, false);
         if (p == Persona::Vector) {
             for (const QString& id : vectorPanels())
                 if (!isFloating(id)) showPanel_(id, true);
         } else if (p == Persona::Color) {
             for (const QString& id : vectorOnlyPanels()) showPanel_(id, false);
             for (const QString& id : colorPanels())
+                if (!isFloating(id)) showPanel_(id, true);
+        } else if (p == Persona::Artboard) {
+            for (const QString& id : vectorOnlyPanels()) showPanel_(id, false);
+            for (const QString& id : artboardPanels())
                 if (!isFloating(id)) showPanel_(id, true);
         } else {
             for (const QString& id : vectorOnlyPanels()) showPanel_(id, false);

@@ -41,6 +41,53 @@ void run() {
     CHECK(personaFromId(QStringLiteral("color"), &out) && out == Persona::Color);
     CHECK(!personaFromId(QStringLiteral("layout"), &out));
 
+    // Artboard round-trip (structural persona).
+    CHECK(personaName(Persona::Artboard) == QStringLiteral("Artboard"));
+    CHECK(personaId(Persona::Artboard) == QStringLiteral("artboard"));
+    CHECK(personaFromId(QStringLiteral("artboard"), &out) &&
+          out == Persona::Artboard);
+
+    // Artboard is structural + vector layout: paint, selection and retouch
+    // groups stay hidden so no tool in this tab can touch pixels.
+    {
+        const QStringList hidden = hiddenToolsFor(Persona::Artboard);
+        CHECK(!hidden.isEmpty());
+        for (ToolId id : artboardHiddenLeaders())
+            CHECK(hidden.contains(QString::number(static_cast<int>(id))));
+        // hiddenToolsFor() carries GROUP LEADERS only: tools that ride in
+        // another group (Eraser/Pencil/CloneStamp with Brush, Transparency
+        // with Gradient, PointTransform with Node) are not listed under their
+        // own id. So assert over allGroups(), not over raw ToolIds.
+        const std::vector<ToolId> vis = artboardVisibleLeaders();
+        int groups = 0;
+        int visibleLeaders = 0;
+        for (const ToolGroup& g : allGroups()) {
+            ++groups;
+            const bool visible =
+                std::find(vis.begin(), vis.end(), g.leader) != vis.end();
+            if (visible) ++visibleLeaders;
+            CHECK(hidden.contains(QString::number(static_cast<int>(g.leader))) ==
+                  !visible);
+        }
+        CHECK(visibleLeaders > 0);
+        CHECK(hidden.size() == groups - visibleLeaders);
+        // The layout set the persona exists for must survive as visible
+        // leaders: drawing (Pen/Rectangle), editing (Node), Place and the
+        // navigation/colour utilities.
+        for (ToolId id : {ToolId::Move, ToolId::Pen, ToolId::Rectangle,
+                          ToolId::Eyedropper, ToolId::Hand, ToolId::Zoom})
+            CHECK(!hidden.contains(QString::number(static_cast<int>(id))));
+    }
+
+    // The Artboards panel is Artboard-exclusive: it must not appear anywhere
+    // else, and must lead its own layout.
+    CHECK(artboardOnlyPanels().contains(QStringLiteral("artboards")));
+    CHECK(artboardPanels().first() == QStringLiteral("artboards"));
+    CHECK(!vectorPanels().contains(QStringLiteral("artboards")));
+    CHECK(!colorPanels().contains(QStringLiteral("artboards")));
+    CHECK(!drawPanels().contains(QStringLiteral("artboards")));
+    CHECK(!pixelFallbackPanels().contains(QStringLiteral("artboards")));
+
     // Pixel hides vector-exclusive tools only (photo bench keeps the rest).
     {
         const QStringList pixelHidden = hiddenToolsFor(Persona::Pixel);

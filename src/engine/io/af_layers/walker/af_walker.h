@@ -39,7 +39,7 @@ struct Walker {
     const Graph& g;
     AfLayersDoc& doc;
     std::string baseDir;   // directory of the .af, for linked-source resolution
-    std::unordered_map<std::string, std::optional<Bitmap>> sourceCache;
+    std::unordered_map<std::string, std::optional<Bitmap>> sourceCache{};
     // Count of enclosing groups with live masks. Group masks are stored on
     // their group rows (not baked), but a masked ancestor still means vector
     // geometry alone cannot reproduce a descendant.
@@ -48,7 +48,7 @@ struct Walker {
     // page index in doc.pages. The board-set branch in emit() toggles
     // `boardSplit` once the document prologue qualifies the file, and tags
     // every layer it descends into with `currentBoard` (AfLayer::board).
-    std::unordered_map<const Node*, int> boardIndex;
+    std::unordered_map<const Node*, int> boardIndex{};
     bool boardSplit = false;
     int currentBoard = -1;
     Mat nodeCtm(const Node* node, const Mat& parent) const;

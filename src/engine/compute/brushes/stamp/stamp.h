@@ -118,7 +118,8 @@ void stamp_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     dabmix::DabMixOp mix = dabmix::DabMixOp::Normal,
                     const papergrain::PaperGrain* kgrain = nullptr,
                     const StampSharp* sharp = nullptr,
-                    NativeCmykPaint* nativeCmyk = nullptr);
+                    NativeCmykPaint* nativeCmyk = nullptr,
+                    BlendMode blend = BlendMode::Normal);
 
 // Eraser twin: stamp coverage multiplies alpha down, RGB untouched.
 // Carves relief too when a height plane is given (same mask).

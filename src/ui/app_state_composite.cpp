@@ -12,6 +12,7 @@
 
 #include "engine/compute/adjust.h"
 #include "engine/compute/backend.h"
+#include "engine/compute/blend.h"
 #include "engine/compute/brushes/dab/dab.h"
 #include "engine/compute/dither.h"
 #include "engine/compute/factory.h"
@@ -30,8 +31,25 @@
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 namespace pittore::ui {
+
+namespace {
+// sRGB (QColor) → linear-light RGBAf, matching how layer pixels are stored
+// (straight-alpha linear). The board fill colour is sRGB; the compositor works
+// in linear, so convert once at gather time. The QColor's own alpha rides
+// through; the separate fill opacity folds in later as `fold`.
+pittore::RGBAf boardFillLinear(const QColor& c) {
+    const auto lin = [](int v) {
+        const float s = static_cast<float>(v) / 255.0f;
+        return s <= 0.04045f ? s / 12.92f
+                             : std::pow((s + 0.055f) / 1.055f, 2.4f);
+    };
+    return pittore::RGBAf{lin(c.red()), lin(c.green()), lin(c.blue()),
+                          c.alphaF()};
+}
+}  // namespace
 
 // Persistent per-document staging: the engine accumulator, allocated once per
 // document size, plus the device-side source caches below. A brush stroke
@@ -206,6 +224,38 @@ void DocumentItem::gatherCompositedLayers(const QRect& region,
     QVector<int> effParent;
     effectiveVisibility(effVis, effParent);
 
+    // Board clip (D1): resolve each row's owning board and this region's board
+    // rects once, so the per-row narrowing below is an O(1) lookup rather than
+    // a per-row ancestor scan (which would go O(n²); see §16.2).
+    QVector<std::uint64_t> boardOwn;
+    boardOwnership(boardOwn);
+    const std::unordered_map<std::uint64_t, QRectF> boardRects =
+        boardClipRects(*this, region);
+
+    // Board fill (D1): a board paints a solid colour behind its children. The
+    // fill is emitted as its own layer at the board's bottom-most subtree row
+    // (see the trigger in the loop below), so it composites below every child
+    // but above whatever sits below the board. It carries no source, mask or
+    // clip: just a constant colour over the board rect, with the board's fill
+    // opacity folded into alpha.
+    std::unordered_set<std::uint64_t> fillDone;
+    auto emitFill = [&](std::uint64_t bid) {
+        const int br = boardRowIndex(bid);
+        if (br < 0 || !effVis[br]) return;
+        const LayerItem& bl = layers[br];
+        if (!bl.boardHasFill) return;
+        const QRect brect = boardPaintRect(boardRects, bid);
+        if (brect.isEmpty()) return;
+        CompositedLayer e;
+        e.layerIndex = br;
+        e.isFill = true;
+        e.fillColor = boardFillLinear(bl.boardFill);
+        e.fold = static_cast<float>(bl.boardFillOpacity);
+        e.blendMode = QStringLiteral("Normal");
+        e.window = brect;
+        out.push_back(std::move(e));
+    };
+
     // Standard clipping groups: a clipped layer uses the nearest
     // included non-clipped pixel layer in the same parent scope as its base.
     // A base that exists but contributes nothing here (hidden or outside the
@@ -217,6 +267,14 @@ void DocumentItem::gatherCompositedLayers(const QRect& region,
     for (int i = layers.size() - 1; i >= 0; --i) {
         LayerItem& l = layers[i];
         const int parent = effParent[i];
+        // Board fill (D1): emit each board's fill once, at its bottom-most
+        // subtree row, so it lands below every child but above whatever sits
+        // below the board. boardOwn is self-owned on the header and inherited
+        // by every descendant, so the first downward hit is that bottom row.
+        if (boardOwn[i] != 0 && !fillDone.contains(boardOwn[i])) {
+            fillDone.insert(boardOwn[i]);
+            emitFill(boardOwn[i]);
+        }
         const bool isAdjustment =
             l.kind == LayerItem::Kind::Adjustment && l.adjustmentKind != 0;
         if (l.kind != LayerItem::Kind::Pixel && !isAdjustment) {
@@ -230,6 +288,30 @@ void DocumentItem::gatherCompositedLayers(const QRect& region,
         if (!effVis[i]) {
             // A hidden pixel base still blocks the chain (its clipped
             // followers stay invisible); a hidden adjustment is simply absent.
+            if (!isAdjustment && parent == baseParent) {
+                baseOutPos = -1;
+                baseExists = true;
+            }
+            continue;
+        }
+        // Board clip (D1): narrow this row's paint bounds to its owning
+        // board's rect (already intersected with the region). A row entirely
+        // outside its board takes the same skip path as a hidden one, so an
+        // alpha-clip base inside the board still blocks its followers.
+        int ix0 = x0, iy0 = y0, ix1 = x1, iy1 = y1;
+        if (boardOwn[i] != 0) {
+            const QRect br = boardPaintRect(boardRects, boardOwn[i]);
+            if (br.isEmpty()) {
+                ix0 = ix1;
+                iy0 = iy1;  // board misses the region: nothing paints here
+            } else {
+                ix0 = std::max(x0, br.left());
+                iy0 = std::max(y0, br.top());
+                ix1 = std::min(x1, br.right() + 1);
+                iy1 = std::min(y1, br.bottom() + 1);
+            }
+        }
+        if (ix0 >= ix1 || iy0 >= iy1) {
             if (!isAdjustment && parent == baseParent) {
                 baseOutPos = -1;
                 baseExists = true;
@@ -273,7 +355,7 @@ void DocumentItem::gatherCompositedLayers(const QRect& region,
                          : nullptr;
             e.fold = (l.opacity / 100.0f) * (l.fill / 100.0f);
             e.blendMode = l.blendMode;
-            e.window = QRect(x0, y0, x1 - x0, y1 - y0);
+            e.window = QRect(ix0, iy0, ix1 - ix0, iy1 - iy0);
             out.push_back(std::move(e));
             continue;
         }
@@ -286,10 +368,10 @@ void DocumentItem::gatherCompositedLayers(const QRect& region,
             continue;
         }
         std::uint32_t rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
-        if (!gpuCompositeWindow(*this, l, static_cast<std::uint32_t>(x0),
-                                static_cast<std::uint32_t>(y0),
-                                static_cast<std::uint32_t>(x1),
-                                static_cast<std::uint32_t>(y1), &rx0, &ry0,
+        if (!gpuCompositeWindow(*this, l, static_cast<std::uint32_t>(ix0),
+                                static_cast<std::uint32_t>(iy0),
+                                static_cast<std::uint32_t>(ix1),
+                                static_cast<std::uint32_t>(iy1), &rx0, &ry0,
                                 &rx1, &ry1)) {
             if (parent == baseParent) {
                 baseOutPos = -1;
@@ -462,7 +544,10 @@ void DocumentItem::rebuildComposite() {
         for (std::size_t j = glo; j < ghi && j < gathered.size(); ++j) {
             const CompositedLayer& e = gathered[j];
             pittore::compute::HostPlacedLayer v;
-            if (e.isAdjustment) {
+            if (e.isFill) {
+                v.isFill = true;
+                v.fillColor = e.fillColor;
+            } else if (e.isAdjustment) {
                 v.isAdjustment = true;
                 v.adjKind = e.adjKind;
                 for (int k = 0; k < 16; ++k) v.adjP[k] = e.adjP[k];
@@ -679,7 +764,10 @@ void DocumentItem::renderRegion(const QRect& region) {
     views.reserve(gathered.size());
     for (const CompositedLayer& e : gathered) {
         pittore::compute::HostPlacedLayer v;
-        if (e.isAdjustment) {
+        if (e.isFill) {
+            v.isFill = true;
+            v.fillColor = e.fillColor;
+        } else if (e.isAdjustment) {
             v.isAdjustment = true;
             v.adjKind = e.adjKind;
             for (int k = 0; k < 16; ++k) v.adjP[k] = e.adjP[k];
@@ -838,7 +926,10 @@ void DocumentItem::renderRegionTone(const QRect& region) {
         for (const CompositedLayer& e : gathered) {
             const LayerItem& l = layers[e.layerIndex];
             pittore::compute::PlacedLayer p;
-            if (e.isAdjustment) {
+            if (e.isFill) {
+                p.isFill = true;
+                p.fillColor = e.fillColor;
+            } else if (e.isAdjustment) {
                 p.isAdjustment = true;
                 p.adjKind = e.adjKind;
                 for (int k = 0; k < 16; ++k) p.adjP[k] = e.adjP[k];
@@ -1055,7 +1146,10 @@ void DocumentItem::renderRegionTone(const QRect& region) {
             for (std::size_t j = glo; j < ghi && j < gathered.size(); ++j) {
                 const CompositedLayer& e = gathered[j];
                 pittore::compute::HostPlacedLayer v;
-                if (e.isAdjustment) {
+                if (e.isFill) {
+                    v.isFill = true;
+                    v.fillColor = e.fillColor;
+                } else if (e.isAdjustment) {
                     v.isAdjustment = true;
                     v.adjKind = e.adjKind;
                     for (int k = 0; k < 16; ++k) v.adjP[k] = e.adjP[k];
@@ -1249,6 +1343,12 @@ void AppState::flushPaint() {
                 pittore::compute::dabmix::mix_from_id(mixId.c_str());
             const bool useMix =
                 mixOp != pittore::compute::dabmix::DabMixOp::Normal;
+            // The tool's blend mode applies to the whole wash at once (the
+            // scratch accumulated at Normal), mirroring the release bake.
+            const pittore::compute::BlendMode washBlend =
+                paintBlendFor(activeTool_);
+            const bool useBlend =
+                !useMix && washBlend != pittore::compute::BlendMode::Normal;
             const pittore::RGBAf* src = washScratch_.data();
             const std::uint32_t w = washScratch_.width();
             for (int y = region.top(); y <= region.bottom(); ++y) {                QRgb* row = reinterpret_cast<QRgb*>(
@@ -1276,6 +1376,29 @@ void AppState::flushPaint() {
                         pittore::compute::dabmix::mix_pixel(
                             mixOp, s.r, s.g, s.b, sa, dr, dg, db, da, or_,
                             og, ob, oa);
+                        row[x] = qRgba(
+                            std::clamp(int(or_ * oa * 255.0f), 0, 255),
+                            std::clamp(int(og * oa * 255.0f), 0, 255),
+                            std::clamp(int(ob * oa * 255.0f), 0, 255),
+                            std::clamp(int(oa * 255.0f), 0, 255));
+                        continue;
+                    }
+                    if (useBlend) {
+                        // Blend-mode preview: unpremultiply the backdrop,
+                        // run the shared W3C shell, re-premultiply into the
+                        // composite row.
+                        const QRgb dst = row[x];
+                        const float da = qAlpha(dst) / 255.0f;
+                        float dr = 0.0f, dg = 0.0f, db = 0.0f;
+                        if (da > 1e-6f) {
+                            dr = qRed(dst) / 255.0f / da;
+                            dg = qGreen(dst) / 255.0f / da;
+                            db = qBlue(dst) / 255.0f / da;
+                        }
+                        float or_, og, ob, oa;
+                        pittore::compute::blend::pixel(
+                            washBlend, s.r, s.g, s.b, sa, dr, dg, db, da, x,
+                            y, or_, og, ob, oa);
                         row[x] = qRgba(
                             std::clamp(int(or_ * oa * 255.0f), 0, 255),
                             std::clamp(int(og * oa * 255.0f), 0, 255),

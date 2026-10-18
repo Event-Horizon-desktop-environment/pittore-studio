@@ -165,6 +165,10 @@ class MainWindow final : public QMainWindow {
     // the first press and key auto-repeat, so holding [ / ] walks the size
     // for every brush tool (issue #8). Returns true when it handled the key.
     bool handleBrushSizeKey(QKeyEvent* key);
+    // Alt+Shift+<letter> family (keymap ids toggle-clip-alt, blend-multiply,
+    // blend-screen): strict modifier match (Shift counts), then route to the
+    // clip toggle or the tool/layer blend mode. Returns true when handled.
+    bool handleBlendModeKey(QKeyEvent* key);
     // Points the import profile-mismatch resolver at the modal dialog
     // (embedded-profile mismatch workflow). Re-armed after any
     // stretch that must stay silent (session restore).

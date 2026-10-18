@@ -1,6 +1,7 @@
 #include "engine/io/project.h"
 
 #include <cstring>
+#include <cstdio>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -34,6 +35,11 @@ void putU32(std::vector<std::uint8_t>& out, std::uint32_t v) {
     putU16(out, static_cast<std::uint16_t>(v & 0xffff));
 }
 
+void putU64(std::vector<std::uint8_t>& out, std::uint64_t v) {
+    putU32(out, static_cast<std::uint32_t>(v >> 32));
+    putU32(out, static_cast<std::uint32_t>(v & 0xffffffffu));
+}
+
 void putF64(std::vector<std::uint8_t>& out, double v) {
     std::uint64_t bits = 0;
     std::memcpy(&bits, &v, sizeof bits);
@@ -43,11 +49,54 @@ void putF64(std::vector<std::uint8_t>& out, double v) {
     putU16(out, static_cast<std::uint16_t>(bits & 0xffff));
 }
 
+void putF32(std::vector<std::uint8_t>& out, float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof bits);
+    putU32(out, bits);
+}
+
 void putStr16(std::vector<std::uint8_t>& out, const std::string& s,
               std::size_t maxLen) {
     const std::size_t n = s.size() > maxLen ? maxLen : s.size();
     putU16(out, static_cast<std::uint16_t>(n));
     out.insert(out.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
+}
+
+// §8.2 rule 1: a self-describing record `[type:4][length:u32][payload:length]`,
+// so a reader that does not know `type` skips it by length (rule 2).
+void putRecord(std::vector<std::uint8_t>& out, const char type[4],
+               const std::vector<std::uint8_t>& payload) {
+    out.insert(out.end(), type, type + 4);
+    putU32(out, static_cast<std::uint32_t>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
+// ABDT payload (§8.3): id, name, rect, fill kind, fill payload, fill opacity,
+// board opacity, visible/locked flags, extras blob. Name/opacity/flags are
+// duplicated from the layer row so the record is self-contained; the reader
+// keeps the layer row's values as authoritative and consumes these.
+std::vector<std::uint8_t> boardPayload(const ProjectLayerFile& l) {
+    std::vector<std::uint8_t> p;
+    putU64(p, l.boardId);
+    putStr16(p, l.name, 65535);
+    putF64(p, l.boardX);
+    putF64(p, l.boardY);
+    putF64(p, l.boardW);
+    putF64(p, l.boardH);
+    p.push_back(l.boardHasFill ? 1 : 0);  // fill kind: 0 none, 1 solid
+    if (l.boardHasFill) {
+        putU32(p, 4);  // fill payload length, so an unknown kind is skippable
+        putU32(p, l.boardFillColor);
+    } else {
+        putU32(p, 0);
+    }
+    putF32(p, l.boardFillOpacity);
+    putF32(p, static_cast<float>(l.opacity));  // board opacity (reuses `opacity`)
+    p.push_back(static_cast<std::uint8_t>((l.visible ? 1 : 0) |
+                                         (l.locked ? 2 : 0)));
+    putU32(p, static_cast<std::uint32_t>(l.boardExtras.size()));
+    p.insert(p.end(), l.boardExtras.begin(), l.boardExtras.end());
+    return p;
 }
 
 // Straight RGBA16 samples → big-endian byte stream (the on-disk wording).
@@ -141,6 +190,19 @@ struct Reader {
         return v;
     }
 
+    std::uint64_t u64() {
+        const std::uint32_t hi = u32();
+        const std::uint32_t lo = u32();
+        return (static_cast<std::uint64_t>(hi) << 32) | lo;
+    }
+
+    float f32() {
+        const std::uint32_t bits = u32();
+        float v = 0;
+        std::memcpy(&v, &bits, sizeof v);
+        return v;
+    }
+
     const std::uint8_t* take(std::size_t n) {
         if (n > remaining()) {
             ok = false;
@@ -226,6 +288,7 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     bool v4 = false;
     bool v5 = false;
     bool v6 = false;
+    bool v7 = false;
     std::uint64_t psdBlockBytes = 0;
     for (const ProjectLayerFile& l : p.layers) {
         if (l.hasMask || l.clipped || l.lockTransparency || l.indent != 0 ||
@@ -258,8 +321,10 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
         if (!l.cmyk.empty()) v5 = true;
         if (l.hasTextSpec && (l.textEmLeading != 0.0 || l.textParagraphGap != 0.0))
             v6 = true;
-        if (v2 && v3 && v4 && v5 && v6) break;
+        if (l.isBoard) v7 = true;
+        if (v2 && v3 && v4 && v5 && v6 && v7) break;
     }
+    v6 = v6 || v7;  // v7 is a strict superset of v6 below.
     v5 = v5 || v6;  // v6 is a strict superset of v5 below.
     v4 = v4 || v5;  // v5 is a strict superset of v4 below.
     v3 = v3 || v4;  // v4 is a strict superset of v3 below.
@@ -268,7 +333,8 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     std::vector<std::uint8_t> out;
     // ── header ──────────────────────────────────────────────────────────────
     putBytes(out, "INFIPROJ", 8);
-    putU32(out, v6 ? 6 : (v5 ? 5 : (v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1)))));  // version
+    putU32(out, v7 ? 7
+                   : (v6 ? 6 : (v5 ? 5 : (v4 ? 4 : (v3 ? 3 : (v2 ? 2 : 1))))));  // version
     putU32(out, p.width);
     putU32(out, p.height);
     putU16(out, 4);                  // channels (RGBA)
@@ -284,6 +350,9 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     std::vector<std::uint8_t> meta;
     putStr16(meta, p.name, 65535);
     putStr16(meta, p.colorModeName, 65535);
+    // The v7 board-id counter lives in the ABOR record at the head of the
+    // layers section (§8.3), not here, so a reader allocates ids above every
+    // loaded board before it parses any board rows.
     if (!p.icc.empty()) {
         putU32(meta, static_cast<std::uint32_t>(p.icc.size()));
         putBytes(meta, p.icc.data(), p.icc.size());
@@ -347,10 +416,24 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
 
     std::vector<std::uint8_t> layers;
     putU32(layers, static_cast<std::uint32_t>(p.layers.size()));
+    if (v7) {
+        // ABOR opens the section: board count + id counter (§8.3), so a reader
+        // knows how many board rows to expect and allocates ids above every
+        // loaded id before parsing any row.
+        std::uint32_t boardCount = 0;
+        for (const ProjectLayerFile& l : p.layers)
+            if (l.isBoard) ++boardCount;
+        std::vector<std::uint8_t> abor;
+        putU32(abor, boardCount);
+        putU64(abor, p.boardIdCounter);
+        putRecord(layers, "ABOR", abor);
+    }
     std::size_t li = 0;
     for (const ProjectLayerFile& l : p.layers) {
         putStr16(layers, l.name, 65535);
-        layers.push_back(l.kind);
+        // A board row carries the Artboard kind byte (§8.3); in memory it is a
+        // Group row with boardId (INV-011), so the translation lives here.
+        layers.push_back(l.isBoard ? kProjectKindArtboard : l.kind);
         layers.push_back(static_cast<std::uint8_t>((l.visible ? 1 : 0) |
                                                    (l.locked ? 2 : 0) |
                                                    (l.isText ? 4 : 0) |
@@ -541,7 +624,29 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
                               comps[li].cmyk.end());
             }
         }
+        // v7 board row: an ABDT record immediately follows the board's layer
+        // fields (§8.3), carrying the board payload. Board opacity reuses
+        // `opacity` above; visible/locked reuse the v1 flags, so the layer row
+        // keeps a single source of truth for each property.
+        if (v7 && l.isBoard) putRecord(layers, "ABDT", boardPayload(l));
         ++li;
+    }
+
+    if (v7) {
+        // ABEN closes the rows: one entry per board in board order (top of
+        // stack first, matching the layer row sequence), each with the board's
+        // row marker.
+        std::vector<std::uint8_t> aben;
+        for (std::size_t i = 0; i < p.layers.size(); ++i) {
+            if (!p.layers[i].isBoard) continue;
+            putU64(aben, p.layers[i].boardId);
+            putU32(aben, static_cast<std::uint32_t>(i));
+        }
+        putRecord(layers, "ABEN", aben);
+        // Trailing unknown records, re-emitted verbatim in original order
+        // (§8.2 rule 5) — "preserve unknown data on round trip".
+        layers.insert(layers.end(), p.unknownRecords.begin(),
+                      p.unknownRecords.end());
     }
 
     std::vector<std::uint8_t> preview;
@@ -574,6 +679,55 @@ std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& p,
     return out;
 }
 
+// Reads a §8.2 record `[type:4][length:u32][payload:length]` into `type`
+// (NUL-terminated, 5 bytes) and `payload`. False if truncated.
+bool readRecord(Reader& l, char type[5], std::vector<std::uint8_t>& payload) {
+    const std::uint8_t* t = l.take(4);
+    const std::uint32_t len = l.u32();
+    const std::uint8_t* p = len ? l.take(len) : nullptr;
+    if (!t || (len && !p)) return false;
+    std::memcpy(type, t, 4);
+    type[4] = 0;
+    if (len)
+        payload.assign(p, p + len);
+    else
+        payload.clear();
+    return true;
+}
+
+// Parses an ABDT payload (§8.3) into the board fields. The layer row's
+// name/visible/locked/opacity are authoritative and are not overwritten; the
+// fill payload is length-delimited so an unknown fill kind is skipped by
+// length (rule 2), not guessed at.
+bool parseBoardPayload(const std::vector<std::uint8_t>& pb,
+                       ProjectLayerFile& layer) {
+    Reader pr(pb);
+    layer.boardId = pr.u64();
+    pr.str();  // ABDT name, duplicate of the layer row; consumed, not applied
+    layer.boardX = pr.f64();
+    layer.boardY = pr.f64();
+    layer.boardW = pr.f64();
+    layer.boardH = pr.f64();
+    const std::uint8_t fillKind = pr.u8();
+    const std::uint32_t fillLen = pr.u32();
+    if (fillKind == 1 && fillLen >= 4) {
+        layer.boardHasFill = true;
+        layer.boardFillColor = pr.u32();
+        if (fillLen > 4) pr.skip(fillLen - 4);
+    } else {
+        layer.boardHasFill = false;
+        pr.skip(fillLen);
+    }
+    layer.boardFillOpacity = pr.f32();
+    pr.f32();  // board opacity, duplicate of the layer row; consumed
+    pr.u8();   // visible/locked flags, duplicate; consumed
+    const std::uint32_t extrasLen = pr.u32();
+    const std::uint8_t* extras = extrasLen ? pr.take(extrasLen) : nullptr;
+    if (extrasLen && !extras) return false;
+    if (extrasLen) layer.boardExtras.assign(extras, extras + extrasLen);
+    return pr.ok;
+}
+
 std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
                                             std::string* error) {
     Reader in(b);
@@ -596,8 +750,17 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version < 1 || version > 6)
-        return fail(error, "unsupported project version");
+    if (version < 1 || version > 7) {
+        char msg[288];
+        std::snprintf(msg, sizeof msg,
+                      "This project was saved by a newer version of Pittore "
+                      "Studio (file version %u; this build supports up to "
+                      "version %d). It has not been modified. Open it with a "
+                      "newer build, or export to PNG/PSD from the newer build "
+                      "if you need to share it.",
+                      version, 7);
+        return fail(error, msg);
+    }
     if (channels != 4 || depth != 16)
         return fail(error, "unsupported project channel layout");
     if (in.remaining() < static_cast<std::size_t>(metaLen) + layersLen + previewLen)
@@ -617,6 +780,8 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
         const std::size_t metaEnd = in.pos + metaLen;
         doc.name = m.str();
         doc.colorModeName = m.str();
+        // The v7 board-id counter lives in the ABOR record at the head of the
+        // layers section, not here.
         // Optional trailing ICC block (u32 BE length + bytes); files written
         // before it existed end here, so bounds-check against metaEnd.
         if (m.ok && m.pos + 4 <= metaEnd) {
@@ -640,10 +805,31 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
         if (count > 65536)
             return fail(error, "project layer count out of range");
         layers.reserve(count);
+        if (version >= 7) {
+            // ABOR opens the section (§8.3): board count + id counter. The
+            // counter lets a board created after load get an id above every
+            // loaded one (INV-006) before any row is parsed.
+            char type[5];
+            std::vector<std::uint8_t> payload;
+            if (!readRecord(l, type, payload) || std::strcmp(type, "ABOR") != 0)
+                return fail(error, "corrupt board header record");
+            Reader ab(payload);
+            ab.u32();  // board count; the rows and ABEN carry the same truth
+            doc.boardIdCounter = ab.u64();
+            if (!ab.ok) return fail(error, "corrupt board header record");
+        }
         for (std::uint32_t i = 0; i < count; ++i) {
             ProjectLayerFile layer;
             layer.name = l.str();
-            layer.kind = l.u8();
+            const std::uint8_t kindByte = l.u8();
+            // A v7 board row carries the Artboard kind byte (§8.3); the runtime
+            // model is a Group row with boardId (INV-011), so translate here.
+            if (version >= 7 && kindByte == kProjectKindArtboard) {
+                layer.kind = kProjectKindGroup;
+                layer.isBoard = true;
+            } else {
+                layer.kind = kindByte;
+            }
             const std::uint8_t flags = l.u8();
             layer.visible = (flags & 1) != 0;
             layer.locked = (flags & 2) != 0;
@@ -849,12 +1035,67 @@ std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& b,
                                     /*allowEmpty=*/true))
                     return std::nullopt;
             }
+            // v7 board row: an ABDT record follows the board's layer fields
+            // (§8.3), carrying the board payload.
+            if (version >= 7 && layer.isBoard) {
+                char type[5];
+                std::vector<std::uint8_t> payload;
+                if (!readRecord(l, type, payload) ||
+                    std::strcmp(type, "ABDT") != 0)
+                    return fail(error, "corrupt board record");
+                if (!parseBoardPayload(payload, layer))
+                    return fail(error, "corrupt board record");
+            }
             layers.push_back(std::move(layer));
         }
         if (!l.ok) return fail(error, "corrupt layer table");
+        // After the rows, records until ABEN carry the board order (§8.3); any
+        // record type we do not model is skipped by length and retained verbatim
+        // (§8.2 rules 2/5) so it is re-emitted unchanged on save.
+        if (version >= 7) {
+            const std::size_t layersEnd = in.pos + layersLen;
+            const auto retain = [&](std::size_t start) {
+                doc.unknownRecords.insert(
+                    doc.unknownRecords.end(),
+                    in.b.begin() + static_cast<std::ptrdiff_t>(start),
+                    in.b.begin() + static_cast<std::ptrdiff_t>(l.pos));
+            };
+            char type[5];
+            std::vector<std::uint8_t> payload;
+            bool sawAben = false;
+            while (!sawAben && l.ok && l.pos < layersEnd) {
+                const std::size_t start = l.pos;
+                if (!readRecord(l, type, payload))
+                    return fail(error, "corrupt board order record");
+                if (std::strcmp(type, "ABEN") == 0) {
+                    sawAben = true;
+                    Reader ab(payload);
+                    while (ab.remaining() >= 12) {  // id u64 + row marker u32
+                        doc.boardOrder.push_back(ab.u64());
+                        ab.u32();  // row marker; panel order derives from tree
+                    }
+                    if (!ab.ok) return fail(error, "corrupt board order record");
+                } else {
+                    retain(start);
+                }
+            }
+            if (!sawAben) return fail(error, "corrupt board order record");
+            // Trailing unknown records after ABEN, retained verbatim in order.
+            while (l.ok && l.pos < layersEnd) {
+                const std::size_t start = l.pos;
+                if (!readRecord(l, type, payload))
+                    return fail(error, "corrupt trailing record");
+                retain(start);
+            }
+        }
         in.pos += layersLen;
     }
     doc.layers = std::move(layers);
+    // Re-derive the id counter from the loaded boards when it is missing or
+    // below an loaded id, so a board created after load never collides (INV-006).
+    for (const ProjectLayerFile& lf : doc.layers)
+        if (lf.isBoard && lf.boardId > doc.boardIdCounter)
+            doc.boardIdCounter = lf.boardId;
 
     // Preview.
     {
@@ -897,8 +1138,17 @@ std::optional<ProjectScanInfo> projectScan(const std::vector<std::uint8_t>& b,
     const std::uint32_t layersLen = in.u32();
     const std::uint32_t previewLen = in.u32();
     if (!in.ok) return fail(error, "truncated project header");
-    if (version < 1 || version > 6)
-        return fail(error, "unsupported project version");
+    if (version < 1 || version > 7) {
+        char msg[288];
+        std::snprintf(msg, sizeof msg,
+                      "This project was saved by a newer version of Pittore "
+                      "Studio (file version %u; this build supports up to "
+                      "version %d). It has not been modified. Open it with a "
+                      "newer build, or export to PNG/PSD from the newer build "
+                      "if you need to share it.",
+                      version, 7);
+        return fail(error, msg);
+    }
     if (in.remaining() < static_cast<std::size_t>(metaLen) + layersLen + previewLen)
         return fail(error, "truncated project sections");
 

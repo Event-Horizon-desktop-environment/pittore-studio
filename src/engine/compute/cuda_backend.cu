@@ -240,6 +240,8 @@ struct KPlacedManyParam {
     int adjKind;
     float adjP[16];
     const float* adjAux;
+    int isFill;
+    float4 fillColor;
 };
 
 // One layer's footprint on one document row. Cells are appended bottom→top per
@@ -253,6 +255,7 @@ struct KRowCell {
 // identity/translation fast paths the row walk uses for its own source.
 __device__ float4 k_sample_cell(const KPlacedManyParam& prm, int x, int y,
                                 std::size_t idx) {
+    if (prm.isFill) return prm.fillColor;  // constant source, no geometry
     if (prm.sx == 1.0 && prm.sy == 1.0 && prm.ox == 0.0 && prm.oy == 0.0 &&
         prm.sw == prm.w && prm.sh >= prm.y1) {
         return prm.src[idx];
@@ -1560,7 +1563,7 @@ class CudaBackend final : public ComputeBackend {
             if (in.y1 > static_cast<std::uint32_t>(h)) continue;
             const float4* srcDev = nullptr;
             int sw = 0, sh = 0;
-            if (!in.isAdjustment) {
+            if (!in.isAdjustment && !in.isFill) {
                 if (!in.src) continue;
                 auto& s = dynamic_cast<const CudaBuffer&>(*in.src);
                 srcDev = s.dev();
@@ -1605,6 +1608,9 @@ class CudaBackend final : public ComputeBackend {
             p.clipped = in.clipped ? 1 : 0;
             p.clipBase = in.clipBase;
             p.isAdjustment = in.isAdjustment ? 1 : 0;
+            p.isFill = in.isFill ? 1 : 0;
+            p.fillColor = make_float4(in.fillColor.r, in.fillColor.g,
+                                      in.fillColor.b, in.fillColor.a);
             p.adjKind = in.adjKind;
             for (int k = 0; k < 16; ++k) p.adjP[k] = in.adjP[k];
             p.adjAux = auxDev;

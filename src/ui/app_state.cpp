@@ -63,6 +63,7 @@
 #include "engine/core/parallel.h"
 #include "engine/core/tonal_ops.h"
 #include "ui/tools/log/tool_log.h"
+#include "ui/tools/options/option_builders.h"
 
 namespace pittore::ui {
 namespace {
@@ -76,6 +77,18 @@ const QSet<int>& separatorIndices() {
 // Fallback used by documents before AppState points them at a real backend, and
 // whenever a GPU selection fails (unavailable runtime, refused device). The
 // live backend (AppState::computeBackend) replaces this per document.
+
+// True when a tool's "mode" option is the painting tools' shared blend list
+// (option_builders.cpp). Several tools reuse the id for their own enum —
+// Color Replacement's recolor modes, the Eraser's tip shapes — and those
+// must never be read as blend modes.
+bool isBlendModeOption(const OptionSpec& spec) {
+    const std::vector<const char*> blend = detail::blendModeItems();
+    if (spec.items.size() != blend.size()) return false;
+    for (std::size_t i = 0; i < blend.size(); ++i)
+        if (std::strcmp(spec.items[i], blend[i]) != 0) return false;
+    return true;
+}
 
 // Create the backend a settings block requests: GPU when enabled and usable
 // (the named device when it exists, else the first CUDA/HIP device; anything
@@ -518,6 +531,35 @@ void AppState::setOptionSilently(ToolId tool, const QString& id, const QVariant&
     if (options_.value(key) == value) return;
     options_.insert(key, value);
     emit optionChanged(tool, id, value);
+}
+
+pittore::compute::BlendMode AppState::paintBlendFor(ToolId tool) const {
+    const QVariant v = option(tool, QStringLiteral("mode"));
+    if (!v.isValid()) return pittore::compute::BlendMode::Normal;
+    const int idx = v.toInt();
+    if (idx <= 0) return pittore::compute::BlendMode::Normal;
+    for (const OptionSpec& spec : optionsFor(tool)) {
+        if (QString::fromUtf8(spec.id) != QStringLiteral("mode")) continue;
+        if (!isBlendModeOption(spec)) break;
+        if (idx >= int(spec.items.size())) break;
+        return engineBlendMode(QString::fromUtf8(spec.items[idx]));
+    }
+    return pittore::compute::BlendMode::Normal;
+}
+
+bool AppState::setToolBlendMode(ToolId tool, const QString& name) {
+    for (const OptionSpec& spec : optionsFor(tool)) {
+        if (QString::fromUtf8(spec.id) != QStringLiteral("mode")) continue;
+        if (!isBlendModeOption(spec)) return false;
+        for (std::size_t i = 0; i < spec.items.size(); ++i) {
+            if (name == QString::fromUtf8(spec.items[i])) {
+                setOption(tool, QStringLiteral("mode"), int(i));
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
 }
 
 void AppState::setForeground(const QColor& c) {
@@ -1070,6 +1112,25 @@ bool AppState::setActiveLayerOpacity(int percent) {
     beginUndoStep();
     activeLayer()->opacity = percent;
     commitUndoStep(tr("Layer Opacity"), QStringLiteral("opacity"));
+    d->rebuildComposite();
+    emit documentModified(d);
+    emit layersChanged();
+    return true;
+}
+
+bool AppState::setActiveLayerBlendMode(const QString& name) {
+    DocumentItem* d = activeDocument();
+    LayerItem* l = activeLayer();
+    if (!d || !l) return false;
+    // The imported display alias for Linear Dodge (Add), same as MCP.
+    const QString mode = name == QStringLiteral("Add")
+                             ? QStringLiteral("Linear Dodge (Add)")
+                             : name;
+    if (!blendModeNames().contains(mode)) return false;
+    if (l->blendMode == mode) return true;
+    beginUndoStep();
+    activeLayer()->blendMode = mode;
+    commitUndoStep(tr("Blend Mode"), QStringLiteral("blend"));
     d->rebuildComposite();
     emit documentModified(d);
     emit layersChanged();

@@ -98,6 +98,11 @@ struct PlacedLayer {
     int adjKind = 0;
     float adjP[16] = {};
     const Buffer* adjAux = nullptr;    // 3x256 floats (R/G/B), Curves only
+    // Solid fill (board backgrounds, D1): every window pixel samples the
+    // constant `fillColor` instead of `src` (then null). Mask/fold/clip/blend
+    // are unchanged, so a fill is just a layer whose source is one colour.
+    bool isFill = false;
+    pittore::RGBAf fillColor;
 };
 
 // Compute engine, one per physical device (see factory.h).

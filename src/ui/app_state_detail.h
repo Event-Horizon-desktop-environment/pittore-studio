@@ -2,6 +2,8 @@
 
 #include "ui/app_state.h"
 
+#include <unordered_map>
+
 // Free helpers shared by the app_state translation units. This file is
 // internal to src/ui: nothing outside the state split includes it.
 //
@@ -97,6 +99,24 @@ QVector<int> layerMoveUnit(const DocumentItem* d, int* base = nullptr);
 // where the token claims it for the group but the scan-back (and the
 // composite) treats it as outside — the group eye then misses it.
 void normalizeLayerIndents(QVector<LayerItem>& layers);
+
+// --- artboard compositing (app_state_board_render.cpp) ----------------------
+// A board's subtree paints only inside boardRect (D1). The gather walk narrows
+// each row's paint bounds by its owning board's rect; these two helpers do the
+// geometry so the hot loop stays a couple of lines per row.
+//
+// Board paint rects for `region`: every board's rect intersected with the
+// region, keyed by board id, resolved once per gather so each child looks up
+// in O(1). Boards that miss the region are omitted (their subtrees are outside
+// it and gather skips them anyway).
+std::unordered_map<std::uint64_t, QRectF> boardClipRects(const DocumentItem& d,
+                                                         const QRect& region);
+// The whole-pixel rect a board's subtree may paint into: its entry in `rects`,
+// or an empty rect when the board misses the boardId lookup (outside the
+// region). boardRect edges are whole pixels (quantised at creation, INV-004),
+// so this is an exact integer rect, not a rounded approximation.
+QRect boardPaintRect(const std::unordered_map<std::uint64_t, QRectF>& rects,
+                     std::uint64_t boardId);
 
 // Shared file-local helpers from the app_state.cpp split, one definition
 // each for the whole UI lib:

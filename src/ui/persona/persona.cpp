@@ -14,6 +14,8 @@ QString personaName(Persona p) {
             return QObject::tr("Draw");
         case Persona::Color:
             return QObject::tr("Color");
+        case Persona::Artboard:
+            return QObject::tr("Artboard");
         default:
             break;
     }
@@ -28,6 +30,8 @@ QString personaId(Persona p) {
             return QStringLiteral("draw");
         case Persona::Color:
             return QStringLiteral("color");
+        case Persona::Artboard:
+            return QStringLiteral("artboard");
         default:
             break;
     }
@@ -51,6 +55,10 @@ bool personaFromId(const QString& id, Persona* out) {
         if (out) *out = Persona::Color;
         return true;
     }
+    if (id == QStringLiteral("artboard")) {
+        if (out) *out = Persona::Artboard;
+        return true;
+    }
     return false;
 }
 
@@ -59,12 +67,13 @@ std::vector<ToolId> vectorVisibleLeaders() {
     // with Move (same group); ColorSampler/Ruler/Note/Count/StylePicker/
     // Measure/Area ride with Eyedropper; StrokeWidth/Knife ride with the
     // anchor group; PointTransform rides with Node; Contour rides with
-    // Corner; ShapeBuilder rides with Flood Fill; Transparency rides with
-    // Gradient.
+    // Corner; ShapeBuilder rides with Flood Fill; Transparency is its own
+    // leader (tool_table.cpp) and is listed directly.
     return {
         ToolId::Move,
         ToolId::Eyedropper,
         ToolId::Gradient,
+        ToolId::TransparencyTool,
         ToolId::Pen,
         ToolId::AddAnchorPoint,
         ToolId::PathSelection,
@@ -109,6 +118,8 @@ QStringList hiddenToolsFor(Persona p) {
         hidden = drawHiddenLeaders();
     else if (p == Persona::Color)
         hidden = colorHiddenLeaders();
+    else if (p == Persona::Artboard)
+        hidden = artboardHiddenLeaders();
     else
         hidden = pixelHiddenLeaders();
     QStringList out;
@@ -143,8 +154,8 @@ std::vector<ToolId> drawVisibleLeaders() {
     return {
         ToolId::Move,       ToolId::Brush,      ToolId::Eraser,
         ToolId::Blur,       ToolId::Dodge,      ToolId::HistoryBrush,
-        ToolId::Gradient,   ToolId::Eyedropper, ToolId::Hand,
-        ToolId::Zoom,
+        ToolId::Gradient,   ToolId::TransparencyTool, ToolId::Eyedropper,
+        ToolId::Hand,       ToolId::Zoom,
     };
 }
 
@@ -208,7 +219,8 @@ QStringList drawPanels() {
 std::vector<ToolId> colorVisibleLeaders() {
     return {
         ToolId::Move,       ToolId::Eyedropper, ToolId::Dodge,
-        ToolId::Gradient,   ToolId::Hand,       ToolId::Zoom,
+        ToolId::Gradient,   ToolId::TransparencyTool, ToolId::Hand,
+        ToolId::Zoom,
     };
 }
 
@@ -237,6 +249,52 @@ QStringList colorOnlyPanels() {
 
 QStringList colorFallbackPanels() {
     return colorPanels();
+}
+
+// Structural plus the vector work a layout actually needs. Move hosts the
+// Artboard tool; Pen/Node/Rectangle draw the artwork; Place, Vector Crop, Fill
+// and Transparency edit it; Eyedropper picks colour; Hand/Zoom navigate.
+// Paint, selection and retouch are hidden, so nothing here can touch pixels.
+std::vector<ToolId> artboardVisibleLeaders() {
+    return {
+        ToolId::Move,                  // hosts the Artboard tool
+        ToolId::Pen,
+        ToolId::NodeTool,
+        ToolId::Rectangle,
+        ToolId::PlaceTool,
+        ToolId::VectorCropTool,
+        ToolId::VectorFloodFillTool,   // Fill
+        ToolId::TransparencyTool,
+        ToolId::Eyedropper,            // colour picker
+        ToolId::Hand,                  // View
+        ToolId::Zoom,                  // Magnifier
+    };
+}
+
+std::vector<ToolId> artboardHiddenLeaders() {
+    const std::vector<ToolId> visible = artboardVisibleLeaders();
+    std::vector<ToolId> out;
+    for (const ToolGroup& group : allGroups()) {
+        if (std::find(visible.begin(), visible.end(), group.leader) == visible.end())
+            out.push_back(group.leader);
+    }
+    return out;
+}
+
+// Artboards leads so the tab reads as "the board list, plus context".
+QStringList artboardPanels() {
+    return {QStringLiteral("artboards"), QStringLiteral("properties"),
+            QStringLiteral("layers"), QStringLiteral("navigator"),
+            QStringLiteral("history")};
+}
+
+// Artboard-exclusive: the Artboards panel never appears in another persona.
+QStringList artboardOnlyPanels() {
+    return {QStringLiteral("artboards")};
+}
+
+QStringList artboardFallbackPanels() {
+    return artboardPanels();
 }
 
 }  // namespace pittore::ui

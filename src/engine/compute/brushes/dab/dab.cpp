@@ -16,7 +16,8 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     const PatternTex* tex, const DabDensity* den,
                     const MaskTip* mask,
                     const papergrain::PaperGrain* kgrain,
-                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk) {
+                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk,
+                    BlendMode blend) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
 
     const float hard = std::clamp(hardness, 0.0f, 1.0f);
@@ -61,7 +62,8 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
             if (a <= 0.0f) continue;
 
             RGBAf& d = dst[idx];
-            if (mix == dabmix::DabMixOp::Normal) {
+            if (mix == dabmix::DabMixOp::Normal &&
+                blend == BlendMode::Normal) {
                 const float inv_a = 1.0f - a;
                 const float out_a = a + d.a * inv_a;
                 if (out_a > 0.0f) {
@@ -87,6 +89,14 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     }
                     d.a = out_a;
                 }
+            } else if (mix == dabmix::DabMixOp::Normal) {
+                // Per-dab blend mode: the W3C shell replaces the source-over
+                // mix; native CMYK destinations re-separate the blended
+                // projection back to device inks.
+                if (!native_cmyk_blend_texel(nativeCmyk, idx, d, blend, cr, cg,
+                                             cb, a, x, y))
+                    blend::pixel(blend, cr, cg, cb, a, d.r, d.g, d.b, d.a, x,
+                                 y, d.r, d.g, d.b, d.a);
             } else {
                 dabmix::mix_pixel(mix, cr, cg, cb, a, d.r, d.g, d.b, d.a,
                                   d.r, d.g, d.b, d.a);
@@ -107,7 +117,8 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                         const PatternTex* tex, const DabDensity* den,
                     const MaskTip* mask,
                     const papergrain::PaperGrain* kgrain,
-                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk) {
+                    dabmix::DabMixOp mix, NativeCmykPaint* nativeCmyk,
+                    BlendMode blend) {
     if (radius <= 0.0f || opacity <= 0.0f || w == 0 || h == 0) return;
     AutoTip t = tip;
     t.sanitize();
@@ -148,7 +159,8 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
             const float a = cov * op;
             if (a <= 0.0f) continue;
             RGBAf& d = dst[idx];
-            if (mix == dabmix::DabMixOp::Normal) {
+            if (mix == dabmix::DabMixOp::Normal &&
+                blend == BlendMode::Normal) {
                 const float inv_a = 1.0f - a;
                 const float out_a = a + d.a * inv_a;
                 if (out_a > 0.0f) {
@@ -174,6 +186,14 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     }
                     d.a = out_a;
                 }
+            } else if (mix == dabmix::DabMixOp::Normal) {
+                // Per-dab blend mode: the W3C shell replaces the source-over
+                // mix; native CMYK destinations re-separate the blended
+                // projection back to device inks.
+                if (!native_cmyk_blend_texel(nativeCmyk, idx, d, blend, cr, cg,
+                                             cb, a, x, y))
+                    blend::pixel(blend, cr, cg, cb, a, d.r, d.g, d.b, d.a, x,
+                                 y, d.r, d.g, d.b, d.a);
             } else {
                 dabmix::mix_pixel(mix, cr, cg, cb, a, d.r, d.g, d.b, d.a,
                                   d.r, d.g, d.b, d.a);

@@ -239,10 +239,18 @@ void MainWindow::showPanel(const QString& id, bool show) {
     }
     QDockWidget* dock = dockFor(id, true);
     if (!dock) return;
-    // Left-docked panels (if any) bypass the right-rail tab groups.
+    // Left-docked panels (if any) bypass the right-rail tab groups. They must
+    // form a full-height column immediately right of the tools rail (Affinity's
+    // tools -> Pages -> canvas order); a bare addDockWidget stacks them
+    // *beneath* the tools rail instead, which is not the layout anyone wants.
     if (info && info->defaultDock == QLatin1String("left")) {
-        if (!dock->parentWidget() || dockWidgetArea(dock) == Qt::NoDockWidgetArea)
-            addDockWidget(Qt::LeftDockWidgetArea, dock);
+        if (!dock->parentWidget() || dockWidgetArea(dock) == Qt::NoDockWidgetArea) {
+            if (toolsDock_ && dock != toolsDock_ &&
+                dockWidgetArea(toolsDock_) == Qt::LeftDockWidgetArea)
+                splitDockWidget(toolsDock_, dock, Qt::Horizontal);
+            else
+                addDockWidget(Qt::LeftDockWidgetArea, dock);
+        }
         dock->show();
         dock->raise();
         return;

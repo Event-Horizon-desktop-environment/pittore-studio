@@ -643,6 +643,33 @@ void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
     }
     p.fillRect(bounds, QBrush(*it));
 
+    // Artboard documents: the region outside every board is pasteboard, not
+    // transparency (REQ-005). The checkerboard above covers the whole doc rect
+    // so a transparent board still reads as transparency; knock it back to the
+    // surround only where no board covers it, so the gap between boards and the
+    // margin around them paint solid. Bounded by the same dirty clip as the
+    // checker so an incremental repaint only re-fills its own damage.
+    if (!d->boardOrder.isEmpty()) {
+        QPainterPath boards;
+        for (const std::uint64_t bid : d->boardOrder) {
+            const int row = d->boardRowIndex(bid);
+            if (row < 0) continue;
+            const QRectF br = d->layers[row].boardRect;
+            if (br.isEmpty()) continue;
+            boards.addPolygon(t.map(QPolygonF(br)));
+        }
+        QPainterPath docPoly;
+        docPoly.addPolygon(t.map(QPolygonF(docRect)));
+        const QPainterPath outside = docPoly.subtracted(boards).intersected(clip);
+        if (!outside.isEmpty()) {
+            p.save();
+            p.setClipPath(outside);
+            p.fillPath(outside, canvasSurround(state_->surroundIndex(),
+                                               state_->theme()));
+            p.restore();
+        }
+    }
+
     p.setTransform(t, false);
     // >>> Engine seam: this is the one call the Vulkan presentation path
     // replaces with a swapchain blit of the composited tile grid (R56/R91).

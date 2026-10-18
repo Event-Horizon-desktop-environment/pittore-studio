@@ -212,6 +212,52 @@ bool MainWindow::handleBrushSizeKey(QKeyEvent* key) {
 }
 
 
+bool MainWindow::handleBlendModeKey(QKeyEvent* key) {
+    // Alt+Shift+<letter>: a shortcut family of its own. The strict matcher
+    // counts Shift, so the tool-letter and hardness paths never see these.
+    const QString clipAlt =
+        keymapCache_.value(QStringLiteral("toggle-clip-alt"));
+    if (!clipAlt.isEmpty() && keyEventMatchesShortcutExact(key, clipAlt)) {
+        runCommand(QStringLiteral("toggle-clip"));
+        return true;
+    }
+    struct BlendKey {
+        const char* id;
+        const char* mode;
+    };
+    static constexpr BlendKey kBlendKeys[] = {
+        {"blend-multiply", "Multiply"},
+        {"blend-screen", "Screen"},
+    };
+    for (const BlendKey& entry : kBlendKeys) {
+        const QString seq = keymapCache_.value(QString::fromUtf8(entry.id));
+        if (seq.isEmpty() || !keyEventMatchesShortcutExact(key, seq))
+            continue;
+        const QString mode = QString::fromUtf8(entry.mode);
+        const ToolId tool = state_->activeTool();
+        // Move tool: the letter sets the active layer's blend mode (Photoshop
+        // behaviour); painting tools get their own Mode option; anything
+        // else has no blend to change.
+        if (tool == ToolId::Move) {
+            if (state_->setActiveLayerBlendMode(mode))
+                state_->setStatusHint(tr("Layer blend mode: %1").arg(mode));
+            else
+                state_->setStatusHint(
+                    tr("Select a layer to change its blend mode."));
+            return true;
+        }
+        if (state_->setToolBlendMode(tool, mode)) {
+            state_->setStatusHint(tr("Tool blend mode: %1").arg(mode));
+            return true;
+        }
+        state_->setStatusHint(
+            tr("Blend-mode shortcuts need a painting tool or the Move tool."));
+        return true;
+    }
+    return false;
+}
+
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     // Text entry always wins: tool letters must not fire while a field has focus.
     if (QWidget* focus = qApp->focusWidget()) {
@@ -267,6 +313,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         // Brush size keys follow Settings > Shortcuts (brush-smaller/larger);
         // first press and auto-repeat share one handler (issue #8).
         if (handleBrushSizeKey(key)) return true;
+        // Alt+Shift+<letter> blend/clip bindings (Photoshop-style).
+        if (handleBlendModeKey(key)) return true;
         if (key->key() >= Qt::Key_0 && key->key() <= Qt::Key_9 &&
             !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier | Qt::ShiftModifier))) {
             const int d = key->key() - Qt::Key_0;

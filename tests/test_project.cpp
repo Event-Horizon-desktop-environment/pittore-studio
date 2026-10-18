@@ -534,6 +534,83 @@ static void test_legacy_ifp_scan() {
     QFile::remove(path);
 }
 
+static void test_board_round_trip() {
+    // Boards survive the .psc cycle: two boards (one with a fill) rebuild with
+    // the same ids, rects, fill and panel order, and the id counter resumes
+    // above every loaded board so a new board never collides (INV-006).
+    AppState state;
+    ProjectFileData data;
+    data.name = QStringLiteral("Boards");
+    data.size = QSize(400, 300);
+    data.dpi = 96;
+    data.colorMode = QStringLiteral("RGB/8");
+    data.background = QStringLiteral("white");
+    QString error;
+    DocumentItem* doc = state.createNewProject(data, &error);
+    CHECK(doc != nullptr);
+    if (!doc) return;
+
+    const std::uint64_t a = state.createBoard(QRectF(10, 20, 180, 120),
+                                              QStringLiteral("Board A"));
+    const std::uint64_t b = state.createBoard(QRectF(210, 20, 160, 120),
+                                              QStringLiteral("Board B"));
+    CHECK(a != 0 && b != 0 && a != b);
+    CHECK(state.setBoardFill(a, true, QColor(20, 120, 220), 0.5));
+    CHECK_EQ(doc->boardOrder.size(), 2);
+
+    const bool saved = state.saveProject(state.activeProjectPath(), &error);
+    if (!saved)
+        std::fprintf(stderr, "    saveProject error: %s\n",
+                     error.toLocal8Bit().constData());
+    CHECK(saved);
+
+    const bool reopened0 = state.openProject(state.activeProjectPath(), &error);
+    if (!reopened0)
+        std::fprintf(stderr, "    openProject error: %s\n",
+                     error.toLocal8Bit().constData());
+    CHECK(reopened0);
+    DocumentItem* r = state.activeDocument();
+    CHECK(r != nullptr);
+    if (!r) return;
+
+    // createBoard prepends, so B is the top board (row 0) and A below it;
+    // boardOrder lists them in that panel order.
+    CHECK(r->boardOrderIsPermutation());
+    CHECK_EQ(r->boardOrder.size(), 2);
+    CHECK_EQ(r->boardOrder[0], b);
+    CHECK_EQ(r->boardOrder[1], a);
+    const int ra = r->boardRowIndex(a);
+    const int rb = r->boardRowIndex(b);
+    CHECK_EQ(rb, 0);
+    CHECK_EQ(ra, 1);
+    CHECK(ra >= 0 && rb >= 0);
+    if (ra < 0 || rb < 0) return;
+
+    CHECK(r->layers[ra].isBoard());
+    CHECK_EQ(r->layers[ra].boardId, a);
+    CHECK_NEAR(r->layers[ra].boardRect.x(), 10.0, 1e-9);
+    CHECK_NEAR(r->layers[ra].boardRect.y(), 20.0, 1e-9);
+    CHECK_NEAR(r->layers[ra].boardRect.width(), 180.0, 1e-9);
+    CHECK_NEAR(r->layers[ra].boardRect.height(), 120.0, 1e-9);
+    CHECK(r->layers[ra].boardHasFill);
+    CHECK_EQ(r->layers[ra].boardFill.red(), 20);
+    CHECK_EQ(r->layers[ra].boardFill.green(), 120);
+    CHECK_EQ(r->layers[ra].boardFill.blue(), 220);
+    CHECK_NEAR(r->layers[ra].boardFillOpacity, 0.5, 1e-6);
+
+    CHECK(r->layers[rb].isBoard());
+    CHECK_EQ(r->layers[rb].boardId, b);
+    CHECK_NEAR(r->layers[rb].boardRect.x(), 210.0, 1e-9);
+    CHECK(!r->layers[rb].boardHasFill);
+
+    // The id counter resumed above both loaded boards, so a board created
+    // after the reload gets a fresh id (INV-006).
+    CHECK(r->boardIdCounter >= a && r->boardIdCounter >= b);
+    const std::uint64_t c = state.createBoard(QRectF(0, 200, 60, 60),
+                                              QStringLiteral("Board C"));
+    CHECK(c != 0 && c != a && c != b);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const QString logDir = QDir::tempPath() + QStringLiteral("/pittore-project-log");
@@ -545,6 +622,7 @@ int main(int argc, char** argv) {
     test_legacy_ifp_scan();
     test_app_state_cycle();
     test_text_layer_round_trip();
+    test_board_round_trip();
     test_stale_text_origin_heals();
     test_adjustment_round_trip();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;

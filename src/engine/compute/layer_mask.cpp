@@ -69,6 +69,7 @@ namespace {
 // shortcut instead of round-tripping integer placements through taps.
 RGBAf sample_source_or_direct(const HostPlacedLayer& l, const RGBAf* src,
                               std::uint32_t w, std::size_t idx, int x, int y) {
+    if (l.isFill) return l.fillColor;  // constant source, no geometry
     if (l.sx == 1.0 && l.sy == 1.0 && l.ox == 0.0 && l.oy == 0.0 &&
         l.sw == w && l.sh >= l.y1) {
         return src[idx];
@@ -95,7 +96,7 @@ RGBAf sample_source_or_direct(const HostPlacedLayer& l, const RGBAf* src,
 // does not cover the pixel.
 float base_coverage_at(const HostPlacedLayer& b, std::uint32_t w,
                        std::size_t idx, int x, int y) {
-    if (!b.src || b.sw == 0 || b.sh == 0) return 0.0f;
+    if (!b.isFill && (!b.src || b.sw == 0 || b.sh == 0)) return 0.0f;
     RGBAf s = sample_source_or_direct(b, b.src, w, idx, x, y);
     if (b.mask) {
         s.a *= mask_coverage_host(b.mask, b.msw, b.msh,
@@ -144,7 +145,8 @@ void composite_many_host(RGBAf* bottom, std::uint32_t w, std::uint32_t h,
     per.assign(static_cast<std::size_t>(h) + 1, 0);
     for (std::size_t i = 0; i < count; ++i) {
         HostPlacedLayer l = layers[i];
-        if (!l.isAdjustment && (!l.src || l.sw == 0 || l.sh == 0)) continue;
+        if (!l.isAdjustment && !l.isFill &&
+            (!l.src || l.sw == 0 || l.sh == 0)) continue;
         l.x0 = std::min(l.x0, w);
         l.x1 = std::min(l.x1, w);
         l.y0 = std::min(l.y0, h);

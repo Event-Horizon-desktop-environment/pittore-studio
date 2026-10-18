@@ -34,6 +34,7 @@ class PersonaBar final : public QFrame {
     QToolButton* pixelButton_ = nullptr;
     QToolButton* drawButton_ = nullptr;
     QToolButton* colorButton_ = nullptr;
+    QToolButton* artboardButton_ = nullptr;
     QButtonGroup* group_ = nullptr;
 };
 

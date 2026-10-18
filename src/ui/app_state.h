@@ -186,6 +186,22 @@ struct LayerItem {
     std::uint64_t adjustStamp = 0;
     int indent = 0;                // group nesting depth
     bool groupExpanded = true;
+    // --- Artboard payload (a board IS a Kind::Group row: D1, INV-011) -----
+    // A board is a container group that additionally clips to `boardRect`
+    // and renders a fill behind its children. It carries a nonzero boardId;
+    // every ordinary Group has boardId == 0. Structure, visibility, opacity,
+    // indent and the whole group machinery treat it as a group — that is the
+    // point (§5.2 INV-011): no parallel tree, no second container kind, and
+    // every one of the ~150 `kind == Group` container checks keeps working.
+    // Board layer opacity reuses `opacity` (INV-022: it multiplies the
+    // subtree, exactly like a group's); there is deliberately no
+    // separate boardOpacity to desynchronise from it.
+    std::uint64_t boardId = 0;     // 0 = not a board (INV-006: never reused)
+    QRectF boardRect;              // global document coords (INV-001, D2)
+    bool boardHasFill = false;     // false = transparent: the pasteboard
+    QColor boardFill;              //   shows through (REQ-005)
+    double boardFillOpacity = 1.0; // fill opacity, separate from `opacity`
+    bool isBoard() const { return boardId != 0; }
     QColor swatch = QColor(0x6e, 0x6e, 0x6e);  // stand-in for the thumbnail
     QString adjustmentType;                     // when kind == Adjustment
     // The layer's pixels are rendered glyphs (a recovered TxtA/TxtF layer, or
@@ -444,6 +460,9 @@ struct CompositedLayer {
     int adjKind = 0;
     float adjP[16] = {};
     const float* adjAux = nullptr;
+    // Solid board fill (D1): constant `fillColor` over `window`, no `source`.
+    bool isFill = false;
+    pittore::RGBAf fillColor;
     float fold = 1.0f;
     QString blendMode = QStringLiteral("Normal");
     QRect window;  // already doc-clipped, may be empty
@@ -466,6 +485,8 @@ inline QString describeStack(const std::vector<CompositedLayer>& gathered) {
         const CompositedLayer& e = gathered[i];
         if (e.isAdjustment)
             out += QStringLiteral("A%1").arg(e.adjKind);
+        else if (e.isFill)
+            out += QStringLiteral("F");
         else
             out += e.blendMode;
         if (e.mask) out += QLatin1Char('M');
@@ -526,6 +547,29 @@ class DocumentItem {
     int activeLayer = 0;
 
     QVector<int> selectedLayers;
+
+    // --- Artboards (D1) --------------------------------------------------
+    // Ordered board index: the boardId of every board row, in panel and
+    // export order. NOT a second source of membership — a board is a Group
+    // row with boardId != 0, and this list is derived from the tree. It
+    // exists so listing, export order and drag-reorder have a stable order
+    // without scanning the whole stack (INV-007: it is a permutation of the
+    // board rows). boardOrderIsPermutation() validates that in debug builds.
+    QVector<std::uint64_t> boardOrder;
+    // Board the view is pointed at (status bar suffix, zoom-to-board). This
+    // is view state, distinct from the *selection* (selectedLayers can hold
+    // board rows like any row). Captured by the snapshot so undoing "create
+    // board" does not leave a dangling active board (INV-014).
+    std::uint64_t activeBoard = 0;
+    // Monotonic board-id counter: never reused within a document, including
+    // across undo/redo and save/load (INV-006). Persisted in .psc v7 (§8.3
+    // ABOR) so ids survive a round trip. 0 is reserved as "not a board".
+    std::uint64_t boardIdCounter = 0;
+    // REQ-028: dropping content over a board reparents it into that board.
+    // A per-document toggle; Affinity has no such toggle and it is a
+    // documented, requested defect there (§1.11), so we ship it in v1 as a
+    // deliberate deviation.
+    bool autoReparent = true;
 
     QVector<HistoryItem> history;
     int historyPosition = 0;
@@ -611,6 +655,29 @@ class DocumentItem {
     // row. UI-only; has no effect on the composite.
     bool rowHiddenByCollapsedGroup(int index) const;
 
+    // --- artboard queries (boards) -----------------------------------------
+    // A board is a Group row with boardId != 0 (D1, INV-011). These resolve
+    // between board rows, board ids and layer rows without scanning the stack.
+    // Point queries are O(depth). DocumentItem is not a QObject, so these are
+    // pure queries; the undoable mutations that emit live on AppState.
+    // Row index of the board row carrying `id`, or -1 if absent (INV-007).
+    int boardRowIndex(std::uint64_t id) const;
+    // Owning board id for a layer row: the innermost enclosing board, or 0 for
+    // pasteboard content (D3). O(depth).
+    std::uint64_t boardAt(int layerRowIndex) const;
+    // Layer rows inside the board at `boardRow` (its subtree, INV-011), in
+    // stack order. O(subtree).
+    QVector<int> boardChildRows(int boardRow) const;
+    // True when `boardOrder` contains exactly the board rows, each once
+    // (INV-007). Debug/restore validator; O(n).
+    bool boardOrderIsPermutation() const;
+    // Batch board-ownership sweep: for every row, the innermost enclosing
+    // board's id, or 0 for pasteboard content (D3). ONE indent-stack pass,
+    // mirroring effectiveVisibility — the paint path must not call the O(depth)
+    // boardAt() per row or a full sweep goes O(n²) (§16.2). `board[i]` is
+    // identical to boardAt(i).
+    void boardOwnership(QVector<std::uint64_t>& board) const;
+
     // Incremental repaint: paintDab records only the touched pixel rect here;
     // a later flush composites + blits just that rect (persistent staging in
     // the .cpp). Empty = nothing pending.
@@ -668,6 +735,16 @@ class DocumentItem {
         QString colorMode;
         QByteArray iccProfile;
         QVector<QRect> slices;
+        // --- Artboards (D7) ---
+        // A board is a Group row, so its payload rides `layers` above for
+        // free. These are the document-level board pieces that do not: the
+        // ordered index, the view's active board, the id counter (so undo
+        // never hands out an id that a snapshot still references, INV-006)
+        // and the auto-reparent toggle.
+        QVector<std::uint64_t> boardOrder;
+        std::uint64_t activeBoard = 0;
+        std::uint64_t boardIdCounter = 0;
+        bool autoReparent = true;
     };
 
     // The undo engine: up to maxUndoSteps() pre-action snapshots plus a redo
@@ -1684,6 +1761,18 @@ class AppState : public QObject {
     // No-op without an armed stroke or with an empty scratch. Called on
     // release before the undo step commits.
     bool bakeWashStroke();
+    // The active tool's "Mode" option as an engine blend mode when that
+    // option is the painting tools' shared blend list (Multiply, Screen, …).
+    // Normal when the option is unset or index 0, and for combo names the dab
+    // kernels do not implement (Behind/Clear map to Normal, the same fallback
+    // blend::from_display_name applies). Tools that reuse the "mode" id for
+    // their own enum (Color Replacement's recolor modes, the Eraser's tip
+    // shapes) always resolve to Normal.
+    pittore::compute::BlendMode paintBlendFor(ToolId tool) const;
+    // Select the tool's declared blend "Mode" option by display name
+    // ("Multiply", "Screen", …) as a normal option change (options bar
+    // follows). False when the tool declares no such blend option.
+    bool setToolBlendMode(ToolId tool, const QString& name);
     // Direct-tip cores: stampDab/stampEraseDab resolve the id then call
     // these (hose cells already hold their tip, so they call these too).
     bool stampTipDab(const QPointF& docPos, double radius, int mode,
@@ -1875,6 +1964,26 @@ class AppState : public QObject {
     // the step); content outside is clipped by the rebuild, new area shows
     // the paper.
     bool resizeCanvas(const QPointF& newTopLeftDoc, const QSize& newSize);
+
+    // --- artboard mutations (undoable; one step each: INV-030) -------------
+    // Defined in app_state_boards.cpp. Each targets the active document, does
+    // its model work inside a snapshot step, and emits boardsChanged +
+    // layersChanged on success. Return the new board's id, or 0/false on
+    // failure (no document, invalid rect, locked board, cycle). The board
+    // payload rides the DocumentItem's layer vector; DocumentItem is not a
+    // QObject, so the signal emission lives here (AppState), matching how
+    // grouping and resizeCanvas already work.
+    std::uint64_t createBoard(const QRectF& rect, const QString& name);
+    bool deleteBoard(std::uint64_t id, bool keepContent);
+    bool renameBoard(std::uint64_t id, const QString& name);
+    bool setBoardRect(std::uint64_t id, const QRectF& rect);
+    bool moveBoardBy(std::uint64_t id, double dx, double dy);
+    bool setBoardFill(std::uint64_t id, bool hasFill, const QColor& fill,
+                      double fillOpacity);
+    bool setBoardVisible(std::uint64_t id, bool visible);
+    bool setBoardLocked(std::uint64_t id, bool locked);
+    bool reorderBoards(int from, int to);
+    bool setActiveBoard(std::uint64_t id);
 
     // Perspective Crop commit: warp the quad (TL,TR,BR,BL document space)
     // onto an output rect and crop the canvas to it. Output size comes
@@ -2184,6 +2293,11 @@ class AppState : public QObject {
     // as one undo step (the Layers-panel spinbox path is direct). False when
     // there is no active layer.
     bool setActiveLayerOpacity(int percent);
+    // Blend-mode letter shortcuts (Alt+Shift+M/S) with the Move tool: set the
+    // active layer's blend mode by display name as one undo step (mirrors the
+    // Layers-panel combo; "Add" is accepted as an alias for Linear Dodge).
+    // False when there is no active layer or the name is unknown.
+    bool setActiveLayerBlendMode(const QString& name);
 
     QString statusHint() const { return statusHint_; }
     void setStatusHint(const QString& hint);
@@ -2225,6 +2339,11 @@ class AppState : public QObject {
     // new header's position. The Layers panel uses it to start an inline rename
     // right after creation (emitted after layersChanged so rows are current).
     void groupCreated(int index);
+    // The board list, order or a board's properties changed (create, delete,
+    // reorder, rename, fill, opacity, visibility). Carries the document,
+    // because a restore can change the whole list. The Layers panel does not
+    // need it (boards are rows); the Artboards panel (§10.2) does.
+    void boardsChanged(DocumentItem* doc);
     // A Live Tone Blend Group asks for its settings dialog (Layers panel
     // icon click, or right after creation). Carries the header index.
     void toneBlendRequested(int groupIndex);

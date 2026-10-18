@@ -499,6 +499,81 @@ void run_gpu_parity(pittore::compute::BackendType gpu_type) {
             CHECK_EQ(mismatches, 0u);
         }
 
+        // --- solid-fill layer (board backgrounds, D1) ----------------------
+        // A fill layer has no source: every window pixel samples the constant
+        // fillColor. CPU and GPU must agree exactly, the fill region takes the
+        // colour at its fold alpha over a base, and the region outside the
+        // window is untouched. The base layer proves the fill composites over
+        // content rather than replacing the accumulator.
+        {
+            constexpr std::uint32_t mw = 48, mh = 40;
+            const std::size_t mn = static_cast<std::size_t>(mw) * mh;
+            auto upload = [](auto& be, const std::vector<RGBAf>& v) {
+                auto b = be->make_buffer(v.size() * sizeof(RGBAf));
+                std::memcpy(b->host(), v.data(), b->size());
+                b->upload();
+                return b;
+            };
+            std::vector<RGBAf> base(mn, RGBAf{0.1f, 0.1f, 0.1f, 1.0f});
+            auto cpu_base = upload(cpu, base);
+            auto gpu_base = upload(gpu, base);
+            auto cpu_acc = cpu->make_buffer(mn * sizeof(RGBAf));
+            auto gpu_acc = gpu->make_buffer(mn * sizeof(RGBAf));
+
+            const RGBAf fillCol{0.9f, 0.2f, 0.3f, 1.0f};
+            std::vector<pittore::compute::PlacedLayer> cpu_l(2), gpu_l(2);
+            for (int side = 0; side < 2; ++side) {
+                auto& layers = side == 0 ? cpu_l : gpu_l;
+                auto* baseBuf = side == 0 ? cpu_base.get() : gpu_base.get();
+                auto& b = layers[0];  // full-canvas opaque base
+                b.src = baseBuf;
+                b.sw = mw;
+                b.sh = mh;
+                b.ox = 0.0;
+                b.oy = 0.0;
+                b.sx = 1.0;
+                b.sy = 1.0;
+                b.x0 = 0;
+                b.y0 = 0;
+                b.x1 = mw;
+                b.y1 = mh;
+                b.fold = 1.0f;
+                b.mode = pittore::compute::BlendMode::Normal;
+                auto& f = layers[1];  // solid fill over a sub-rect
+                f.isFill = true;
+                f.fillColor = fillCol;
+                f.x0 = 8;
+                f.y0 = 6;
+                f.x1 = 32;
+                f.y1 = 26;
+                f.fold = 0.5f;
+                f.mode = pittore::compute::BlendMode::Normal;
+            }
+            cpu->clear(*cpu_acc);
+            gpu->clear(*gpu_acc);
+            cpu->composite_many_into(*cpu_acc, mw, 0, 0, mw, mh, cpu_l.data(),
+                                     cpu_l.size());
+            gpu->composite_many_into(*gpu_acc, mw, 0, 0, mw, mh, gpu_l.data(),
+                                     gpu_l.size());
+            gpu_acc->download();
+            const auto* cd = static_cast<const RGBAf*>(cpu_acc->host());
+            const auto* gd = static_cast<const RGBAf*>(gpu_acc->host());
+            std::size_t mismatches = 0;
+            for (std::size_t i = 0; i < mn; ++i)
+                if (!near(cd[i], gd[i], 1e-5f)) ++mismatches;
+            CHECK_EQ(mismatches, 0u);
+            const auto at = [&](std::uint32_t x, std::uint32_t y) {
+                return static_cast<std::size_t>(y) * mw + x;
+            };
+            // Inside the window the fill reddens the base at fold alpha
+            // (0.9*0.5 + 0.1*0.5 = 0.5 red over the opaque base).
+            CHECK(cd[at(20, 15)].r > 0.45f);
+            CHECK(cd[at(20, 15)].a > 0.99f);
+            // Outside the window only the base shows, bit-for-bit on both.
+            CHECK(std::abs(cd[at(2, 15)].r - 0.1f) < 1e-4f);
+            CHECK(near(cd[at(20, 15)], gd[at(20, 15)], 1e-5f));
+        }
+
         // --- batched flat stack (fast path) --------------------------------
         // All-plain Normal layers take the tight flat kernel (no cells, no
         // param staging). Cover identity, integer translation, fractional

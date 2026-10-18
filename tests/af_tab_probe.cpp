@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
     QString err2;
     const bool opened = state.openImageFile(path, &err2);
     std::printf("open=%d %s\ndocs=%d active=%d\n", opened,
-                qPrintable(err2), state.documents().size(),
+                qPrintable(err2), int(state.documents().size()),
                 state.activeDocumentIndex());
     for (int i = 0; i < state.documents().size(); ++i)
         std::printf("  doc %d \"%s\" layers=%d\n", i,

@@ -18,6 +18,22 @@ namespace pittore::io {
 // v2 adds per-layer masks, clipping, nesting depth and the transparency lock.
 // v5 adds optional per-layer native CMYK samples. Files that need no newer
 // fields retain the oldest compatible version; v1-v4 files decode unchanged.
+//
+// v7 adds artboards (D1): a header version bump (a v6 reader refuses the file,
+// §8.7) plus self-describing TLV records inside the layers section (§8.2/§8.3).
+// A board is a layer row whose kind byte is kProjectKindArtboard, immediately
+// followed by an ABDT record carrying the board payload. In memory a board is a
+// Group row carrying boardId (INV-011); the codec translates, so the runtime
+// Kind enum is untouched. ABOR opens the section (board count + id counter),
+// ABEN closes the rows (board order), and trailing unknown records are retained
+// verbatim and re-emitted in order (§8.2 rules 1/2/5).
+
+// On-disk kind byte for a board row, and the Group kind a board row decodes to
+// (the runtime models a board as a Group row carrying boardId, INV-011). Both
+// mirror LayerItem::Kind in app_state.h, which stops at Frame=6; Artboard=7
+// exists only inside the codec.
+inline constexpr std::uint8_t kProjectKindArtboard = 7;
+inline constexpr std::uint8_t kProjectKindGroup = 4;
 
 struct ProjectLayerFile {
     std::string name;
@@ -121,6 +137,28 @@ struct ProjectLayerFile {
     std::string liveFilterId;
     std::vector<double> liveFilterParams;
 
+    // v7 artboards (D1). On disk a board is a layer row whose kind byte is
+    // kProjectKindArtboard (7), immediately followed by an ABDT record (§8.3)
+    // carrying the payload below. In memory a board is a Group row carrying
+    // boardId (INV-011); the codec translates, so the runtime Kind enum and
+    // every Kind switch are untouched. Structure and membership ride the
+    // existing `indent`; board opacity reuses `opacity` and visible/locked
+    // reuse the layer flags, so each property has a single source of truth.
+    // A v6 reader refuses a v7 file outright (§8.7), so these are
+    // version-gated, not forward-negotiated.
+    bool isBoard = false;
+    std::uint64_t boardId = 0;
+    double boardX = 0;
+    double boardY = 0;
+    double boardW = 0;
+    double boardH = 0;
+    bool boardHasFill = false;
+    std::uint32_t boardFillColor = 0xff000000;  // 0xAARRGGBB
+    float boardFillOpacity = 1.0f;
+    // ABDT `extras` blob (length-delimited, currently empty). Carried verbatim
+    // so a future per-board record (guides, INV-034) round-trips unmodelled.
+    std::vector<std::uint8_t> boardExtras;
+
     // Foreign PSD blocks (v4): verbatim TySh/SoLd/..., carried only for
     // layers that are untouched (guarded upstairs, not here). Any layer
     // with blocks forces version 4; older readers reject v4 files.
@@ -147,6 +185,16 @@ struct ProjectFileDoc {
     // metaLen and new readers tolerate its absence, so no version bump.
     std::vector<std::uint8_t> icc;
     std::vector<ProjectLayerFile> layers;  // index 0 = top
+    // v7: highest board id issued in this document, so a board created after
+    // load gets an id above every loaded one (INV-006). 0 = no boards.
+    std::uint64_t boardIdCounter = 0;
+    // v7: board order from the ABEN record, in sequence. The UI rebuilds order
+    // from panel position (they match); carried so the record round-trips and
+    // a reader without a tree can still resolve order.
+    std::vector<std::uint64_t> boardOrder;
+    // v7: trailing unknown records (§8.2 rules 1/2/5), retained verbatim and
+    // re-emitted in order on save. "Preserve unknown data on round trip".
+    std::vector<std::uint8_t> unknownRecords;
     std::uint32_t previewWidth = 0;
     std::uint32_t previewHeight = 0;
     std::vector<std::uint16_t> preview; // previewW*previewH*4 straight samples

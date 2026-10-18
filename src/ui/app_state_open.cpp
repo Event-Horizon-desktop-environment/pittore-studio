@@ -77,6 +77,17 @@ bool AppState::openProject(const QString& path, QString* error) {
         li.lockTransparency = m.lockTransparency;
         li.clipped = m.clipped;
         li.indent = m.indent;
+        if (m.isBoard) {
+            // A board is a Group row with a nonzero boardId (INV-011); normalise
+            // kind so a stray flag on a non-group row cannot make an inert
+            // half-board.
+            li.kind = LayerItem::Kind::Group;
+            li.boardId = m.boardId;
+            li.boardRect = m.boardRect;
+            li.boardHasFill = m.boardHasFill;
+            li.boardFill = m.boardFill;
+            li.boardFillOpacity = m.boardFillOpacity;
+        }
         if (m.hasMask && !m.mask.isNull()) {
             li.mask = straightRgba64ToImage(m.mask);
             if (li.mask) {
@@ -222,6 +233,18 @@ bool AppState::openProject(const QString& path, QString* error) {
         doc->selectedLayers.clear();
         doc->activeLayer = 0;   // top layer active, as the Layers panel shows
     }
+    // Rebuild the board index from the loaded tree: boardOrder lists the board
+    // rows in panel order (top to bottom), activeBoard defaults to the top
+    // board, and the id counter resumes above every loaded id (INV-006/007).
+    doc->boardOrder.clear();
+    std::uint64_t maxBoardId = 0;
+    for (const LayerItem& li : doc->layers) {
+        if (!li.isBoard()) continue;
+        doc->boardOrder.append(li.boardId);
+        if (li.boardId > maxBoardId) maxBoardId = li.boardId;
+    }
+    doc->activeBoard = doc->boardOrder.isEmpty() ? 0 : doc->boardOrder.first();
+    doc->boardIdCounter = qMax(data.boardIdCounter, maxBoardId);
     // The eraser restores the canvas bottom, so record what was saved
     // (old files predate the field; the saver derives the same label).
     if (data.background == QStringLiteral("transparent")) {
@@ -596,62 +619,101 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         QString title;
         QSize size;
         std::vector<pittore::io::AfLayer> layers;
+        // D9: a multi-board file opens as ONE document on one canvas. When
+        // `boardDoc` is set, `layers` holds pasteboard content first, then each
+        // board's layers grouped by board in page order (offsets already in the
+        // single document's coordinate space); `boardRows` carries one pre-built
+        // board row per artboard so the tree loop can open each board's run.
+        bool boardDoc = false;
+        std::vector<LayerItem> boardRows;
+        std::vector<int> pageToRow;  // page index -> boardRows index, or -1
     };
     std::vector<AfOpenPass> passes;
     const bool anyBoard =
         std::any_of(pd.pages.begin(), pd.pages.end(),
                     [](const pittore::io::AfPage& p) { return p.artboard; });
     const QString baseTitle = QFileInfo(path).completeBaseName();
-    std::size_t boardPassCount = 0;
     if (anyBoard) {
+        // D9: one document, N boards. The pasteboard extent is the union of
+        // the BOARD RECTS (§5.6) — a board clips its own content, so a layer
+        // hanging past its board is clipped by design and must not grow the
+        // canvas. A single global rebase normalises a negative board-union
+        // origin to zero; for a file already in the positive quadrant it is a
+        // no-op, so layers keep their file coordinates (INV-012).
+        double minX = 0, minY = 0, maxX = 0, maxY = 0;
+        bool firstRect = true;
+        QString biggest;
+        double biggestArea = -1.0;
+        for (const pittore::io::AfPage& pg : pd.pages) {
+            if (!pg.artboard) continue;
+            if (firstRect) {
+                minX = pg.x0; minY = pg.y0; maxX = pg.x1; maxY = pg.y1;
+                firstRect = false;
+            } else {
+                minX = std::min(minX, pg.x0); minY = std::min(minY, pg.y0);
+                maxX = std::max(maxX, pg.x1); maxY = std::max(maxY, pg.y1);
+            }
+            const double a = (pg.x1 - pg.x0) * (pg.y1 - pg.y0);
+            if (a > biggestArea) {
+                biggestArea = a;
+                biggest = QString::fromStdString(pg.name);
+            }
+        }
+        const int rebX = int(std::floor(std::min(0.0, minX)));
+        const int rebY = int(std::floor(std::min(0.0, minY)));
+        const int ubw = std::max(1, int(std::ceil(maxX)) - rebX);
+        const int ubh = std::max(1, int(std::ceil(maxY)) - rebY);
+        if (std::uint64_t(ubw) * ubh > (1ull << 28)) {
+            if (error)
+                *error = tr("Affinity artboard '%1' (%2×%3) is beyond the "
+                            "document size cap.")
+                             .arg(biggest.isEmpty() ? baseTitle : biggest)
+                             .arg(ubw)
+                             .arg(ubh);
+            return false;
+        }
+        AfOpenPass pass;
+        pass.title = baseTitle;
+        pass.size = QSize(ubw, ubh);
+        pass.boardDoc = true;
+        pass.pageToRow.assign(pd.pages.size(), -1);
+        std::uint64_t nextId = 1;
         for (std::size_t i = 0; i < pd.pages.size(); ++i) {
-            const pittore::io::AfPage& page = pd.pages[i];
-            if (!page.artboard) continue;
-            AfOpenPass pass;
-            // Board bounds: the recorded page rect, exactly. Origins floor,
-            // extents ceil (rounding may add a hair of margin but never
-            // removes a file-placed pixel).
-            const double x0 = page.x0, y0 = page.y0;
-            const double x1 = page.x1, y1 = page.y1;
-            const int ox = int(std::floor(x0)), oy = int(std::floor(y0));
-            const int pw = int(std::ceil(x1)) - ox;
-            const int ph = int(std::ceil(y1)) - oy;
-            if (std::uint64_t(pw) * ph > (1ull << 28)) {
-                if (error)
-                    *error = tr("Affinity artboard '%1' (%2×%3) is beyond the "
-                                "document size cap.")
-                                 .arg(QString::fromStdString(page.name))
-                                 .arg(pw)
-                                 .arg(ph);
-                return false;
-            }
-            QString boardTitle = QString::fromStdString(page.name);
-            if (boardTitle.isEmpty())
-                boardTitle = tr("Artboard %1").arg(++boardPassCount);
-            pass.title = boardTitle == baseTitle ? boardTitle
-                                                 : baseTitle + " — " + boardTitle;
-            pass.size = QSize(pw, ph);
-            for (std::size_t k = 0; k < pd.layers.size(); ++k) {
-                if (pd.layers[k].board != static_cast<int>(i)) continue;
-                pass.layers.push_back(std::move(pd.layers[k]));
-                pass.layers.back().left -= ox;
-                pass.layers.back().top -= oy;
-            }
-            pd.layers.erase(std::remove_if(pd.layers.begin(), pd.layers.end(),
-                                           [i](const pittore::io::AfLayer& l) {
-                                               return l.board == static_cast<int>(i);
-                                           }),
-                            pd.layers.end());
-            passes.push_back(std::move(pass));
+            const pittore::io::AfPage& pg = pd.pages[i];
+            if (!pg.artboard) continue;
+            LayerItem br;
+            br.kind = LayerItem::Kind::Group;  // a board is a container group (INV-011)
+            br.boardId = nextId++;            // nonzero boardId == isBoard() (INV-006)
+            br.name = QString::fromStdString(pg.name);
+            if (br.name.isEmpty()) br.name = tr("Artboard %1").arg(br.boardId);
+            br.boardRect = QRectF(QPointF(pg.x0 - rebX, pg.y0 - rebY),
+                                  QPointF(pg.x1 - rebX, pg.y1 - rebY));
+            br.indent = 0;  // board rows are root-only (INV-010)
+            br.groupExpanded = true;
+            br.visible = true;
+            br.opacity = 100;
+            pass.pageToRow[i] = int(pass.boardRows.size());
+            pass.boardRows.push_back(std::move(br));
         }
-        if (!pd.layers.empty()) {
-            // Untagged residue over the decode's stacked canvas.
-            AfOpenPass pass;
-            pass.title = baseTitle + " — other";
-            pass.size = QSize(dw, dh);
-            pass.layers = std::move(pd.layers);
-            passes.push_back(std::move(pass));
+        // Group layers by board (page order), pasteboard first so boards sit on
+        // top of it; offsets rebased by the one global origin (INV-012 geometry
+        // kept, since every layer is shifted by the same amount).
+        std::vector<std::vector<pittore::io::AfLayer>> byRow(pass.boardRows.size());
+        std::vector<pittore::io::AfLayer> paste;
+        for (pittore::io::AfLayer& l : pd.layers) {
+            l.left -= rebX;
+            l.top -= rebY;
+            const int row = (l.board >= 0 && l.board < int(pd.pages.size()))
+                                ? pass.pageToRow[l.board]
+                                : -1;
+            if (row >= 0) byRow[row].push_back(std::move(l));
+            else paste.push_back(std::move(l));
         }
+        pd.layers.clear();
+        for (pittore::io::AfLayer& l : paste) pass.layers.push_back(std::move(l));
+        for (auto& v : byRow)
+            for (pittore::io::AfLayer& l : v) pass.layers.push_back(std::move(l));
+        passes.push_back(std::move(pass));
     } else {
         AfOpenPass pass;
         pass.title = baseTitle;
@@ -690,7 +752,35 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     QVector<int> roots;
     QVector<int> open;
     std::vector<std::vector<pittore::io::AfMask>> activeGroupMasks;
+    // Track the resolved board row (index into pass.boardRows, or -1 for the
+    // pasteboard), not the raw page index, so pasteboard layers with differing
+    // raw tags don't spuriously close groups.
+    int curRow = -1;
     for (pittore::io::AfLayer& l : pass.layers) {
+        if (pass.boardDoc) {
+            // D9 board boundary: one board row per artboard, opened when its
+            // run starts, so its layers nest one level deeper under it
+            // (INV-011). Layers tagged to a non-artboard page, or untagged,
+            // stay on the pasteboard at the document root (no " — other" doc).
+            const int row = (l.board >= 0 && l.board < int(pass.pageToRow.size()))
+                                ? pass.pageToRow[l.board]
+                                : -1;
+            if (row != curRow) {
+                while (!open.isEmpty()) {
+                    open.pop_back();
+                    activeGroupMasks.pop_back();
+                }
+                curRow = row;
+                if (row >= 0) {
+                    const int bidx = nodes.size();
+                    nodes.append(Node{pass.boardRows[row], {}, {}});
+                    roots.append(bidx);
+                    open.append(bidx);
+                    activeGroupMasks.push_back({});
+                }
+            }
+            if (row >= 0) ++l.indent;  // board children indent under the board row
+        }
         while (!open.isEmpty() && nodes[open.back()].item.indent >= l.indent) {
             open.pop_back();
             activeGroupMasks.pop_back();
@@ -881,17 +971,40 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
     // Empty trees are legal (nothing recoverable); -1 keeps the active-layer
     // accessors out of an out-of-range index until a layer is added.
     doc->activeLayer = doc->layers.isEmpty() ? -1 : 0;
+    if (pass.boardDoc) {
+        // D9: rebuild the board index from the single tree (INV-006/007), as
+        // openProjectData does for a saved .psc. boardOrder lists the board
+        // rows in panel order (top to bottom); activeBoard defaults to the top
+        // board (Affinity opens on page 1); the id counter resumes above every
+        // loaded id. Landing on the top board keeps the Layers panel and the
+        // active row in sync.
+        doc->boardOrder.clear();
+        std::uint64_t maxBoardId = 0;
+        for (int i = 0; i < doc->layers.size(); ++i) {
+            const LayerItem& li = doc->layers[i];
+            if (!li.isBoard()) continue;
+            doc->boardOrder.append(li.boardId);
+            if (li.boardId > maxBoardId) maxBoardId = li.boardId;
+            if (doc->activeBoard == 0) doc->activeBoard = li.boardId;
+        }
+        doc->boardIdCounter = maxBoardId;
+        // Active row = the top board's row, so the Layers panel lands on the
+        // board the canvas activates.
+        if (doc->activeBoard != 0) {
+            for (int i = 0; i < doc->layers.size(); ++i) {
+                if (doc->layers[i].isBoard() &&
+                    doc->layers[i].boardId == doc->activeBoard) {
+                    doc->activeLayer = i;
+                    break;
+                }
+            }
+        }
+    }
     deriveCanvasPaper(*doc);
     doc->dirty = false;
     doc->rebuildComposite();
     emit layersChanged();
     emit documentModified(doc);
-    }
-    // One open, many documents: land on the first board the file lists,
-    // matching Affinity's "open on page 1" behaviour.
-    if (passes.size() > 1) {
-        const int idx = documents_.size() - static_cast<int>(passes.size());
-        setActiveDocumentIndex(idx);
     }
     noteRecentProject(path);
     return true;

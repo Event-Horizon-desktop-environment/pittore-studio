@@ -64,6 +64,20 @@ ProjectFileDoc sampleProject() {
     return p;
 }
 
+// Builds a raw §8.2 record `[type:4][length:u32][payload]` for an unknown type,
+// so a test can hand one to the codec without the encoder knowing the type.
+std::vector<std::uint8_t> rawRecord(const char type[4],
+                                    const std::vector<std::uint8_t>& payload) {
+    std::vector<std::uint8_t> r(type, type + 4);
+    const std::uint32_t n = static_cast<std::uint32_t>(payload.size());
+    r.push_back(static_cast<std::uint8_t>(n >> 24));
+    r.push_back(static_cast<std::uint8_t>((n >> 16) & 0xff));
+    r.push_back(static_cast<std::uint8_t>((n >> 8) & 0xff));
+    r.push_back(static_cast<std::uint8_t>(n & 0xff));
+    r.insert(r.end(), payload.begin(), payload.end());
+    return r;
+}
+
 }  // namespace
 
 static void test_round_trip() {
@@ -460,6 +474,211 @@ static void test_v6_text_spacing() {
     CHECK_NEAR(plainBack->layers[0].textParagraphGap, 0.0, 1e-12);
 }
 
+static void test_v7_artboards() {
+    std::string error;
+    ProjectFileDoc p = sampleProject();
+    p.icc = {0, 1, 2, 3, 4, 5, 6, 7};  // counter must coexist with ICC
+    p.boardIdCounter = 3;
+    p.background = "white";
+
+    // Board header row (indent 0) with one child (indent 1), then a second
+    // board with a fill. Mirrors the runtime tree: structure rides `indent`.
+    ProjectLayerFile board1;
+    board1.name = "Board A";
+    board1.kind = 1;
+    board1.isBoard = true;
+    board1.boardId = 1;
+    board1.boardX = -100.5;
+    board1.boardY = 40.25;
+    board1.boardW = 800;
+    board1.boardH = 600;
+    board1.indent = 0;
+    board1.opacity = 100;
+    board1.locked = true;
+    p.layers.insert(p.layers.begin(), board1);
+
+    ProjectLayerFile child;
+    child.name = "Child";
+    child.kind = 0;
+    child.indent = 1;  // metadata-only row under Board A
+    p.layers.insert(p.layers.begin() + 1, child);
+
+    ProjectLayerFile board2;
+    board2.name = "Board B";
+    board2.kind = 1;
+    board2.isBoard = true;
+    board2.boardId = 2;
+    board2.boardX = 1000;
+    board2.boardY = 0;
+    board2.boardW = 512;
+    board2.boardH = 256;
+    board2.boardHasFill = true;
+    board2.boardFillColor = 0x80ff8000u;  // ARGB
+    board2.boardFillOpacity = 0.375f;     // exact in f32
+    board2.indent = 0;
+    p.layers.insert(p.layers.begin() + 3, board2);
+
+    auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) {
+        std::fprintf(stderr, "    v7 encode error: %s\n", error.c_str());
+        return;
+    }
+    CHECK_EQ(fileVersion(*bytes), 7u);
+
+    auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(back.has_value());
+    if (!back) {
+        std::fprintf(stderr, "    v7 decode error: %s\n", error.c_str());
+        return;
+    }
+    CHECK_EQ(back->layers.size(), 5u);
+    if (back->layers.size() != 5) return;
+
+    const ProjectLayerFile& b1 = back->layers[0];
+    CHECK(b1.isBoard);
+    // On disk the row carries the Artboard kind byte; in memory it decodes to
+    // a Group row (INV-011), so the runtime Kind enum is untouched.
+    CHECK_EQ(b1.kind, pittore::io::kProjectKindGroup);
+    CHECK_EQ(b1.boardId, 1u);
+    CHECK_NEAR(b1.boardX, -100.5, 1e-12);
+    CHECK_NEAR(b1.boardY, 40.25, 1e-12);
+    CHECK_NEAR(b1.boardW, 800.0, 1e-12);
+    CHECK_NEAR(b1.boardH, 600.0, 1e-12);
+    CHECK(!b1.boardHasFill);
+    CHECK(b1.locked);
+    CHECK_EQ(b1.indent, 0);
+
+    const ProjectLayerFile& c = back->layers[1];
+    CHECK(!c.isBoard);  // children are not boards
+    CHECK_EQ(c.indent, 1);
+
+    const ProjectLayerFile& b2 = back->layers[3];
+    CHECK(b2.isBoard);
+    CHECK_EQ(b2.boardId, 2u);
+    CHECK(b2.boardHasFill);
+    CHECK_EQ(b2.boardFillColor, 0x80ff8000u);
+    CHECK_NEAR(b2.boardFillOpacity, 0.375, 1e-6);
+    CHECK_NEAR(b2.boardW, 512.0, 1e-12);
+
+    // Counter and ICC both round-trip (they share the meta section).
+    CHECK_EQ(back->boardIdCounter, 3u);
+    CHECK(back->icc == p.icc);
+
+    // Re-encode is byte-identical and the scan accepts v7.
+    auto again = pittore::io::projectEncode(*back, &error);
+    CHECK(again.has_value() && *again == *bytes);
+    auto info = pittore::io::projectScan(*bytes, &error);
+    CHECK(info.has_value());
+    if (info) CHECK(info->name == "Round Trip");
+}
+
+static void test_v7_id_counter_rederived() {
+    // A v7 file whose meta stops short of the counter (or a hand-built one)
+    // still yields a counter above every loaded id, so a board created after
+    // load never collides (INV-006).
+    std::string error;
+    ProjectFileDoc p = sampleProject();
+    ProjectLayerFile board;
+    board.name = "B";
+    board.kind = 1;
+    board.isBoard = true;
+    board.boardId = 9;
+    board.boardW = 10;
+    board.boardH = 10;
+    p.layers.insert(p.layers.begin(), board);
+    p.boardIdCounter = 0;  // deliberately stale/absent
+
+    auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) return;
+    auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(back.has_value());
+    if (!back || back->layers.empty()) return;
+    // Encoder wrote 0, decoder re-derives 9 from the loaded board.
+    CHECK_EQ(back->boardIdCounter, 9u);
+}
+
+static void test_v7_unknown_records() {
+    // §8.2 rules 2/5 + TEST-002/003: a record type we do not model is skipped
+    // by length on read, retained verbatim, and re-emitted unchanged on save —
+    // byte-identical round-trip, so an ordering or framing bug is visible.
+    // The fixture is built in-test with a small binary writer (AGENTS.md: never
+    // commit binary fixtures).
+    std::string error;
+    ProjectFileDoc p = sampleProject();
+    ProjectLayerFile board;
+    board.name = "B";
+    board.kind = 1;
+    board.isBoard = true;
+    board.boardId = 1;
+    board.boardW = 100;
+    board.boardH = 50;
+    p.layers.insert(p.layers.begin(), board);
+    p.boardIdCounter = 1;
+
+    // A future per-board record type ("GUID") we do not model.
+    const std::vector<std::uint8_t> unknown = rawRecord("GUID", {9, 8, 7, 6, 5});
+    p.unknownRecords = unknown;
+
+    auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) {
+        std::fprintf(stderr, "    v7 unknown encode error: %s\n", error.c_str());
+        return;
+    }
+
+    auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(back.has_value());
+    if (!back) {
+        std::fprintf(stderr, "    v7 unknown decode error: %s\n", error.c_str());
+        return;
+    }
+    // Skipped by length (rule 2), retained verbatim in order (rule 5).
+    CHECK(back->unknownRecords == unknown);
+
+    // Re-encode is byte-identical (TEST-002): the unknown record is re-emitted
+    // unchanged and in place.
+    auto again = pittore::io::projectEncode(*back, &error);
+    CHECK(again.has_value() && *again == *bytes);
+
+    // A second decode still retains it (TEST-003, rule 5).
+    auto back2 = pittore::io::projectDecode(*again, &error);
+    CHECK(back2.has_value() && back2->unknownRecords == unknown);
+
+    // Multiple unknown records keep their original order across a round trip.
+    p.unknownRecords.clear();
+    const auto u1 = rawRecord("AAAA", {1});
+    const auto u2 = rawRecord("BBBB", {2, 2});
+    p.unknownRecords.insert(p.unknownRecords.end(), u1.begin(), u1.end());
+    p.unknownRecords.insert(p.unknownRecords.end(), u2.begin(), u2.end());
+    auto bytes2 = pittore::io::projectEncode(p, &error);
+    auto back3 = bytes2 ? pittore::io::projectDecode(*bytes2, &error)
+                        : std::nullopt;
+    CHECK(back3.has_value() && back3->unknownRecords == p.unknownRecords);
+}
+
+static void test_future_version_refused_with_message() {
+    // A file from a future version is refused, and the message names the
+    // version found and the highest this build supports (§8.7), so the
+    // refusal is actionable rather than a bare boolean failure.
+    std::string error;
+    ProjectFileDoc p = sampleProject();
+    auto bytes = pittore::io::projectEncode(p, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) return;
+    (*bytes)[11] = 8;  // patch the big-endian version field (bytes 8..11)
+    auto back = pittore::io::projectDecode(*bytes, &error);
+    CHECK(!back.has_value());
+    CHECK(error.find("file version 8") != std::string::npos);
+    CHECK(error.find("up to version 7") != std::string::npos);
+    // The scan path refuses it too, with the same message.
+    std::string scanError;
+    auto info = pittore::io::projectScan(*bytes, &scanError);
+    CHECK(!info.has_value());
+    CHECK(scanError.find("file version 8") != std::string::npos);
+}
+
 int main() {
     test_round_trip();
     test_cmyk_payload_round_trip();
@@ -472,6 +691,10 @@ int main() {
     test_v3_wide_params();
     test_v4_psd_blocks();
     test_v6_text_spacing();
+    test_v7_artboards();
+    test_v7_id_counter_rederived();
+    test_v7_unknown_records();
+    test_future_version_refused_with_message();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),
                 pittore_test::failures());

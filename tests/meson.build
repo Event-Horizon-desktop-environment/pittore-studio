@@ -25,6 +25,9 @@ ui_core_sources = [
   '../src/ui/app_state_save.cpp',
   '../src/ui/app_state_text.cpp',
   '../src/ui/app_state_layers.cpp',
+  '../src/ui/app_state_boards.cpp',
+  '../src/ui/app_state_board_ops.cpp',
+  '../src/ui/app_state_board_render.cpp',
   '../src/ui/app_state_mask.cpp',
   '../src/ui/app_state_adjust.cpp',
   '../src/ui/app_state_stroke.cpp',
@@ -51,7 +54,6 @@ host_tests = [
   'test_tiff',
   'test_af',
   'test_af_pages',
-  'test_af_artboard',
   'test_xcf',
   'test_project_file',
   'test_vector_path',
@@ -228,6 +230,19 @@ if has_qt6
   test('session', session_test,
     env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-session'})
 
+  # D9 artboard import: a multi-artboard .af opens as ONE document with N
+  # boards on one canvas (not one document per board). Drives the real
+  # AppState::openImageFile path; self-skips without the external fixture
+  # (PITTORE_AF_ARTBOARD_FIXTURE). Same AppState harness as session.
+  af_artboard_test = executable('test_af_artboard',
+    ['test_af_artboard.cpp'],
+    dependencies : [qt6dep, qt6net, pittore_compute_dep, pittore_io_dep, tomlplusplus, pittore_ui_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('af-artboard', af_artboard_test,
+    env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-af-artboard',
+           'QT_QPA_PLATFORM' : 'offscreen'})
+
   # Import profile policy (ui/color_mismatch + AppState): canonical
   # comparison, resolve across policies/resolver, tagging + Cancel contract,
   # and the mismatch dialog default. Same AppState harness as place-ui plus
@@ -282,6 +297,41 @@ if has_qt6
     cpp_args : ['-fPIC'])
   test('undo-gestures', undo_gestures_test,
     env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-undogestures'})
+
+  # Board model invariants (P1 step 1): creation/id allocation, the boardOrder
+  # permutation, boardAt/boardChildRows resolution, move-translates-children,
+  # delete keep-vs-drop, locked rejection, and one-step undo for each. Same
+  # harness as undo-gestures.
+  artboard_model_test = executable('test_artboard_model',
+    ['test_artboard_model.cpp'],
+    dependencies : [qt6dep, qt6net, pittore_compute_dep, pittore_io_dep, tomlplusplus, pittore_ui_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('artboard-model', artboard_model_test,
+    env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-artboardmodel'})
+
+  # Board clip in the composite (P1 step 4): an overflowing child is clipped to
+  # its board's rect while pasteboard content is not. Drives the real
+  # gather->composite path. Same harness.
+  artboard_render_test = executable('test_artboard_render',
+    ['test_artboard_render.cpp'],
+    dependencies : [qt6dep, qt6net, pittore_compute_dep, pittore_io_dep, tomlplusplus, pittore_ui_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('artboard-render', artboard_render_test,
+    env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-artboardrender'})
+
+  # Board benchmark (P1 step 7, §16.5): 200 boards, 100 moves. Prints snapshot
+  # bytes/step (R-02), region-scoped recomposite area/step and the full-rebuild
+  # count (R-03), and checks the §7.2 <1 MB per-step snapshot budget. Model-level
+  # and geometric — no composite runs, so it is fast on every backend.
+  artboard_bench_test = executable('test_artboard_bench',
+    ['test_artboard_bench.cpp'],
+    dependencies : [qt6dep, qt6net, pittore_compute_dep, pittore_io_dep, tomlplusplus, pittore_ui_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('artboard-bench', artboard_bench_test,
+    env : {'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-artboardbench'})
 
   # Layer-stack surgery through AppState: group/ungroup, Arrange moves, drag
   # re-parenting, and the group transform helpers (descendants, bounds, batch
@@ -970,6 +1020,17 @@ if has_qt6
   test('menus', menus_test,
     env : {'QT_QPA_PLATFORM' : 'offscreen',
            'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-menus'})
+
+  # Alt+Shift+<letter> Photoshop-style clip/blend bindings through the real
+  # MainWindow: tool Mode option, Move-tool layer blend, strict modifiers.
+  blend_shortcuts_test = executable('test_blend_shortcuts',
+    ['test_blend_shortcuts.cpp'],
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+  test('blend-shortcuts', blend_shortcuts_test,
+    env : {'QT_QPA_PLATFORM' : 'offscreen',
+           'XDG_CONFIG_HOME' : meson.current_build_dir() / 'xdg-home-blendshortcuts'})
 
   # Issue #2: the main window fits a 1280x720 screen un-maximized.
   window_min_size_test = executable('test_window_min_size',
