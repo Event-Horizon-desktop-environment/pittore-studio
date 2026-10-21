@@ -1707,6 +1707,10 @@ class AppState : public QObject {
     // Index-taking variant: edits any adjustment row without moving the
     // selection (the dialog grades several layers per gesture).
     bool setAdjustmentParamAt(int layerIndex, int paramIndex, float value);
+    // Replace every parameter of one adjustment row at once (preset apply):
+    // one recomposite, one documentModified, no undo step — the caller holds
+    // the step, same contract as addAdjustmentLayer.
+    bool setAdjustmentParams(int layerIndex, const float* params);
     // Replace a Curves layer's control points (normalized), rebuild its LUT
     // and recomposite. Live, no undo step.
     bool setAdjustmentCurve(const QVector<QPointF>& points);

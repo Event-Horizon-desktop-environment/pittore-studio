@@ -658,6 +658,19 @@ if has_qt6
     include_directories : [src_inc],
     cpp_args : ['-fPIC'])
 
+  # Container-level .af grammar inspector (NOT a test): head/walk/verify/
+  # extract/census/diff over the 72-byte header, the #FT4 savepoint chain,
+  # v12 row directories, delta/checkpoint element streams and the 14-byte
+  # family trailers. The raw walk is independent of Archive::parse so the
+  # two cross-check; `verify` also decodes every head entry through the
+  # engine (CRC gate). Scriptable output feeds the research corpus in
+  # affinity-af-re without adding third-party fixtures to this repo.
+  executable('af_container_probe',
+    ['af_container_probe.cpp'],
+    dependencies : [pittore_io_dep],
+    include_directories : [src_inc],
+    cpp_args : ['-fPIC'])
+
   # TEMPORARY artboard tab-switch probe (NOT a test): opens a multi-artboard
   # .af through the real MainWindow and simulates selecting the second tab.
   # Remove once the per-artboard open is proven in the live window.

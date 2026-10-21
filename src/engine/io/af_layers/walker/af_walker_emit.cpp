@@ -1,5 +1,6 @@
 #include "engine/io/af_layers.h"
 #include "engine/io/af.h"
+#include "engine/io/af_layers/af_mem.h"
 #include "engine/render/layer_style.h"
 #include "engine/text/text_engine.h"
 #include "engine/vector/vector_shape.h"
@@ -68,6 +69,17 @@ void Walker::emitRaster(const Node* node, const Mat& ctm, int indent, bool clipp
     const std::string irfn = strOf(g, node, "IRFN");
     if (display.empty() || display == "Image")
         display = irfn.empty() ? (kind == tag4("ImgN") ? "Image" : "Pixel") : irfn;
+    if (std::uint64_t(img->w) * img->h >= (16ull << 20)) {
+        doc.log.push_back("mem raster '" + display + "': decoded " +
+                          std::to_string(img->w) + "x" + std::to_string(img->h) + " (" +
+                          std::to_string(std::uint64_t(img->w) * img->h * 4 / (1u << 20)) +
+                          " MiB), rss " + std::to_string(af_detail::rssMiB()) + " MiB, peak " +
+                          std::to_string(af_detail::peakRssMiB()) + " MiB");
+    }
+    // A placed image may use a sub-rectangle of a sheet (source box + source
+    // placement box). The source box is cropped before placement: the sheet
+    // can be thousands of pixels of unrelated atlas, and placing the whole
+    // rectangle both wastes memory and paints the rest of the sheet.
     // Live filters rework the layer's own pixels in place before
     // placement; a Live Perspective also warps the placement map by
     // wherever its destination quad lands.
@@ -100,6 +112,46 @@ void Walker::emitRaster(const Node* node, const Mat& ctm, int indent, bool clipp
         doc.log.push_back("skip live filter " + lfName + " on '" + display +
                           "': not supported");
         ++doc.skippedLayers;
+    }
+    // `SrBx` selects the used sub-rectangle of a sheet; the node transform
+    // lands that rectangle where `SrPB` says. Crop before placement so only
+    // the used pixels are resampled: a sprite sheet can be thousands of
+    // pixels square and the rest is unrelated atlas.
+    const auto* sbx = f64s(g, node, "SrBx");
+    if (sbx && sbx->size() >= 4 && (*sbx)[2] > (*sbx)[0] && (*sbx)[3] > (*sbx)[1]) {
+        const auto* spb = f64s(g, node, "SrPB");
+        std::string line = "source box '" + display + "': bitmap " +
+                           std::to_string(img->w) + "x" + std::to_string(img->h) + ", SrBx [" +
+                           std::to_string((*sbx)[0]) + "," + std::to_string((*sbx)[1]) + "," +
+                           std::to_string((*sbx)[2]) + "," + std::to_string((*sbx)[3]) + "]";
+        if (spb && spb->size() >= 4)
+            line += ", SrPB [" + std::to_string((*spb)[0]) + "," + std::to_string((*spb)[1]) +
+                    "," + std::to_string((*spb)[2]) + "," + std::to_string((*spb)[3]) + "]";
+        const int bx0 = std::clamp(static_cast<int>(std::floor((*sbx)[0])), 0,
+                                   static_cast<int>(img->w));
+        const int by0 = std::clamp(static_cast<int>(std::floor((*sbx)[1])), 0,
+                                   static_cast<int>(img->h));
+        const int bx1 = std::clamp(static_cast<int>(std::ceil((*sbx)[2])), 0,
+                                   static_cast<int>(img->w));
+        const int by1 = std::clamp(static_cast<int>(std::ceil((*sbx)[3])), 0,
+                                   static_cast<int>(img->h));
+        if (bx1 > bx0 && by1 > by0 &&
+            ((bx1 - bx0) < static_cast<int>(img->w) ||
+             (by1 - by0) < static_cast<int>(img->h))) {
+            if (auto cropped =
+                    cropPlaced(std::move(*img),
+                               IntRect{0, 0, static_cast<int>(img->w),
+                                       static_cast<int>(img->h)},
+                               IntRect{bx0, by0, bx1, by1})) {
+                line += ", cropped to " + std::to_string(cropped->img.w) + "x" +
+                        std::to_string(cropped->img.h);
+                *img = std::move(cropped->img);
+                // The crop's (0,0) is the box origin in the old source space.
+                map = matThen(map,
+                              translation(cropped->rect.x0, cropped->rect.y0));
+            }
+        }
+        doc.log.push_back(line);
     }
     auto placed = placeRaster(map, std::move(*img));
     if (!placed) {
@@ -463,6 +515,9 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         docScale = std::max(netX, docScale);
     }
     int frameLeft = 0, frameTop = 0, frameWidth = 0, frameHeight = 0;
+    // Mapped frame box in document space, used to clip frame text. Only set for
+    // unrotated text; a rotated frame would need a polygon clip.
+    int boxX0 = 0, boxY0 = 0, boxX1 = 0, boxY1 = 0;
     if (rotated) {
         frameWidth = static_cast<int>(std::llround(frmWl * docScale));
         frameHeight = static_cast<int>(std::llround(frmHl * docScale));
@@ -477,20 +532,44 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         const double maxy = std::max({p0.second, p1.second, p2.second, p3.second});
         frameLeft = static_cast<int>(std::llround(minx));
         frameTop = static_cast<int>(std::llround(miny));
-        // In layout units, so the wrap needs no further conversion.
-        frameWidth = static_cast<int>(std::llround(stretched ? frmWl * docScale
-                                                             : maxx - minx));
-        frameHeight = static_cast<int>(std::llround(stretched ? frmHl * docScale
-                                                              : maxy - miny));
+        boxX0 = frameLeft;
+        boxY0 = frameTop;
+        boxX1 = frameLeft + static_cast<int>(std::llround(maxx - minx));
+        boxY1 = frameTop + static_cast<int>(std::llround(maxy - miny));
+        // In layout units, so the wrap needs no further conversion. Frame
+        // text lays out in document space with the run's recorded size: the
+        // node transform maps the frame box, not the glyphs. Artistic text
+        // keeps the uniform design scale so its pen metrics stay proportioned.
+        frameWidth = static_cast<int>(std::llround(
+            frameText ? maxx - minx : (stretched ? frmWl * docScale : maxx - minx)));
+        frameHeight = static_cast<int>(std::llround(
+            frameText ? maxy - miny : (stretched ? frmHl * docScale : maxy - miny)));
     }
-    const float effSize = static_cast<float>(size * docScale);
+    const float effSize = static_cast<float>(frameText ? size : size * docScale);
     if (!(effSize >= 0.5f && effSize <= 10000.0f)) {
         noteSkip(node, "text size is out of range");
         return;
     }
 
+    // Frame text continues where the previous frame of the same story stopped.
+    // The chain lives on the text object's `Flow.Nods`; each frame keeps its
+    // own copy of the story, so the previous placement hands over the
+    // not-yet-shown tail and this frame finds it as a suffix of its copy.
+    std::size_t flowStart = 0;
+    if (frameText) {
+        const auto it = textFlowRemaining.find(node);
+        if (it != textFlowRemaining.end() && !it->second.empty() &&
+            it->second.size() < text.size() &&
+            text.compare(text.size() - it->second.size(), it->second.size(),
+                         it->second) == 0) {
+            flowStart = text.size() - it->second.size();
+        }
+    }
+    const std::string placedText =
+        flowStart > 0 && flowStart < text.size() ? text.substr(flowStart) : text;
+
     pittore::text::TextSpec spec;
-    spec.text = text;
+    spec.text = placedText;
     spec.family = family;
     spec.bold = weight >= 600 || post.find("Bold") != std::string::npos ||
                 post.find("Black") != std::string::npos ||
@@ -503,11 +582,12 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
                               : pittore::text::Align::Left;
     spec.lineHeight = 1.0f;
     spec.tracking = 0.0f;
-    // Frame text honours the story's recorded leading and paragraph
-    // spacing; artistic text keeps solving its line step from the
-    // recorded pen box below.
+    // Frame text uses the face's natural line step. Slot 8 of the run record
+    // holds 0.8 in this document, but the embedded preview's article lines
+    // advance by 1.215 em (Verdana's hhea step), so slot 8 is not the line
+    // advance. Paragraph spacing still comes from slot 6. Artistic text
+    // solves its own step from the recorded pen box below.
     if (frameText) {
-        if (leadEm > 0.0) spec.emLeading = static_cast<float>(leadEm);
         if (paraGapUnits > 0.0)
             spec.paragraphGap = static_cast<float>(paraGapUnits * docScale);
     }
@@ -570,6 +650,27 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         }
     }
 
+    // Frame text is clipped to its box. Only fully visible lines count towards
+    // the story's progress; the next placement resumes at the first line that
+    // does not fit in this frame.
+    std::size_t nextFlow = text.size();
+    if (frameText) {
+        if (auto layout = pittore::text::layoutText(spec)) {
+            const float frameBottom =
+                static_cast<float>(raster->bounds.top) + static_cast<float>(frameHeight);
+            std::size_t hidden = layout->lines.size();
+            for (std::size_t i = 0; i < layout->lines.size(); ++i) {
+                if (layout->lines[i].top + layout->lines[i].height > frameBottom + 0.5f) {
+                    hidden = i;
+                    break;
+                }
+            }
+            nextFlow = hidden < layout->lines.size()
+                           ? flowStart + layout->lines[hidden].start
+                           : text.size();
+        }
+    }
+
     // Anchor the pen box to the frame: the layout puts the widest line's
     // pen at 0, so the frame left is the origin and the ink lands one side
     // bearing inside it. (When no advances were measured, anchor the ink.)
@@ -620,14 +721,25 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         if (std::abs(spec.size - size) > 0.005) line += " laid " + mag(spec.size);
         line += ", font '" + family + "'";
         if (defaultFont) line += " (unresolved, using '" + spec.family + "')";
-        line += leadEm > 0.0 ? ", leading " + mag(leadEm) + " em"
-                             : ", leading face natural";
+        line += ", leading face natural";
+        if (leadEm > 0.0) line += ", slot8 " + mag(leadEm);
         line += paraGapUnits > 0.0 ? ", para-gap " + mag(paraGapUnits)
                                    : ", no para-gap";
         if (spec.wrapWidth) line += ", wrap " + mag(*spec.wrapWidth);
         line += ", frame " + std::to_string(frameWidth) + "x" +
                 std::to_string(frameHeight) + ", lines " +
                 std::to_string(raster->lineCount);
+        line += ", eff " + mag(spec.size) + "px, advance " + mag(raster->lineAdvance) +
+                " (" + mag(raster->lineAdvance / spec.size) + " em), firstBase " +
+                mag(raster->firstBaseline) + ", inkTop " + mag(raster->bounds.top);
+        if (frameText) {
+            line += ", flow " + std::to_string(flowStart) + "/" +
+                    std::to_string(text.size()) + " next " + std::to_string(nextFlow);
+            if (!rotated)
+                line += ", box " + std::to_string(boxX0) + "," + std::to_string(boxY0) + " " +
+                        std::to_string(boxX1 - boxX0) + "x" + std::to_string(boxY1 - boxY0);
+            line += " node " + std::to_string(node->id);
+        }
         doc.log.push_back(line);
     }
 
@@ -726,6 +838,57 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         rect = placed->rect;
     } else {
         rect = IntRect{bx, by, bx + raster->bounds.width(), by + raster->bounds.height()};
+    }
+    // Frame text is clipped to its frame box: overflow does not paint in the
+    // source document, and the continuation frame resumes at `nextFlow`.
+    if (frameText && !rotated) {
+        const int cx0 = std::max(rect.x0, boxX0);
+        const int cy0 = std::max(rect.y0, boxY0);
+        const int cx1 = std::min(rect.x1, boxX1);
+        const int cy1 = std::min(rect.y1, boxY1);
+        if (cx1 <= cx0 || cy1 <= cy0) {
+            noteSkip(node, "text falls outside its frame");
+            return;
+        }
+        if (cx0 != rect.x0 || cy0 != rect.y0 || cx1 != rect.x1 || cy1 != rect.y1) {
+            const int cw = cx1 - cx0;
+            const int ch = cy1 - cy0;
+            render::Rgba8Image cropped;
+            cropped.w = static_cast<std::uint32_t>(cw);
+            cropped.h = static_cast<std::uint32_t>(ch);
+            cropped.px.resize(std::size_t(cw) * std::size_t(ch) * 4);
+            for (int y = 0; y < ch; ++y) {
+                const std::uint8_t* src =
+                    &img.px[(std::size_t(cy0 - rect.y0 + y) * img.w +
+                             std::size_t(cx0 - rect.x0)) * 4];
+                std::memcpy(&cropped.px[std::size_t(y) * std::size_t(cw) * 4], src,
+                            std::size_t(cw) * 4);
+            }
+            img = std::move(cropped);
+            rect = IntRect{cx0, cy0, cx1, cy1};
+        }
+        doc.log.push_back("text clip '" + displayName + "': box " +
+                          std::to_string(boxX0) + "," + std::to_string(boxY0) + " " +
+                          std::to_string(boxX1 - boxX0) + "x" +
+                          std::to_string(boxY1 - boxY0) + " -> rect " +
+                          std::to_string(rect.x0) + "," + std::to_string(rect.y0) + " " +
+                          std::to_string(rect.x1 - rect.x0) + "x" +
+                          std::to_string(rect.y1 - rect.y0) + " (img " +
+                          std::to_string(img.w) + "x" + std::to_string(img.h) + ")");
+    }
+    // Hand the rest of the story to the next frame in the link chain. The
+    // chain is shared by the linked text objects, so the next placement finds
+    // this tail as the suffix of its own copy.
+    if (frameText && nextFlow < text.size()) {
+        if (const Node* flow = g.child(node, "Flow")) {
+            const std::vector<Node*> nods = g.children(flow, "Nods");
+            for (std::size_t i = 0; i + 1 < nods.size(); ++i) {
+                if (nods[i] == node) {
+                    textFlowRemaining[nods[i + 1]] = text.substr(nextFlow);
+                    break;
+                }
+            }
+        }
     }
     finishImageLayer(node, ctm, indent, clipped, displayName, "", std::move(img), rect, true,
                      editable ? &payload : nullptr);

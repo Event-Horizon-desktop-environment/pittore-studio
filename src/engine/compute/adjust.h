@@ -36,6 +36,9 @@
 //   ColorBalance        p[0..2] shadows, p[3..5] midtones, p[6..8] highlights
 //                       (C-R/M-G/Y-B, -100..100), p[9] preserve flag
 //                       (triangular zone weights on lightness)
+//   Recolour           p[0] hue 0..360 degrees, p[1] saturation 0..1,
+//                       p[2] lightness offset -1..1 (single hue at single
+//                       saturation over the source's own HSL lightness)
 
 #include <cmath>
 #include <cstddef>
@@ -72,6 +75,7 @@ enum class AdjustmentKind {
     BlackWhite = 12,
     ChannelMixer = 13,
     ColorBalance = 14,
+    Recolour = 15,
 };
 
 struct AdjustmentParams {
@@ -438,6 +442,27 @@ PITTORE_ADJUST_DEVICE void white_balance(float r, float g, float b,
 }
 #endif
 
+// Single hue at a single saturation, with the source's HSL lightness carrying
+// the tone. This is what makes Recolour read as a duotone rather than a flat
+// wash: black stays black, white stays white, and everything between picks up
+// the target hue at the target saturation.
+//
+// Fit, not lifted: Affinity's own control semantics are Hue (0..360 degrees),
+// Saturation (0..100%) and Lightness (0%, offset), and its default lands on
+// hue 0 / saturation 100% / lightness 0. The tonal carrier here is plain HSL
+// lightness, chosen because the existing hue_to_rgb path already defines the
+// engine's HSL convention and keeps Recolour bit-consistent with
+// hue_saturation.
+PITTORE_ADJUST_DEVICE void recolour(float r, float g, float b, float hueDeg,
+                                    float sat, float lightAdj, float& or_,
+                                    float& og, float& ob) {
+    const float l = clamp01(rgb_to_lightness(r, g, b) + lightAdj);
+    float h = hueDeg / 360.0f;
+    if (!(h >= 0.0f)) h = 0.0f;  // NaN guard: degenerate hue reads as 0
+    if (h > 1.0f) h = 1.0f;
+    hsl_to_rgb(h, clamp01(sat), l, or_, og, ob);
+}
+
 // Gel multiply (filter/luma), optional lightness restore, density mix.
 PITTORE_ADJUST_DEVICE void photo_filter(float r, float g, float b,
                                          float fr, float fg, float fb,
@@ -539,6 +564,9 @@ PITTORE_ADJUST_DEVICE void apply(AdjustmentKind kind,
             return;
         case AdjustmentKind::ColorBalance:
             color_balance(r, g, b, p, or_, og, ob);
+            return;
+        case AdjustmentKind::Recolour:
+            recolour(r, g, b, p[0], p[1], p[2], or_, og, ob);
             return;
         case AdjustmentKind::None:
             or_ = r;

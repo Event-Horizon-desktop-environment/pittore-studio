@@ -61,6 +61,7 @@ if has_qt6
     'app_state_board_render.cpp',
     'app_state_mask.cpp',
     'app_state_adjust.cpp',
+    'adjustment_presets.cpp',
     'app_state_stroke.cpp',
     'app_state_stamp.cpp',
     'app_state_smudge.cpp',

@@ -43,6 +43,7 @@
 #include <QtMath>
 
 #include <cmath>
+#include <cstring>
 
 #include "ui/ai_models.h"
 #include "ui/icons.h"
@@ -53,6 +54,7 @@
 #include "engine/core/log.h"
 #include "engine/compute/adjust.h"
 #include "engine/filter/registry/filter_registry.h"
+#include "ui/adjustment_presets.h"
 #include "ui/curve_editor.h"
 #include "ui/panels/shared/panel_helpers.h"
 #include "ui/persona/vector_edit.h"
@@ -250,6 +252,51 @@ class PropertiesPanel final : public QWidget {
                     [this] { state_->endAdjustmentPreview(); });
             hrow->addWidget(compare);
             form_->addRow(head);
+            // Named presets (Affinity's Adjustment-panel lists): one undoable
+            // write that replaces every parameter at once. An exact parameter
+            // match marks the current entry; anything else reads "Custom".
+            int presetCount = 0;
+            const AdjustmentPreset* presets =
+                adjustmentPresets(layer->adjustmentKind, &presetCount);
+            if (presets && presetCount > 0) {
+                auto* combo = new QComboBox(this);
+                combo->setPlaceholderText(tr("Custom"));
+                for (int i = 0; i < presetCount; ++i)
+                    combo->addItem(tr(presets[i].name));
+                int match = -1;
+                for (int i = 0; i < presetCount && match < 0; ++i)
+                    if (std::memcmp(layer->adjustmentParams, presets[i].params,
+                                    sizeof(float) * 16) == 0)
+                        match = i;
+                {
+                    const QSignalBlocker block(combo);
+                    combo->setCurrentIndex(match);  // -1 shows "Custom"
+                }
+                const int layerIndex = d->activeLayer;
+                connect(combo, &QComboBox::currentIndexChanged, this,
+                        [this, presets, presetCount, layerIndex](int idx) {
+                            if (idx < 0 || idx >= presetCount) return;
+                            // Deferred: committing the undo step rebuilds this
+                            // panel through historyChanged, and QComboBox does
+                            // not survive being deleted inside its own signal.
+                            // The table is static, so the pointer stays valid.
+                            const float* params = presets[idx].params;
+                            const QString name = tr(presets[idx].name);
+                            QTimer::singleShot(0, this,
+                                               [this, params, name, layerIndex] {
+                                                   state_->beginUndoStep();
+                                                   if (state_->setAdjustmentParams(
+                                                           layerIndex, params))
+                                                       state_->commitUndoStep(
+                                                           name,
+                                                           QStringLiteral(
+                                                               "adjustments"));
+                                                   else
+                                                       state_->discardUndoStep();
+                                               });
+                        });
+                form_->addRow(tr("Preset"), combo);
+            }
             // Live parameter rows, in param-index order. Slider drags write
             // straight through to the layer and recomposite immediately;
             // the drag holds one undo step (begin on press, commit on

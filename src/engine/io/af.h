@@ -8,7 +8,8 @@ namespace pittore::io {
 
 // .af archive (.af/.afphoto/.afdesign/.afpub). True pixels can't be rebuilt
 // (tile mapping is internal), so this reads the embedded PNG previews: the tail
-// holds a small thumb, a larger render sits earlier. We pick the largest area.
+// holds the saved flattened render after the directory block; clear-text PNGs
+// inside the data area are placed sources. We pick the tail render.
 // Needs only zlib; with libzstd (PITTORE_AF) it also walks #Fil frames for
 // version atoms + linked-resource list.
 

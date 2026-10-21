@@ -13,6 +13,7 @@
 #include "engine/compute/layer_mask.h"
 #include "engine/io/af.h"
 #include "engine/io/af_layers.h"
+#include "engine/io/af_layers/af_mem.h"
 #include "engine/io/icc.h"
 #include "engine/io/psd.h"
 #ifdef PITTORE_TIFF
@@ -695,9 +696,14 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
             pass.pageToRow[i] = int(pass.boardRows.size());
             pass.boardRows.push_back(std::move(br));
         }
-        // Group layers by board (page order), pasteboard first so boards sit on
-        // top of it; offsets rebased by the one global origin (INV-012 geometry
-        // kept, since every layer is shifted by the same amount).
+        // Group layers by board (page order). The board runs go first: a
+        // board's paint is the bottom-most layer of its run, and the panel
+        // reverses this list, so the run order keeps the board background
+        // under the board's content. Pasteboard content paints last, above
+        // the boards; that is where this layout puts a page's text and images
+        // when the file stores them as siblings of the board shapes.
+        // Offsets are rebased by the one global origin (INV-012 geometry kept,
+        // since every layer is shifted by the same amount).
         std::vector<std::vector<pittore::io::AfLayer>> byRow(pass.boardRows.size());
         std::vector<pittore::io::AfLayer> paste;
         for (pittore::io::AfLayer& l : pd.layers) {
@@ -710,9 +716,9 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
             else paste.push_back(std::move(l));
         }
         pd.layers.clear();
-        for (pittore::io::AfLayer& l : paste) pass.layers.push_back(std::move(l));
         for (auto& v : byRow)
             for (pittore::io::AfLayer& l : v) pass.layers.push_back(std::move(l));
+        for (pittore::io::AfLayer& l : paste) pass.layers.push_back(std::move(l));
         passes.push_back(std::move(pass));
     } else {
         AfOpenPass pass;
@@ -798,6 +804,7 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         li.indent = l.indent;
         li.groupExpanded = l.groupExpanded;
         li.clipped = !l.isGroup && l.clipped;
+        const bool huge = l.rgba.size() * 2 >= (64u << 20);
         if (!l.isGroup) {
             li.offset = QPointF(l.left, l.top);
             li.scaleX = 1.0;
@@ -805,7 +812,17 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
             // A native .af shape or free path keeps its true geometry, so
             // it exports as vector instead of a bitmap.
             li.art = l.art;
+            const std::size_t rgba16Bytes = l.rgba.size() * 2;
+            const bool bigLayer = rgba16Bytes >= (64u << 20);
             if (!l.rgba.empty() && l.width > 0 && l.height > 0) {
+                if (bigLayer) {
+                    const std::string msg =
+                        "mem ui begin '" + l.name + "': rgba16 " +
+                        std::to_string(rgba16Bytes >> 20) + " MiB, rss " +
+                        std::to_string(pittore::io::af_detail::rssMiB()) + " MiB, peak " +
+                        std::to_string(pittore::io::af_detail::peakRssMiB()) + " MiB";
+                    ::pittore::core::log::log_info("%s", msg.c_str());
+                }
                 // Every recovered layer comes in packed: straight 8-bit in
                 // deferredRgba8 at 4 B/px instead of RGBAf at 16 B/px. The
                 // compositor expands the ones that are actually visible the
@@ -866,6 +883,20 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                     li.maskScaleX = li.maskScaleY = 1.0;
                     li.maskStamp = 1;
                 }
+                if (bigLayer) {
+                    const std::size_t keptBytes =
+                        std::size_t(li.deferredRgba8.size()) +
+                        (li.pixels ? li.pixels->pixel_count() * sizeof(pittore::RGBAf) : 0);
+                    const std::size_t maskBytes =
+                        li.hasMask ? li.mask->pixel_count() * sizeof(pittore::RGBAf) : 0;
+                    const std::string msg =
+                        "mem ui packed '" + l.name + "': kept " +
+                        std::to_string(keptBytes >> 20) + " MiB, mask " +
+                        std::to_string(maskBytes >> 20) + " MiB, rss " +
+                        std::to_string(pittore::io::af_detail::rssMiB()) + " MiB, peak " +
+                        std::to_string(pittore::io::af_detail::peakRssMiB()) + " MiB";
+                    ::pittore::core::log::log_info("%s", msg.c_str());
+                }
             }
             // A text layer the decoder could re-set keeps its spec: the layer
             // stays live, so a double-click resumes editing it and the first
@@ -910,6 +941,20 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         // Drop this layer's now that it has been consumed: the swap releases
         // the allocation instead of leaving it reserved.
         std::vector<std::uint16_t>().swap(l.rgba);
+        if (huge) {
+            const std::string msg =
+                "mem ui freed '" + l.name + "': rss " +
+                std::to_string(pittore::io::af_detail::rssMiB()) + " MiB, peak " +
+                std::to_string(pittore::io::af_detail::peakRssMiB()) + " MiB";
+            ::pittore::core::log::log_info("%s", msg.c_str());
+        }
+    }
+    {
+        const std::string msg =
+            "mem ui layers: " + std::to_string(nodes.size()) + " nodes, rss " +
+            std::to_string(pittore::io::af_detail::rssMiB()) + " MiB, peak " +
+            std::to_string(pittore::io::af_detail::peakRssMiB()) + " MiB";
+        ::pittore::core::log::log_info("%s", msg.c_str());
     }
 
     QVector<LayerItem> panel;

@@ -28,6 +28,9 @@
 #ifdef PITTORE_WEBP
 #include "engine/io/webp.h"
 #endif
+#ifdef PITTORE_TIFF
+#include "engine/io/tiff.h"
+#endif
 #ifdef PITTORE_JPEG
 #include <csetjmp>
 #include <cstdio>
@@ -171,6 +174,31 @@ bool decodeImageBytes(const std::vector<std::uint8_t>& b, Bitmap& out, std::stri
         return true;
 #else
         why = "embedded WebP source needs libwebp (PITTORE_WEBP)";
+        return false;
+#endif
+    }
+    // Placed originals are often plain TIFFs (in-house scans, older photos).
+    const bool tiffLittle = b.size() >= 4 && b[0] == 'I' && b[1] == 'I' &&
+                            b[2] == 0x2a && b[3] == 0x00;
+    const bool tiffBig = b.size() >= 4 && b[0] == 'M' && b[1] == 'M' &&
+                         b[2] == 0x00 && b[3] == 0x2a;
+    if (tiffLittle || tiffBig) {
+#ifdef PITTORE_TIFF
+        std::uint32_t w = 0, h = 0;
+        std::vector<std::uint16_t> rgba;
+        int dpi = 0;
+        if (!tiffDecodeRgba16(b, w, h, rgba, dpi) || w == 0 || h == 0) {
+            why = "TIFF: decode failed";
+            return false;
+        }
+        out.w = w;
+        out.h = h;
+        out.px.resize(std::size_t(w) * h * 4);
+        for (std::size_t i = 0; i < out.px.size(); ++i)
+            out.px[i] = static_cast<std::uint8_t>(rgba[i] >> 8);
+        return true;
+#else
+        why = "embedded TIFF source needs libtiff (PITTORE_TIFF)";
         return false;
 #endif
     }

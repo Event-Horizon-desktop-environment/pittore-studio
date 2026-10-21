@@ -75,6 +75,11 @@ Bitmap interleave(const std::vector<std::vector<std::uint8_t>>& planes, std::siz
                   std::size_t w, std::size_t h, std::size_t bps, FK kind);
 std::optional<Placed> affineResample(const Bitmap& img, const Mat& map);
 std::optional<Placed> placeRaster(const Mat& map, Bitmap img);
+// Crop a bitmap that currently occupies `at` to the document-space box `box`.
+// The returned rect is the intersection; a bitmap smaller than the box keeps
+// its full extent. Returns nullopt when the two do not overlap or the source
+// geometry is inconsistent.
+std::optional<Placed> cropPlaced(Bitmap img, const IntRect& at, const IntRect& box);
 #ifdef PITTORE_JPEG
 void jpegErrorExit(j_common_ptr cinfo);
 bool jpegDecode(const std::vector<std::uint8_t>& b, Bitmap& out, std::string& why);

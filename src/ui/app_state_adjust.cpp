@@ -41,6 +41,8 @@ QString adjustmentKindName(int kind) {
             return QStringLiteral("Channel Mixer");
         case AdjustmentKind::ColorBalance:
             return QStringLiteral("Color Balance");
+        case AdjustmentKind::Recolour:
+            return QStringLiteral("Recolour");
         case AdjustmentKind::None: break;
     }
     return QString();
@@ -111,6 +113,10 @@ QVector<AdjustmentParamDesc> adjustmentParamDescs(int kind) {
                 {"Highlights Magenta-Green", -100, 100, -100.0, 100.0},
                 {"Highlights Yellow-Blue", -100, 100, -100.0, 100.0},
                 {"Preserve Luminosity", 0, 1, 0.0, 1.0}};
+    if (k == AdjustmentKind::Recolour)
+        return {{"Hue", 0, 360, 0.0, 360.0},
+                {"Saturation", 0, 100, 0.0, 1.0},
+                {"Lightness", -100, 100, -1.0, 1.0}};
     return {};
 }
 
@@ -160,6 +166,24 @@ bool AppState::setAdjustmentParam(int index, float value) {
     DocumentItem* d = activeDocument();
     if (!d) return false;
     return setAdjustmentParamAt(d->activeLayer, index, value);
+}
+
+bool AppState::setAdjustmentParams(int layerIndex, const float* params) {
+    using pittore::compute::AdjustmentKind;
+    DocumentItem* d = activeDocument();
+    if (!d || !params || layerIndex < 0 || layerIndex >= d->layers.size())
+        return false;
+    LayerItem* l = &d->layers[layerIndex];
+    if (l->kind != LayerItem::Kind::Adjustment) return false;
+    for (int i = 0; i < 16; ++i) l->adjustmentParams[i] = params[i];
+    const AdjustmentKind k = static_cast<AdjustmentKind>(l->adjustmentKind);
+    if (k == AdjustmentKind::Levels || k == AdjustmentKind::Curves)
+        rebuildAdjustmentLUT(*l);
+    else
+        ++l->adjustStamp;
+    d->rebuildComposite();
+    emit documentModified(d);
+    return true;
 }
 
 bool AppState::setAdjustmentCurve(const QVector<QPointF>& points) {

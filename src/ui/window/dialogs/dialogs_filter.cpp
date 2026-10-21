@@ -175,6 +175,10 @@ void MainWindow::colorGradeDialog() {
     }
     // The dialog edits the active adjustment layer, creating a Photo Filter
     // one when needed, so this always opens a window with options.
+    // Affinity surfaces its adjustment chooser beside the canvas while
+    // Colour Grading is up: raise the Adjustments panel on the left rail so
+    // the two read side by side.
+    raisePanelOnLeft(QStringLiteral("adjustments"));
     ColorGradeDialog dialog(state_, this);
     dialog.exec();
     updateStatus();

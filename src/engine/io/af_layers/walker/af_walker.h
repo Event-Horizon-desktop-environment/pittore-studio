@@ -51,6 +51,11 @@ struct Walker {
     std::unordered_map<const Node*, int> boardIndex{};
     bool boardSplit = false;
     int currentBoard = -1;
+    // Frame-text flow: the source document links frames through the text
+    // object's `Flow.Nods` chain. Each placement leaves the not-yet-shown tail
+    // for the next frame; that frame resumes at the matching suffix of its own
+    // story copy.
+    std::unordered_map<const Node*, std::string> textFlowRemaining{};
     Mat nodeCtm(const Node* node, const Mat& parent) const;
     std::optional<Bitmap> sourceImage(const Node* bitm, std::uint32_t w, std::uint32_t h,
                                   std::string& why);
@@ -64,14 +69,14 @@ struct Walker {
     void noteSkip(const Node* node, const std::string& why);
     void applyCommon(const Node* node, AfLayer& layer);
     std::vector<AfMask> placeMasks(const Node* node, const Mat& ctm,
-                              const IntRect* pad = nullptr);
+                              const IntRect* pad = nullptr, bool quiet = false);
     // Vector-crop shapes ("ShpN") and free paths ("PCrv") nested in a
     // layer's `AdCh` list, rasterized to live coverage masks. `pad`
     // optionally widens each mask to a footprint (the photo's placed
     // rect): masks reveal outside their own rect, so an unpadded crop
     // would show the photo past its frame.
     std::vector<AfMask> cropMasks(const Node* node, const Mat& base,
-                                  const IntRect* pad = nullptr);
+                                  const IntRect* pad = nullptr, bool quiet = false);
     void finishImageLayer(const Node* node, const Mat& ctm, int indent, bool clipped,
                       const std::string& display, const std::string& irfn,
                       render::Rgba8Image img, IntRect rect, bool isText = false,

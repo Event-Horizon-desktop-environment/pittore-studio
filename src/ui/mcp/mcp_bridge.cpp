@@ -300,7 +300,12 @@ QJsonObject McpBridge::dispatch(const QJsonObject& req) {
                                       {"name", l.name},
                                       {"kind", layerKindName(l.kind)},
                                       {"visible", l.visible},
-                                      {"opacity", l.opacity}});
+                                      {"opacity", l.opacity},
+                                      {"indent", l.indent},
+                                      {"clipped", l.clipped},
+                                      {"hasMask", l.hasMask},
+                                      {"offsetX", l.offset.x()},
+                                      {"offsetY", l.offset.y()}});
         }
         return okResp(id, QJsonObject{
                                  {"title", d->title},

@@ -108,6 +108,8 @@ class AdjustmentsPanel final : public QWidget {
              static_cast<int>(pittore::compute::AdjustmentKind::ChannelMixer)},
             {"Color Balance", "histogram",
              static_cast<int>(pittore::compute::AdjustmentKind::ColorBalance)},
+            {"Recolour", "recolor",
+             static_cast<int>(pittore::compute::AdjustmentKind::Recolour)},
         };
         int row = 0;
         int col = 0;

@@ -262,6 +262,13 @@ void MainWindow::showPanel(const QString& id, bool show) {
         dock->raise();
         return;
     }
+    // Same for a panel already sitting on the left rail: tabifying it onto a
+    // right-rail anchor would move it back out of the column on every show.
+    if (dockWidgetArea(dock) == Qt::LeftDockWidgetArea) {
+        dock->show();
+        dock->raise();
+        return;
+    }
     // Join the panel's rail group. The buildDocks split stands untouched:
     // splitDockWidget rips its second dock out of its tab group, so layout
     // calls it exactly once (two singletons) and never again. Tabifying a
@@ -295,10 +302,70 @@ void MainWindow::showPanel(const QString& id, bool show) {
 }
 
 
+void MainWindow::raisePanelOnLeft(const QString& id) {
+    QDockWidget* dock = dockFor(id, true);
+    if (!dock) return;
+    if (QAction* action = panelActions_.value(id)) {
+        QSignalBlocker blocker(action);
+        action->setChecked(true);
+    }
+    // A panel the user tore out stays where they put it.
+    if (dock->isFloating()) {
+        dock->show();
+        dock->raise();
+        return;
+    }
+    if (dockWidgetArea(dock) != Qt::LeftDockWidgetArea) {
+        // A moved dock cannot stay the right-rail group anchor: groupAnchor()
+        // would hand it back and every later showPanel() would tab onto the
+        // left rail. Hand the anchor to the next still-right-docked member.
+        if (dock == topAnchor_ || dock == bottomAnchor_) {
+            const bool top = (dock == topAnchor_);
+            setGroupAnchor(top, nullptr);
+            for (const PanelInfo& info : allPanels()) {
+                if (info.floating || inTopGroup(info.id) != top) continue;
+                QDockWidget* w = dockFor(info.id, false);
+                if (!w || w == dock || w->isFloating()) continue;
+                if (dockWidgetArea(w) == Qt::RightDockWidgetArea) {
+                    setGroupAnchor(top, w);
+                    break;
+                }
+            }
+        }
+        // Join an existing left column when there is one: a second
+        // splitDockWidget against the tools rail would halve the rail
+        // instead of opening another column.
+        QDockWidget* peer = nullptr;
+        for (QDockWidget* other : docks_) {
+            if (!other || other == dock || other == toolsDock_) continue;
+            if (dockWidgetArea(other) == Qt::LeftDockWidgetArea) {
+                peer = other;
+                break;
+            }
+        }
+        removeDockWidget(dock);
+        railGrouped_.remove(id);
+        if (peer)
+            tabifyDockWidget(peer, dock);
+        else if (toolsDock_ &&
+                 dockWidgetArea(toolsDock_) == Qt::LeftDockWidgetArea)
+            splitDockWidget(toolsDock_, dock, Qt::Horizontal);
+        else
+            addDockWidget(Qt::LeftDockWidgetArea, dock);
+    }
+    dock->show();
+    dock->raise();
+    fixDockTabBars();
+}
+
+
 QDockWidget* MainWindow::groupAnchor(bool top) {
     QDockWidget* anchor = top ? topAnchor_ : bottomAnchor_;
+    // Left-rail panels are never part of the right-rail tab groups (they are
+    // raised there explicitly, see raisePanelOnLeft).
     if (anchor && !anchor->isFloating() &&
-        dockWidgetArea(anchor) != Qt::NoDockWidgetArea)
+        dockWidgetArea(anchor) != Qt::NoDockWidgetArea &&
+        dockWidgetArea(anchor) != Qt::LeftDockWidgetArea)
         return anchor;
     // Anchor lost (never set, or the user undocked it): fall back to the
     // first still-docked, non-floating group member so the group survives.
@@ -306,7 +373,8 @@ QDockWidget* MainWindow::groupAnchor(bool top) {
         if (info.floating || inTopGroup(info.id) != top) continue;
         QDockWidget* w = dockFor(info.id, false);
         if (w && !w->isFloating() &&
-            dockWidgetArea(w) != Qt::NoDockWidgetArea) {
+            dockWidgetArea(w) != Qt::NoDockWidgetArea &&
+            dockWidgetArea(w) != Qt::LeftDockWidgetArea) {
             setGroupAnchor(top, w);
             return w;
         }

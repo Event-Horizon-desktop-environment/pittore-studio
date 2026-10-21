@@ -57,6 +57,11 @@ class MainWindow final : public QMainWindow {
     // Panels are created lazily; this is also what the Window menu, the
     // collapsed icon rail and the workspace presets call.
     void showPanel(const QString& id, bool show = true);
+    // Raise a panel on the left rail next to Tools, regardless of where it
+    // normally docks. Used when a dialog wants the user's eye beside the
+    // canvas (Colour Grading surfaces the Adjustments panel this way). A
+    // floating panel stays where the user put it.
+    void raisePanelOnLeft(const QString& id);
     bool panelVisible(const QString& id) const;
 
     // Headless-safe command entry for the MCP bridge and tests. Only

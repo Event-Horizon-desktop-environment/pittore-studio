@@ -1,5 +1,6 @@
 #include "engine/io/af_layers.h"
 #include "engine/io/af.h"
+#include "engine/io/af_layers/af_mem.h"
 #include "engine/core/parallel.h"
 #include "engine/render/layer_style.h"
 #include "engine/text/text_engine.h"
@@ -312,7 +313,7 @@ void Walker::applyCommon(const Node* node, AfLayer& layer) {
     // Several masks multiply, as the format stacks them; only visible ones join
     // unless none is visible, in which case the first still does.
 std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
-                                    const IntRect* pad) {
+                                    const IntRect* pad, bool quiet) {
     using namespace pittore::vector;
     std::vector<Node*> crops;
     for (Node* ch : g.children(node, "AdCh")) {
@@ -358,9 +359,11 @@ std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
         if (path.isEmpty()) {
             std::string display = strOf(g, node, "Desc");
             if (display.empty()) display = tagName(g.typeTag(node));
-            doc.log.push_back("skip crop of '" + display + "': " +
-                              (why.empty() ? "no geometry" : why));
-            ++doc.skippedLayers;
+            if (!quiet) {
+                doc.log.push_back("skip crop of '" + display + "': " +
+                                  (why.empty() ? "no geometry" : why));
+                ++doc.skippedLayers;
+            }
             continue;
         }
         VectorShape shape;
@@ -371,8 +374,10 @@ std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
         if (!img) {
             std::string display = strOf(g, node, "Desc");
             if (display.empty()) display = tagName(g.typeTag(node));
-            doc.log.push_back("skip crop of '" + display + "': raster is empty or too large");
-            ++doc.skippedLayers;
+            if (!quiet) {
+                doc.log.push_back("skip crop of '" + display + "': raster is empty or too large");
+                ++doc.skippedLayers;
+            }
             continue;
         }
         AfMask mb;
@@ -414,7 +419,7 @@ std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
         }
         out.push_back(std::move(mb));
     }
-    if (!out.empty()) {
+    if (!out.empty() && !quiet) {
         std::string display = strOf(g, node, "Desc");
         if (display.empty()) display = tagName(g.typeTag(node));
         doc.log.push_back("crop '" + display + "': " + std::to_string(out.size()) +
@@ -424,7 +429,7 @@ std::vector<AfMask> Walker::cropMasks(const Node* node, const Mat& base,
 }
 
 std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm,
-                                     const IntRect* pad) {
+                                     const IntRect* pad, bool quiet) {
     std::vector<Node*> masks;
     for (Node* ch : g.children(node, "AdCh"))
         if (g.typeTag(ch) == tag4("MRst")) masks.push_back(ch);
@@ -437,7 +442,7 @@ std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm,
     // but stays editable. Invisible crops are skipped unless every crop
     // is invisible (same policy as raster masks). Runs before the raster
     // early-out below so crops apply with no MRst present.
-    for (const AfMask& cm : cropMasks(node, base, pad)) out.push_back(cm);
+    for (const AfMask& cm : cropMasks(node, base, pad, quiet)) out.push_back(cm);
     if (masks.empty()) return out;
     std::vector<Node*> used;
     if (masks.size() == 1) {
@@ -473,10 +478,12 @@ std::vector<AfMask> Walker::placeMasks(const Node* node, const Mat& ctm,
         }
         std::string display = strOf(g, node, "Desc");
         if (display.empty()) display = tagName(g.typeTag(node));
-        doc.log.push_back("skip mask of '" + display + "': " + why);
-        ++doc.skippedLayers;
+        if (!quiet) {
+            doc.log.push_back("skip mask of '" + display + "': " + why);
+            ++doc.skippedLayers;
+        }
     }
-    if (!out.empty()) {
+    if (!out.empty() && !quiet) {
         std::string display = strOf(g, node, "Desc");
         if (display.empty()) display = tagName(g.typeTag(node));
         doc.log.push_back("mask '" + display + "': " + std::to_string(out.size()) +
@@ -535,6 +542,56 @@ void Walker::finishImageLayer(const Node* node, const Mat& ctm, int indent, bool
         for (int i = 0; i < 4; ++i)
             layer.textColor[i] = static_cast<float>(text->color[i]) / 255.0f;
     }
+    const std::size_t bigBytes = static_cast<std::size_t>(64) << 20;
+    const bool big = img.px.size() >= bigBytes;
+    // Sparse large layers: a vector crop only shows the layer inside the
+    // shape, so probe the crop bounds and cut the placed raster down before
+    // widening it to RGBA16. The mask is re-placed against the cropped rect
+    // below, which preserves "hidden past the shape" and avoids the padded
+    // full-footprint mask. Restrict the probe to layers that actually carry
+    // a vector crop so a raster mask is not decoded twice.
+    bool hasCropShape = false;
+    if (big) {
+        for (Node* ch : g.children(node, "AdCh")) {
+            const std::uint32_t t = g.typeTag(ch);
+            if (t == tag4("ShpN") || t == tag4("PCrv")) {
+                hasCropShape = true;
+                break;
+            }
+        }
+    }
+    if (big && hasCropShape) {
+        const std::vector<AfMask> probe = placeMasks(node, ctm, nullptr, true);
+        if (!probe.empty()) {
+            IntRect box = rect;
+            for (const AfMask& m : probe) {
+                box.x0 = std::max(box.x0, m.left);
+                box.y0 = std::max(box.y0, m.top);
+                box.x1 = std::min(box.x1, m.left + static_cast<int>(m.width));
+                box.y1 = std::min(box.y1, m.top + static_cast<int>(m.height));
+            }
+            if (!box.empty() &&
+                (box.width() < rect.width() || box.height() < rect.height())) {
+                const int w0 = rect.width();
+                const int h0 = rect.height();
+                if (auto cropped = cropPlaced(std::move(img), rect, box)) {
+                    img = std::move(cropped->img);
+                    rect = cropped->rect;
+                    doc.log.push_back(
+                        "mem crop '" + display + "': " + std::to_string(w0) + "x" +
+                        std::to_string(h0) + " -> " + std::to_string(rect.width()) + "x" +
+                        std::to_string(rect.height()) + ", rgba8 " +
+                        std::to_string(img.px.size() / (1u << 20)) + " MiB");
+                }
+            }
+        }
+    }
+    if (big) {
+        doc.log.push_back("mem begin '" + display + "': rgba8 " +
+                          std::to_string(img.px.size() / (1u << 20)) + " MiB, rss " +
+                          std::to_string(af_detail::rssMiB()) + " MiB, peak " +
+                          std::to_string(af_detail::peakRssMiB()) + " MiB");
+    }
     layer.rgba.resize(img.px.size());
     // Widening pass over the whole layer: each i writes only its own slot.
     pittore::core::parallel_for(static_cast<std::uint32_t>(img.px.size()), 4096,
@@ -543,6 +600,12 @@ void Walker::finishImageLayer(const Node* node, const Mat& ctm, int indent, bool
                                         layer.rgba[i] =
                                             static_cast<std::uint16_t>(img.px[i]) * 257u;
                                 });
+    if (big) {
+        doc.log.push_back("mem widened '" + display + "': rgba16 " +
+                          std::to_string(layer.rgba.size() * 2 / (1u << 20)) + " MiB, rss " +
+                          std::to_string(af_detail::rssMiB()) + " MiB, peak " +
+                          std::to_string(af_detail::peakRssMiB()) + " MiB");
+    }
     applyCommon(node, layer);
     doc.log.push_back("layer '" + layer.name + "' " + std::to_string(layer.width) + "x" +
                       std::to_string(layer.height) + " @ " + std::to_string(layer.left) + "," +
@@ -551,6 +614,20 @@ void Walker::finishImageLayer(const Node* node, const Mat& ctm, int indent, bool
     // masks live instead of baking any of them into alpha. Either kind of
     // mask means vector geometry alone no longer reproduces the layer.
     layer.masks = placeMasks(node, ctm, &rect);
+    if (big || !layer.masks.empty()) {
+        std::size_t maskPx = 0;
+        for (const AfMask& m : layer.masks) {
+            maskPx += m.px.size();
+            doc.log.push_back("mem mask '" + display + "': " + std::to_string(m.width) +
+                              "x" + std::to_string(m.height) + " @ " +
+                              std::to_string(m.left) + "," + std::to_string(m.top));
+        }
+        doc.log.push_back("mem end '" + display + "': layer " +
+                          std::to_string(layer.rgba.size() * 2 / (1u << 20)) + " MiB, masks " +
+                          std::to_string(maskPx / (1u << 20)) + " MiB, rss " +
+                          std::to_string(af_detail::rssMiB()) + " MiB, peak " +
+                          std::to_string(af_detail::peakRssMiB()) + " MiB");
+    }
     if (maskedAncestors > 0 || !layer.masks.empty()) pixelsAltered = true;
     if (art && !pixelsAltered) layer.art = std::move(art);
     doc.layers.push_back(std::move(layer));

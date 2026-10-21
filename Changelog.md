@@ -23,6 +23,15 @@ All notable changes to Pittore Studio are listed here. The format follows
 
 ### Tests
 
+- **Affinity v12 container grammar pinned in `test_af`.** Synthesised byte
+  fixtures now cover the `#FT4` row directory (rows, names, next-tag tails,
+  family trailers), the delta/checkpoint element stream (kind-2 tokens,
+  serial-1 document structs) and the damaged-newest-block fallback, plus a
+  fresh-export round trip through `writeContainer` -> `Archive::parse`. New
+  diagnostic `af_container_probe` (`head`/`walk`/`verify`/`extract`/`census`/
+  `diff`, `--json`) walks the same bytes independently of the reader and
+  cross-checks/decodes every head entry, so the external research corpus can
+  be replayed without bundling third-party fixtures.
 - The soft-proof suites (`test_proof`, `proof-preview`) resolve their CMYK
   fixture from the repository (`tests/fixtures/photocraft-coated-cmyk.icc`,
   CC0-1.0, synthetic — provenance and full licence text recorded beside it)

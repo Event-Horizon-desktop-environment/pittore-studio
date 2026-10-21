@@ -500,6 +500,11 @@ void setAdjustmentDefaults(LayerItem& l) {
     } else if (k == AdjustmentKind::ColorBalance) {
         // Neutral balances, luminosity preserved (the conventional defaults).
         l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::Recolour) {
+        // The zeroed table lands on hue 0 / lightness 0 correctly, but
+        // saturation must read as 100%, not 0%: a zero default would render
+        // the layer as a flat grey duotone.
+        l.adjustmentParams[1] = 1.0f;
     }
 }
 

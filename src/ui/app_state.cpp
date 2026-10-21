@@ -323,12 +323,18 @@ void DocumentItem::drawVectorOverlays() {
 
 QString DocumentItem::statusText() const {
     const double mb = size.width() * double(size.height()) * 4.0 / (1024.0 * 1024.0);
-    QString s = QStringLiteral("%1 × %2 px  ·  %3 ppi  ·  %4  ·  %5 MB")
+    QString s = QStringLiteral("%1 × %2 px  ·  %3 ppi  ·  %4  ·  %5 MB RGBA")
                     .arg(size.width())
                     .arg(size.height())
                     .arg(dpi)
                     .arg(colorMode)
                     .arg(mb, 0, 'f', 1);
+    if (!filePath.isEmpty()) {
+        const QFileInfo fi(filePath);
+        if (fi.exists())
+            s += QStringLiteral("  ·  %1 MiB file").arg(
+                fi.size() / (1024.0 * 1024.0), 0, 'f', 1);
+    }
     if (isProxy)
         s += QStringLiteral("  ·  proxy 1/%1 of %2 × %3")
                  .arg(proxyFactor)
