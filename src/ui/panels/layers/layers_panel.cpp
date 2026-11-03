@@ -1580,7 +1580,7 @@ class LayersPanel final : public QWidget {
                 kids[p].append(i);
             }
         }
-        panelHasKids_.assign(n, 0);
+        panelHasKids_.fill(0, n);
         for (int i = 0; i < n; ++i)
             panelHasKids_[i] = (!kids[i].isEmpty() ||
                                 d->layers[i].hasMask ||
