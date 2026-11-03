@@ -25,6 +25,7 @@
 #include "engine/compute/adjust.h"
 #include "ui/adjustment_presets.h"
 #include "ui/app_state.h"
+#include "ui/curve_editor.h"
 #include "ui/panels/properties/recolour_controls.h"
 
 namespace pittore::ui {
@@ -41,6 +42,8 @@ constexpr int kWhiteBalanceKind =
     static_cast<int>(pittore::compute::AdjustmentKind::WhiteBalance);
 constexpr int kRecolourKind =
     static_cast<int>(pittore::compute::AdjustmentKind::Recolour);
+constexpr int kCurvesKind =
+    static_cast<int>(pittore::compute::AdjustmentKind::Curves);
 
 QString dialogStyle() {
     return QStringLiteral(
@@ -378,6 +381,44 @@ class AdjustmentDialog final : public QDialog {
             column->addWidget(picker, 0, Qt::AlignLeft);
         }
 
+        if (kind_ == kCurvesKind) {
+            auto* channel = new QComboBox(this);
+            channel->addItems({tr("RGB"), tr("Red"), tr("Green"), tr("Blue")});
+            column->addWidget(channel);
+            auto* editor = new CurveEditor(this);
+            editor->setMinimumSize(240, 220);
+            const auto channelPoints = [layer](int ch) {
+                const LayerItem* l = layer;
+                if (!l) return QVector<QPointF>{{0.0, 0.0}, {1.0, 1.0}};
+                const QVector<QPointF>* q = &l->adjustmentCurve;
+                if (ch == 1) q = &l->adjustmentCurveR;
+                if (ch == 2) q = &l->adjustmentCurveG;
+                if (ch == 3) q = &l->adjustmentCurveB;
+                return q->isEmpty() ? QVector<QPointF>{{0.0, 0.0}, {1.0, 1.0}}
+                                    : *q;
+            };
+            editor->setPoints(channelPoints(0));
+            connect(channel, &QComboBox::currentIndexChanged, this,
+                    [editor, channelPoints](int ch) {
+                        editor->setPoints(channelPoints(ch));
+                    });
+            editor->onChanged_ = [this, editor, channel] {
+                const int ch = channel->currentIndex();
+                state_->beginUndoStep();
+                const bool ok =
+                    ch == 0
+                        ? state_->setAdjustmentCurve(editor->points())
+                        : state_->setAdjustmentCurveForChannel(ch - 1,
+                                                               editor->points());
+                if (ok)
+                    state_->commitUndoStep(tr("Curves"),
+                                           QStringLiteral("adjustments"));
+                else
+                    state_->discardUndoStep();
+            };
+            column->addWidget(editor);
+            return;
+        }
         const QVector<AdjustmentParamDesc> descs =
             adjustmentParamDescs(kind_);
         if (descs.isEmpty() || !layer) {

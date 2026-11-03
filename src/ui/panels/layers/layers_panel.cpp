@@ -669,11 +669,9 @@ class LayerRow final : public QWidget {
         DocumentItem* doc = state_->activeDocument();
         if (doc && index_ >= 0 && index_ < doc->layers.size()) {
             const LayerItem& layer = doc->layers[index_];
-            if (layer.kind == LayerItem::Kind::Adjustment &&
-                layer.adjustmentKind == static_cast<int>(
-                    pittore::compute::AdjustmentKind::Recolour)) {
+            if (layer.kind == LayerItem::Kind::Adjustment) {
                 state_->setActiveLayerIndex(index_);
-                showRecolourDialog(state_, index_, this);
+                showAdjustmentDialog(state_, index_, this);
                 return;
             }
         }

@@ -15,6 +15,7 @@
 #include "ui/adjustment_presets.h"
 #include "ui/icons.h"
 #include "ui/panels/shared/panel_helpers.h"
+#include "ui/panels/properties/recolour_dialog.h"
 
 namespace pittore::ui {
 namespace {
@@ -252,6 +253,7 @@ class AdjustmentRow final : public QFrame {
                         d->activeLayer >= d->layers.size())
                         return;
                     state_->setAdjustmentParams(d->activeLayer, params);
+                    showAdjustmentDialog(state_, d->activeLayer, window());
                 });
                 profileTiles_.append(qMakePair(tile, &preset));
                 grid->addWidget(tile, pi / 2, pi % 2);
