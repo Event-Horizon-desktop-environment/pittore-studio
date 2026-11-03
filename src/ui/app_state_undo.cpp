@@ -86,6 +86,10 @@ DocumentItem::DocumentSnapshot DocumentItem::captureSnapshot() const {
     s.colorMode = colorMode;
     s.iccProfile = iccProfile;
     s.slices = slices;
+    s.boardOrder = boardOrder;
+    s.activeBoard = activeBoard;
+    s.boardIdCounter = boardIdCounter;
+    s.autoReparent = autoReparent;
     return s;
 }
 
@@ -113,6 +117,10 @@ void DocumentItem::restoreSnapshot(const DocumentSnapshot& s) {
     if (!s.colorMode.isEmpty()) colorMode = s.colorMode;
     iccProfile = s.iccProfile;
     slices = s.slices;
+    boardOrder = s.boardOrder;
+    activeBoard = s.activeBoard;
+    boardIdCounter = s.boardIdCounter;
+    autoReparent = s.autoReparent;
     pendingUndo_.reset();
     paintDirty = QRect();   // stale incremental state; restore rebuilds fully
 }

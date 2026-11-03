@@ -57,6 +57,11 @@ bool AppState::bakeWashStroke() {
     const auto mixOp =
         pittore::compute::dabmix::mix_from_id(mixId.c_str());
     const bool useMix = mixOp != pittore::compute::dabmix::DabMixOp::Normal;
+    // The tool's blend mode applies once here (the scratch accumulated at
+    // Normal); source-over keeps its bit-exact fold when it is Normal.
+    const pittore::compute::BlendMode washBlend = paintBlendFor(tool);
+    const bool useBlend =
+        !useMix && washBlend != pittore::compute::BlendMode::Normal;
     pittore::compute::NativeCmykPaint nativePaint;
     const bool nativeWash = !useMix &&
         nativeCmykStrokeDoc_ == d && nativeCmykStrokeLayer_ == layer &&
@@ -73,6 +78,19 @@ bool AppState::bakeWashStroke() {
                 pittore::compute::dabmix::mix_pixel(
                     mixOp, src[i].r, src[i].g, src[i].b, sa, dd.r, dd.g,
                     dd.b, dd.a, dd.r, dd.g, dd.b, dd.a);
+                continue;
+            }
+            if (useBlend) {
+                // Blend fold: RGB through the shared W3C shell; native CMYK
+                // destinations re-separate the blended projection to inks.
+                if (!nativeWash ||
+                    !pittore::compute::native_cmyk_blend_texel(
+                        &nativePaint, i, dd, washBlend, src[i].r, src[i].g,
+                        src[i].b, sa, x, y)) {
+                    pittore::compute::blend::pixel(
+                        washBlend, src[i].r, src[i].g, src[i].b, sa, dd.r,
+                        dd.g, dd.b, dd.a, x, y, dd.r, dd.g, dd.b, dd.a);
+                }
                 continue;
             }
             const float inv = 1.0f - sa;
@@ -376,6 +394,11 @@ bool AppState::stampTipDab(const QPointF& docPos, double radius, int mode,
             .toStdString();
     const auto mixOp =
         pittore::compute::dabmix::mix_from_id(mixId.c_str());
+    // Tool blend mode ("Mode" combo). Wash strokes fold one blend at
+    // bake/preview time; direct stamp dabs blend per dab.
+    const pittore::compute::BlendMode dabBlend =
+        toScratch ? pittore::compute::BlendMode::Normal
+                  : paintBlendFor(activeTool_);
     const QColor bgQ = background();
     const pittore::RGBAf bgC{float(bgQ.redF()), float(bgQ.greenF()),
                               float(bgQ.blueF()), 1.0f};
@@ -428,7 +451,7 @@ bool AppState::stampTipDab(const QPointF& docPos, double radius, int mode,
         pittore::RGBAf{color.redF(), color.greenF(), color.blueF(), 1.0f},
         static_cast<float>(angleDeg), selPtr, &tex, &dabDenStamp, &maskStamp,
         flip, filter, &levels, &bgC, heightPtr, heightAmt, mixOp, grainPtr,
-        &sharp, nativePaintPtr);
+        &sharp, nativePaintPtr, dabBlend);
     if (!toScratch) {
         d->touchPixelsAfterDab(*layer, lcx, lcy, lradius, lw, lh,
                                nativePaintPtr != nullptr);

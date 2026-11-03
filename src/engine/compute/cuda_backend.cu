@@ -240,6 +240,8 @@ struct KPlacedManyParam {
     int adjKind;
     float adjP[16];
     const float* adjAux;
+    int isFill;
+    float4 fillColor;
 };
 
 // One layer's footprint on one document row. Cells are appended bottom→top per
@@ -253,6 +255,7 @@ struct KRowCell {
 // identity/translation fast paths the row walk uses for its own source.
 __device__ float4 k_sample_cell(const KPlacedManyParam& prm, int x, int y,
                                 std::size_t idx) {
+    if (prm.isFill) return prm.fillColor;  // constant source, no geometry
     if (prm.sx == 1.0 && prm.sy == 1.0 && prm.ox == 0.0 && prm.oy == 0.0 &&
         prm.sw == prm.w && prm.sh >= prm.y1) {
         return prm.src[idx];
@@ -316,6 +319,35 @@ __global__ void k_composite_many_rows(const KPlacedManyParam* params,
         if (x < c.x0 || x >= c.x1) continue;
         const KPlacedManyParam prm = params[c.layer];
         float4 s;
+        if (prm.isAdjustment && prm.clipped && prm.clipBase >= 0 &&
+            prm.mode == 0) {
+            // Clipped Normal adjustment: grade the base layer's own colour and
+            // re-composite its coverage (acc + c*m*(R(B)-B)). Grading the
+            // accumulator scaled by base coverage leaves an un-graded 1px rim
+            // where the base is antialiased. Mirrors layer_mask.cpp.
+            const KPlacedManyParam bprm = params[prm.clipBase];
+            float4 B = k_sample_cell(bprm, x, y, static_cast<std::size_t>(idx));
+            float cov = B.w * bprm.fold *
+                        k_mask_coverage(bprm.mask, bprm.msw, bprm.msh,
+                                        static_cast<double>(x),
+                                        static_cast<double>(y), bprm.mox,
+                                        bprm.moy, bprm.msx, bprm.msy);
+            const float m =
+                prm.fold *
+                k_mask_coverage(prm.mask, prm.msw, prm.msh,
+                                static_cast<double>(x), static_cast<double>(y),
+                                prm.mox, prm.moy, prm.msx, prm.msy);
+            if (cov > 0.0f && m > 0.0f && acc.w > 0.0f) {
+                float gr, gg, gb;
+                adjust::apply(static_cast<AdjustmentKind>(prm.adjKind),
+                              prm.adjP, prm.adjAux, B.x, B.y, B.z, gr, gg, gb);
+                const float kk = fminf(1.0f, cov * m / acc.w);
+                acc.x = fminf(1.0f, fmaxf(0.0f, acc.x + kk * (gr - B.x)));
+                acc.y = fminf(1.0f, fmaxf(0.0f, acc.y + kk * (gg - B.y)));
+                acc.z = fminf(1.0f, fmaxf(0.0f, acc.z + kk * (gb - B.z)));
+            }
+            continue;
+        }
         if (prm.isAdjustment) {
             s = k_apply_adjustment(prm, acc);
         } else {
@@ -1560,7 +1592,7 @@ class CudaBackend final : public ComputeBackend {
             if (in.y1 > static_cast<std::uint32_t>(h)) continue;
             const float4* srcDev = nullptr;
             int sw = 0, sh = 0;
-            if (!in.isAdjustment) {
+            if (!in.isAdjustment && !in.isFill) {
                 if (!in.src) continue;
                 auto& s = dynamic_cast<const CudaBuffer&>(*in.src);
                 srcDev = s.dev();
@@ -1605,6 +1637,9 @@ class CudaBackend final : public ComputeBackend {
             p.clipped = in.clipped ? 1 : 0;
             p.clipBase = in.clipBase;
             p.isAdjustment = in.isAdjustment ? 1 : 0;
+            p.isFill = in.isFill ? 1 : 0;
+            p.fillColor = make_float4(in.fillColor.r, in.fillColor.g,
+                                      in.fillColor.b, in.fillColor.a);
             p.adjKind = in.adjKind;
             for (int k = 0; k < 16; ++k) p.adjP[k] = in.adjP[k];
             p.adjAux = auxDev;

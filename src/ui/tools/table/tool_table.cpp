@@ -68,7 +68,9 @@ const std::vector<ToolDef> kToolTable = {
     {ToolId::ArtHistoryBrush,      "Art History Brush",       "art-history", 'Y', S::RetouchPaint, false, "Paint stylised strokes from a history state."},
     {ToolId::Gradient,             "Gradient",                "gradient",    'G', S::RetouchPaint, true,  "Linear, radial, angle, reflected or diamond blend."},
     {ToolId::PaintBucket,          "Paint Bucket",            "bucket",      'G', S::RetouchPaint, false, "Fill similar pixels with the foreground colour."},
-    {ToolId::TransparencyTool,     "Transparency",            "transparency", 0,  S::RetouchPaint, false, "Apply transparency gradients to vector objects."},
+    // Its own group leader (not a Gradient rider): personas must be able to
+    // show Transparency without also showing Gradient.
+    {ToolId::TransparencyTool,     "Transparency",            "transparency", 0,  S::RetouchPaint, true,  "Apply transparency gradients to vector objects."},
     {ToolId::AdjustmentBrush,      "Adjustment Brush",        "adj-brush",   0,   S::RetouchPaint, true,  "Paint an adjustment; the mask is created for you."},
 
     // 4. Drawing & type -----------------------------------------------------

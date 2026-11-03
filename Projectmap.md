@@ -254,7 +254,7 @@ layers (stack + `kLayerDragMime` re-parent), channels, paths, adjustments, prope
 
 ### 9.6 `tests/` (101 `test_*.cpp` + probes/benches; `test_util.h` zero-dep harness; `gpu_parity.*`; `test_all.cpp` runner)
 
-`meson.build`: `test_deps=[compute,io,vector,text,color]`; `ui_core_sources` = 11 `app_state*.cpp` + `tool_log` + `logging` shared by AppState harnesses; host-tests loop; Qt-gated UI tests `-fPIC`, offscreen, scratch `XDG_CONFIG_HOME`, `PITTORE_SOURCE_ROOT` fixtures; probes/benches built not registered. Key: `test_canvas_drop` (drop ICC policy), `test_chrome_state` (no-doc contract + popup geometry), `test_layer_stack_ui`, `test_history`, `test_color_policy/mode`, `test_curves_ui`, `test_filter/layer_style/liquify/grade/refine_dialog`, `test_psd_export/psd_save/af_export_ui/ifp_layers/live_filter/mask_ops/selection_ops`, `test_persona/vector_paint_ui/tools_ui/tools_ux/tool_log/docks_ui/preferences_ui/export_ui/place_ui/session/project/import_export`, `test_cuda/hip/filter_gpu` parity, `test_svg_batch* + svg_final/xml/value/scene/pool`.
+`meson.build`: `test_deps=[compute,io,vector,text,color]`; `ui_core_sources` = 11 `app_state*.cpp` + `tool_log` + `logging` shared by AppState harnesses; host-tests loop; Qt-gated UI tests `-fPIC`, offscreen, scratch `XDG_CONFIG_HOME`, `PITTORE_SOURCE_ROOT` fixtures; probes/benches built not registered (`af_container_probe` = container/FT4 grammar walker with `--json`; `af_open_probe` = real import path). Key: `test_canvas_drop` (drop ICC policy), `test_chrome_state` (no-doc contract + popup geometry), `test_layer_stack_ui`, `test_history`, `test_color_policy/mode`, `test_curves_ui`, `test_filter/layer_style/liquify/grade/refine_dialog`, `test_psd_export/psd_save/af_export_ui/ifp_layers/live_filter/mask_ops/selection_ops`, `test_persona/vector_paint_ui/tools_ui/tools_ux/tool_log/docks_ui/preferences_ui/export_ui/place_ui/session/project/import_export`, `test_cuda/hip/filter_gpu` parity, `test_svg_batch* + svg_final/xml/value/scene/pool`.
 
 ### 9.7 `docs/`, `packaging/`, root
 
@@ -1296,6 +1296,7 @@ Per-file line counts shift; use this to orient inside the big TUs rather than as
 - `src/ui/workspace.cpp`
 - `src/ui/workspace.h`
 - `tests/ablate_probe.cpp`
+- `tests/af_container_probe.cpp`
 - `tests/af_open_probe.cpp`
 - `tests/af_probe.h`
 - `tests/bench_app.cpp`

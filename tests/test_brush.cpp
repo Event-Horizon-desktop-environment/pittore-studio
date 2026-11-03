@@ -2484,6 +2484,185 @@ void test_brush() {
             CHECK(std::equal(std::begin(ba), std::end(ba), std::begin(bb)));
         }
     }
+
+    // Per-dab blend modes (the painting tools' "Mode" combo): the W3C blend
+    // shell replaces the source-over mix in every paint kernel. Multiply and
+    // Screen back the Alt+Shift+M/S shortcuts.
+    {
+        constexpr std::uint32_t w = 16, h = 16;
+        const RGBAf grey{0.5f, 0.5f, 0.5f, 1.0f};
+        const RGBAf color{0.5f, 0.25f, 0.75f, 1.0f};
+        auto roundBlend = [&](pittore::compute::BlendMode mode, RGBAf backdrop,
+                              float opacity,
+                              pittore::compute::NativeCmykPaint* cmyk = nullptr) {
+            std::vector<RGBAf> img(w * h, backdrop);
+            pittore::compute::paint_dab_host(
+                img.data(), w, h, 8.0f, 8.0f, 4.0f, 1.0f, opacity, color,
+                nullptr, nullptr, nullptr, nullptr, nullptr,
+                pittore::compute::dabmix::DabMixOp::Normal, cmyk, mode);
+            return img[8 * w + 8];
+        };
+        // Opaque backdrop at full opacity: the core texel is exactly B(Cb, Cs).
+        {
+            const RGBAf mul = roundBlend(pittore::compute::BlendMode::Multiply,
+                                         grey, 1.0f);
+            CHECK_NEAR(mul.r, 0.25f, 1e-5f);
+            CHECK_NEAR(mul.g, 0.125f, 1e-5f);
+            CHECK_NEAR(mul.b, 0.375f, 1e-5f);
+            CHECK_NEAR(mul.a, 1.0f, 1e-6f);
+            const RGBAf scr = roundBlend(pittore::compute::BlendMode::Screen,
+                                         grey, 1.0f);
+            CHECK_NEAR(scr.r, 0.75f, 1e-5f);
+            CHECK_NEAR(scr.g, 0.625f, 1e-5f);
+            CHECK_NEAR(scr.b, 0.875f, 1e-5f);
+            CHECK_NEAR(scr.a, 1.0f, 1e-6f);
+        }
+        // Transparent backdrop: the shell falls back to the source colour and
+        // keeps the source alpha.
+        {
+            const RGBAf onAir = roundBlend(pittore::compute::BlendMode::Multiply,
+                                           RGBAf{0, 0, 0, 0}, 1.0f);
+            CHECK_NEAR(onAir.r, color.r, 1e-5f);
+            CHECK_NEAR(onAir.g, color.g, 1e-5f);
+            CHECK_NEAR(onAir.b, color.b, 1e-5f);
+            CHECK_NEAR(onAir.a, 1.0f, 1e-5f);
+            const RGBAf halfAir =
+                roundBlend(pittore::compute::BlendMode::Multiply,
+                           RGBAf{0, 0, 0, 0}, 0.5f);
+            CHECK_NEAR(halfAir.r, color.r, 1e-5f);
+            CHECK_NEAR(halfAir.a, 0.5f, 1e-5f);
+        }
+        // An explicit mix op still wins over the blend mode.
+        {
+            std::vector<RGBAf> a(w * h, grey), b(w * h, grey);
+            pittore::compute::paint_dab_host(
+                a.data(), w, h, 8.0f, 8.0f, 4.0f, 1.0f, 1.0f, color, nullptr,
+                nullptr, nullptr, nullptr, nullptr,
+                pittore::compute::dabmix::DabMixOp::Allanon, nullptr,
+                pittore::compute::BlendMode::Multiply);
+            pittore::compute::paint_dab_host(
+                b.data(), w, h, 8.0f, 8.0f, 4.0f, 1.0f, 1.0f, color, nullptr,
+                nullptr, nullptr, nullptr, nullptr,
+                pittore::compute::dabmix::DabMixOp::Allanon);
+            CHECK(std::memcmp(a.data(), b.data(),
+                              a.size() * sizeof(RGBAf)) == 0);
+        }
+        // The tail default stays Normal bit-for-bit.
+        {
+            std::vector<RGBAf> a(w * h, grey), b(w * h, grey);
+            pittore::compute::paint_dab_host(a.data(), w, h, 8.0f, 8.0f, 4.0f,
+                                             0.5f, 0.6f, color);
+            pittore::compute::paint_dab_host(
+                b.data(), w, h, 8.0f, 8.0f, 4.0f, 0.5f, 0.6f, color, nullptr,
+                nullptr, nullptr, nullptr, nullptr,
+                pittore::compute::dabmix::DabMixOp::Normal, nullptr,
+                pittore::compute::BlendMode::Normal);
+            CHECK(std::memcmp(a.data(), b.data(),
+                              a.size() * sizeof(RGBAf)) == 0);
+        }
+        // Auto-tip dabs share the shell (round ratio-1 tip, hard core).
+        {
+            pittore::compute::AutoTip tip;
+            tip.hardness = 1.0f;
+            std::vector<RGBAf> img(w * h, grey);
+            pittore::compute::paint_tip_dab_host(
+                img.data(), w, h, 8.0f, 8.0f, 4.0f, tip, 1.0f, color, nullptr,
+                nullptr, nullptr, nullptr, nullptr,
+                pittore::compute::dabmix::DabMixOp::Normal, nullptr,
+                pittore::compute::BlendMode::Multiply);
+            CHECK_NEAR(img[8 * w + 8].r, 0.25f, 1e-5f);
+            CHECK_NEAR(img[8 * w + 8].g, 0.125f, 1e-5f);
+            CHECK_NEAR(img[8 * w + 8].b, 0.375f, 1e-5f);
+        }
+        // Stamp dabs share the shell (solid tip covers the core fully).
+        {
+            pittore::compute::StampTip tip;
+            tip.w = tip.h = 8;
+            tip.alpha.assign(64, 1.0f);
+            std::vector<RGBAf> img(w * h, grey);
+            pittore::compute::stamp_dab_host(
+                img.data(), w, h, 8.0f, 8.0f, 4.0f, tip,
+                pittore::compute::StampMode::AlphaMask, 1.0f, color, 0.0f,
+                nullptr, nullptr, nullptr, nullptr, 0, 1, nullptr, nullptr,
+                nullptr, 0.0f, pittore::compute::dabmix::DabMixOp::Normal,
+                nullptr, nullptr, nullptr, pittore::compute::BlendMode::Screen);
+            CHECK_NEAR(img[8 * w + 8].r, 0.75f, 1e-5f);
+            CHECK_NEAR(img[8 * w + 8].g, 0.625f, 1e-5f);
+            CHECK_NEAR(img[8 * w + 8].b, 0.875f, 1e-5f);
+        }
+        // Native-CMYK destinations re-separate the blended projection.
+        {
+            std::vector<std::array<std::uint16_t, 4>> inks(w * h);
+            pittore::color::SrgbToCmyk separation(nullptr, 0);
+            pittore::color::CmykToSrgb preview(nullptr, 0);
+            pittore::compute::NativeCmykPaint native;
+            native.pixels = inks.data();
+            native.separation = &separation;
+            native.preview = &preview;
+            const RGBAf out = roundBlend(pittore::compute::BlendMode::Multiply,
+                                         grey, 1.0f, &native);
+            CHECK_NEAR(out.r, 0.25f, 1e-5f);
+            CHECK_NEAR(out.g, 0.125f, 1e-5f);
+            CHECK_NEAR(out.b, 0.375f, 1e-5f);
+            CHECK_NEAR(out.a, 1.0f, 1e-5f);
+            const std::array<std::uint16_t, 4>& core = inks[8 * w + 8];
+            float expected[4];
+            separation.convert(out.r, out.g, out.b, expected);
+            for (int c = 0; c < 4; ++c)
+                CHECK(std::abs(int(core[c]) -
+                               int(std::lround(expected[c] * 65535.0f))) <= 1);
+            float recombined[3];
+            preview.convert(core[0] / 65535.0f, core[1] / 65535.0f,
+                            core[2] / 65535.0f, core[3] / 65535.0f, recombined);
+            CHECK_NEAR(out.r, recombined[0], 1e-6f);
+            CHECK_NEAR(out.g, recombined[1], 1e-6f);
+            CHECK_NEAR(out.b, recombined[2], 1e-6f);
+        }
+        // Without a separation there are no inks to maintain: plain RGB blend.
+        {
+            const std::array<std::uint16_t, 4> kept{1000, 2000, 3000, 4000};
+            std::vector<std::array<std::uint16_t, 4>> inks(w * h, kept);
+            pittore::color::CmykToSrgb preview(nullptr, 0);
+            pittore::compute::NativeCmykPaint native;
+            native.pixels = inks.data();
+            native.preview = &preview;
+            const RGBAf out = roundBlend(pittore::compute::BlendMode::Multiply,
+                                         grey, 1.0f, &native);
+            CHECK_NEAR(out.r, 0.25f, 1e-5f);
+            CHECK(inks[8 * w + 8] == kept);
+        }
+        // Guard cases: the helper reports "unhandled" and leaves the texel.
+        {
+            RGBAf d{0.4f, 0.6f, 0.8f, 0.5f};
+            const RGBAf before = d;
+            std::array<std::uint16_t, 4> inks{};
+            pittore::color::SrgbToCmyk separation(nullptr, 0);
+            pittore::color::CmykToSrgb preview(nullptr, 0);
+            pittore::compute::NativeCmykPaint native;
+            CHECK(!pittore::compute::native_cmyk_blend_texel(
+                &native, 0, d, pittore::compute::BlendMode::Multiply, 0.5f,
+                0.5f, 0.5f, 1.0f, 0, 0));
+            native.pixels = &inks;
+            CHECK(!pittore::compute::native_cmyk_blend_texel(
+                &native, 0, d, pittore::compute::BlendMode::Multiply, 0.5f,
+                0.5f, 0.5f, 1.0f, 0, 0));
+            native.separation = &separation;
+            CHECK(!pittore::compute::native_cmyk_blend_texel(
+                &native, 0, d, pittore::compute::BlendMode::Multiply, 0.5f,
+                0.5f, 0.5f, 1.0f, 0, 0));
+            CHECK(!pittore::compute::native_cmyk_blend_texel(
+                nullptr, 0, d, pittore::compute::BlendMode::Multiply, 0.5f,
+                0.5f, 0.5f, 1.0f, 0, 0));
+            CHECK_NEAR(d.r, before.r, 1e-7f);
+            CHECK_NEAR(d.g, before.g, 1e-7f);
+            CHECK_NEAR(d.b, before.b, 1e-7f);
+            CHECK_NEAR(d.a, before.a, 1e-7f);
+            native.preview = &preview;
+            CHECK(pittore::compute::native_cmyk_blend_texel(
+                &native, 0, d, pittore::compute::BlendMode::Multiply, 0.5f,
+                0.5f, 0.5f, 1.0f, 0, 0));
+        }
+    }
 }
 
 #ifndef PITTORE_TEST_NO_MAIN

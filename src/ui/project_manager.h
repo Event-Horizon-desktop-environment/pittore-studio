@@ -4,6 +4,7 @@
 #include <QDialog>
 #include <QImage>
 #include <QPointF>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <QVector>
@@ -82,6 +83,17 @@ struct ProjectLayerMeta {
     float maskFeather = 0.0f;
     QImage mask;
 
+    // v7 artboards (D1): a board is a Group row carrying a nonzero boardId
+    // (INV-011), so `kind` stays Group and structure rides `indent`; only the
+    // payload is extra here. Global document coords, fill opacity separate
+    // from `opacity`.
+    bool isBoard = false;
+    std::uint64_t boardId = 0;
+    QRectF boardRect;
+    bool boardHasFill = false;
+    QColor boardFill;
+    double boardFillOpacity = 1.0;
+
     // Live adjustment layers: kind is an AdjustmentKind value (0 = legacy
     // stand-in with no parameters); params are the kind's floats and the
     // curve holds Curves control points (normalized). `adjustmentCurve` is
@@ -117,6 +129,9 @@ struct ProjectLayerMeta {
     int textAlign = 0;              // 0 left, 1 centre, 2 right
     double textSize = 48;
     double textLineHeight = 1;
+    // Recorded spacing from imported formats (0 = natural step / none).
+    double textEmLeading = 0;
+    double textParagraphGap = 0;
     double textTracking = 0;
     double textWrapWidth = 0;
     double textFrameHeight = 0;
@@ -171,6 +186,9 @@ struct ProjectFileData {
     QString background = QStringLiteral("white");  // white | black | transparent
     QVector<ProjectLayerMeta> layers;              // index 0 = top
     QImage preview;                                // flattened preview (saved scaled)
+    // v7: highest board id issued, so a board created after load never
+    // collides (INV-006). 0 = no boards.
+    std::uint64_t boardIdCounter = 0;
 };
 
 // The project library root: ~/Pictures/Pittore Studio/Projects (override with

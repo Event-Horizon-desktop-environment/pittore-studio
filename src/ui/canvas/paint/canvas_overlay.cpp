@@ -1042,6 +1042,11 @@ void CanvasView::paintOverlay(QPainter& p) {
 
     // Annotation tools: sample pins, notes, count markers, ruler.
     paintAnnotationOverlay(p, t);
+
+    // Artboard chrome: board outlines plus each board's name above its
+    // top-left corner. Last, so the label never falls under a selection
+    // marquee or a tool overlay.
+    paintArtboardOverlay(p, t);
 }
 
 }  // namespace pittore::ui

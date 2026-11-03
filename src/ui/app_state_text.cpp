@@ -179,7 +179,7 @@ bool applyTextItemOption(TextItem& t, const QString& id, const QVariant& value) 
         if (qFuzzyCompare(size, t.size)) return false;
         t.size = size;
     } else if (id == QStringLiteral("align")) {
-        const int align = qBound(0, value.toInt(), 2);
+        const int align = qBound(0, value.toInt(), 3);
         if (align == t.align) return false;
         t.align = align;
     } else if (id == QStringLiteral("color")) {
@@ -194,6 +194,78 @@ bool applyTextItemOption(TextItem& t, const QString& id, const QVariant& value) 
         const double v = qBound(0.1, value.toDouble(), 10.0);
         if (qFuzzyCompare(v, t.lineHeight)) return false;
         t.lineHeight = v;
+        // The panel's leading is a natural-step multiple; a recorded em
+        // leading (imported text) would silently override it, so the edit
+        // takes over by clearing it.
+        t.emLeading = 0.0;
+    } else if (id == QStringLiteral("insetLeft") ||
+               id == QStringLiteral("insetRight") ||
+               id == QStringLiteral("insetTop") ||
+               id == QStringLiteral("insetBottom")) {
+        const double v = qBound(-10000.0, value.toDouble(), 10000.0);
+        double& slot = id == QStringLiteral("insetLeft")    ? t.insetLeft
+                       : id == QStringLiteral("insetRight") ? t.insetRight
+                       : id == QStringLiteral("insetTop")   ? t.insetTop
+                                                            : t.insetBottom;
+        if (qFuzzyCompare(v + 1.0, slot + 1.0)) return false;
+        slot = v;
+    } else if (id == QStringLiteral("verticalAlign")) {
+        const int v = qBound(0, value.toInt(), 2);
+        if (v == t.verticalAlign) return false;
+        t.verticalAlign = v;
+    } else if (id == QStringLiteral("columns")) {
+        const int v = qBound(1, value.toInt(), 16);
+        if (v == t.columns) return false;
+        t.columns = v;
+    } else if (id == QStringLiteral("columnGutter")) {
+        const double v = qBound(0.0, value.toDouble(), 1000.0);
+        if (qFuzzyCompare(v + 1.0, t.columnGutter + 1.0)) return false;
+        t.columnGutter = v;
+    } else if (id == QStringLiteral("autoFit")) {
+        const bool v = value.toBool();
+        if (v == t.autoFit) return false;
+        t.autoFit = v;
+    } else if (id == QStringLiteral("tabInterval")) {
+        const double v = qBound(1.0, value.toDouble(), 2000.0);
+        if (qFuzzyCompare(v, t.tabInterval)) return false;
+        t.tabInterval = v;
+    } else if (id == QStringLiteral("noBreak")) {
+        const bool v = value.toBool();
+        if (v == t.noBreak) return false;
+        t.noBreak = v;
+    } else if (id == QStringLiteral("hyphenate")) {
+        const bool v = value.toBool();
+        if (v == t.hyphenate) return false;
+        t.hyphenate = v;
+    } else if (id == QStringLiteral("listType")) {
+        const int v = qBound(0, value.toInt(), 2);
+        if (v == t.listType) return false;
+        t.listType = v;
+    } else if (id == QStringLiteral("listStart")) {
+        const int v = qBound(1, value.toInt(), 9999);
+        if (v == t.listStart) return false;
+        t.listStart = v;
+    } else if (id == QStringLiteral("listIndent")) {
+        const double v = qBound(0.0, value.toDouble(), 1000.0);
+        if (qFuzzyCompare(v + 1.0, t.listIndent + 1.0)) return false;
+        t.listIndent = v;
+    } else if (id == QStringLiteral("keepLinesTogether")) {
+        const bool v = value.toBool();
+        if (v == t.keepLinesTogether) return false;
+        t.keepLinesTogether = v;
+    } else if (id == QStringLiteral("indentStart") ||
+               id == QStringLiteral("indentEnd") ||
+               id == QStringLiteral("firstLineIndent") ||
+               id == QStringLiteral("spaceBefore") ||
+               id == QStringLiteral("spaceAfter")) {
+        const double v = qBound(-10000.0, value.toDouble(), 10000.0);
+        double& slot = id == QStringLiteral("indentStart")         ? t.indentStart
+                       : id == QStringLiteral("indentEnd")         ? t.indentEnd
+                       : id == QStringLiteral("firstLineIndent")   ? t.firstLineIndent
+                       : id == QStringLiteral("spaceBefore")       ? t.spaceBefore
+                                                                   : t.spaceAfter;
+        if (qFuzzyCompare(v + 1.0, slot + 1.0)) return false;
+        slot = v;
     } else if (id == QStringLiteral("underline") || id == QStringLiteral("strike")) {
         const int v = qBound(0, value.toInt(), 2);
         int& slot = id == QStringLiteral("underline") ? t.underline : t.strike;
@@ -218,6 +290,18 @@ bool applyTextItemOption(TextItem& t, const QString& id, const QVariant& value) 
         double& slot = id == QStringLiteral("hScale") ? t.hScale : t.vScale;
         if (qFuzzyCompare(v, slot)) return false;
         slot = v;
+    } else if (id == QStringLiteral("rotation")) {
+        const double v = qBound(-3600.0, value.toDouble(), 3600.0);
+        if (qFuzzyCompare(v + 1.0, t.rotation + 1.0)) return false;
+        t.rotation = v;
+    } else if (id == QStringLiteral("shear")) {
+        const double v = qBound(-89.0, value.toDouble(), 89.0);
+        if (qFuzzyCompare(v + 1.0, t.shear + 1.0)) return false;
+        t.shear = v;
+    } else if (id == QStringLiteral("language")) {
+        const QString v = value.toString();
+        if (v.isEmpty() || v == t.language) return false;
+        t.language = v;
     } else if (id == QStringLiteral("superSub")) {
         const int v = qBound(-1, value.toInt(), 1);
         if (v == t.superSub) return false;
@@ -331,8 +415,32 @@ pittore::text::TextSpec textSpecFor(const TextItem& t) {
     spec.size = static_cast<float>(std::max(1.0, t.size));
     spec.align = t.align == 1   ? pittore::text::Align::Center
                  : t.align == 2 ? pittore::text::Align::Right
+                 : t.align == 3 ? pittore::text::Align::Justify
                                 : pittore::text::Align::Left;
     spec.lineHeight = static_cast<float>(std::max(0.1, t.lineHeight));
+    spec.emLeading = static_cast<float>(std::max(0.0, t.emLeading));
+    spec.paragraphGap = static_cast<float>(std::max(0.0, t.paragraphGap));
+    spec.indentStart = static_cast<float>(t.indentStart);
+    spec.indentEnd = static_cast<float>(t.indentEnd);
+    spec.firstLineIndent = static_cast<float>(t.firstLineIndent);
+    spec.spaceBefore = static_cast<float>(std::max(0.0, t.spaceBefore));
+    spec.spaceAfter = static_cast<float>(std::max(0.0, t.spaceAfter));
+    spec.insetLeft = static_cast<float>(t.insetLeft);
+    spec.insetRight = static_cast<float>(t.insetRight);
+    spec.insetTop = static_cast<float>(t.insetTop);
+    spec.insetBottom = static_cast<float>(t.insetBottom);
+    spec.verticalAlign = qBound(0, t.verticalAlign, 2);
+    spec.frameHeight = static_cast<float>(std::max(0.0, t.frameHeight));
+    spec.columns = std::max(1, t.columns);
+    spec.columnGutter = static_cast<float>(std::max(0.0, t.columnGutter));
+    spec.autoFit = t.autoFit;
+    spec.tabInterval = static_cast<float>(std::max(1.0, t.tabInterval));
+    spec.noBreak = t.noBreak;
+    spec.hyphenate = t.hyphenate;
+    spec.listType = qBound(0, t.listType, 2);
+    spec.listStart = std::max(1, t.listStart);
+    spec.listIndent = static_cast<float>(std::max(0.0, t.listIndent));
+    spec.keepLinesTogether = t.keepLinesTogether;
     spec.tracking = static_cast<float>(t.tracking);
     if (t.wrapWidth > 0.5) spec.wrapWidth = static_cast<float>(t.wrapWidth);
     spec.underline = qBound(0, t.underline, 2);
@@ -347,6 +455,9 @@ pittore::text::TextSpec textSpecFor(const TextItem& t) {
     spec.baselineShift = static_cast<float>(t.baselineShift);
     spec.hScale = static_cast<float>(t.hScale > 0.0 ? t.hScale / 100.0 : 1.0);
     spec.vScale = static_cast<float>(t.vScale > 0.0 ? t.vScale / 100.0 : 1.0);
+    spec.rotation = static_cast<float>(t.rotation * M_PI / 180.0);
+    spec.shear = static_cast<float>(std::tan(t.shear * M_PI / 180.0));
+    spec.language = t.language.toStdString();
     spec.superSub = qBound(-1, t.superSub, 1);
     spec.allCaps = t.allCaps;
     spec.kerning = t.kerning;

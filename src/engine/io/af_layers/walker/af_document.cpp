@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -165,18 +166,107 @@ std::optional<AfLayersDoc> buildDocument(const Archive& ar, const Graph& g,
         doc.log.push_back("page " + std::to_string(i) + " " + std::to_string(layout.pageW[i]) +
                           "x" + std::to_string(layout.pageH[i]) + " (" + rects[i].source + ")");
 
-    Walker w{ar, g, doc, baseDir, {}, {}};
+    Walker w{.ar = ar, .g = g, .doc = doc, .baseDir = baseDir};
     const bool multi = spreads.size() > 1;
     for (size_t i = 0; i < spreads.size(); ++i) {
         Node* spread = spreads[i];
         const std::uint32_t xOff = layout.xOff[i];
         const std::uint32_t yOff = layout.yOff[i];
         const Mat ctm = translation(-rects[i].x0 + double(xOff), -rects[i].y0 + double(yOff));
-        doc.pages.push_back({double(xOff), double(yOff),
-                             double(xOff + layout.pageW[i]),
-                             double(yOff + layout.pageH[i]), rects[i].source});
-        const int baseIndent = multi ? 1 : 0;
-        if (multi) {
+
+        // Designer artboards: top-level "ShpN" nodes whose "ShNR" child
+        // carries the "AbSz" marker (plain shapes carry a bare "ShNR" and no
+        // "AbSz"). Each is its own board: the page rect comes from the node's
+        // "ShpB" bounds under its placement transform, so a board canvas is
+        // read from file records only. The nodes directly below each board
+        // are the board's real content, so they emit at the document's top
+        // level and are tagged with the board's page index for the UI.
+        const std::vector<Node*> content = g.children(spread, "Chld");
+        std::vector<Node*> boards;
+        for (Node* ch : content) {
+            if (g.typeTag(ch) != tag4("ShpN")) continue;
+              // The artboard marker lives on the "Shpe" child: an artboard's
+            // shape record carries "AbSz" (artboard size); a plain shape's
+            // bare record does not. Files saved under the paired-record
+            // scheme instead hang "phrp" -> "aprp" off the board node, where
+            // the aprp record's "node" field points back at its ShpN
+            // (observed on the newest record of a two-artboard file).
+            Node* shpe = g.child(ch, "Shpe");
+            bool isBoard = shpe && g.field(shpe, "AbSz") != nullptr;
+            if (!isBoard) {
+                if (Node* ap = g.child(ch, "phrp")) {
+                    const Value* nv = g.field(ap, "node");
+                    isBoard = nv && nv->k == Value::K::Class && nv->cls && nv->cls == ch;
+                }
+            }
+            if (!isBoard) continue;
+            const std::vector<double>* b = f64s(g, ch, "ShpB");
+            if (!b || b->size() < 4) {
+                doc.log.push_back("artboard on spread " + std::to_string(i) +
+                                  " has no ShpB bounds; opening as content");
+                continue;
+            }
+            boards.push_back(ch);
+        }
+        if (!boards.empty()) w.boardSplit = true;
+        if (boards.size() != content.size()) {
+            // Loose nodes beside the boards stay untagged: the UI opens them
+            // as residue beside the board canvases instead of dropping them.
+            const bool loose = std::any_of(content.begin(), content.end(),
+                                           [&boards](Node* n) {
+                                               return std::find(boards.begin(),
+                                                                boards.end(),
+                                                                n) == boards.end();
+                                           });
+            if (loose)
+                doc.log.push_back("spread " + std::to_string(i) +
+                                  " keeps content outside every artboard");
+        }
+        for (Node* bd : boards) {
+            const Mat actm = w.nodeCtm(bd, ctm);
+            const std::vector<double>* b = f64s(g, bd, "ShpB");
+            const std::pair<double, double> corner[4] = {
+                matApply(actm, (*b)[0], (*b)[1]), matApply(actm, (*b)[0], (*b)[3]),
+                matApply(actm, (*b)[2], (*b)[1]), matApply(actm, (*b)[2], (*b)[3])};
+            double bx0 = corner[0].first, by0 = corner[0].second;
+            double bx1 = bx0, by1 = by0;
+            for (const auto& p : corner) {
+                bx0 = std::min(bx0, p.first);
+                by0 = std::min(by0, p.second);
+                bx1 = std::max(bx1, p.first);
+                by1 = std::max(by1, p.second);
+            }
+            std::string name;
+            if (const Value* nv = g.field(bd, "Desc"); nv && nv->k == Value::K::Str)
+                name = nv->s;
+            AfPage page;
+            page.x0 = bx0;
+            page.y0 = by0;
+            page.x1 = bx1;
+            page.y1 = by1;
+            page.source = "ShpB";
+            page.name = name;
+            page.artboard = true;
+            doc.pages.push_back(std::move(page));
+            w.boardIndex[bd] = static_cast<int>(doc.pages.size()) - 1;
+            doc.log.push_back("artboard '" + name + "' " +
+                              std::to_string(std::llround(bx1 - bx0)) + "x" +
+                              std::to_string(std::llround(by1 - by0)) + " @ " +
+                              std::to_string(std::llround(bx0)) + "," +
+                              std::to_string(std::llround(by0)) +
+                              " (ShpB under its placement)");
+        }
+        if (boards.empty()) {
+            AfPage page;
+            page.x0 = double(xOff);
+            page.y0 = double(yOff);
+            page.x1 = double(xOff + layout.pageW[i]);
+            page.y1 = double(yOff + layout.pageH[i]);
+            page.source = rects[i].source;
+            doc.pages.push_back(std::move(page));
+        }
+        const int baseIndent = (multi && boards.empty()) ? 1 : 0;
+        if (multi && boards.empty()) {
             AfLayer page;
             page.indent = 0;
             page.isGroup = true;
@@ -211,7 +301,7 @@ std::optional<AfLayersDoc> buildDocument(const Archive& ar, const Graph& g,
             }
         }
 
-        for (Node* ch : g.children(spread, "Chld")) w.emit(ch, ctm, baseIndent, false);
+        for (Node* ch : content) w.emit(ch, ctm, baseIndent, false);
     }
 
     doc.complete = (doc.skippedLayers == 0);

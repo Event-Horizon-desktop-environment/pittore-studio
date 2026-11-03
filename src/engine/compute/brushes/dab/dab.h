@@ -14,6 +14,9 @@
 
 namespace pittore::compute {
 
+// `blend` selects the W3C blend function applied per texel (blend.h); the
+// default Normal keeps the legacy source-over path bit-exact. Behind/Clear
+// are not engine modes (map them to Normal at the call site).
 void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     float cy, float radius, float hardness, float opacity,
                     const RGBAf& color, const SelectionMask* selection = nullptr,
@@ -22,7 +25,8 @@ void paint_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                     const MaskTip* mask = nullptr,
                     const papergrain::PaperGrain* kgrain = nullptr,
                     dabmix::DabMixOp mix = dabmix::DabMixOp::Normal,
-                    NativeCmykPaint* nativeCmyk = nullptr);
+                    NativeCmykPaint* nativeCmyk = nullptr,
+                    BlendMode blend = BlendMode::Normal);
 
 // Auto-tip dab: ellipse (ratio + angle) or square silhouette with the same
 // hardness/opacity semantics. ratio==1/angle==0 reproduces paint_dab_host.
@@ -35,6 +39,7 @@ void paint_tip_dab_host(RGBAf* dst, std::uint32_t w, std::uint32_t h, float cx,
                         const MaskTip* mask = nullptr,
                         const papergrain::PaperGrain* kgrain = nullptr,
                         dabmix::DabMixOp mix = dabmix::DabMixOp::Normal,
-                        NativeCmykPaint* nativeCmyk = nullptr);
+                        NativeCmykPaint* nativeCmyk = nullptr,
+                        BlendMode blend = BlendMode::Normal);
 
 }  // namespace pittore::compute

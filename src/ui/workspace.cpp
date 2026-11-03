@@ -25,11 +25,11 @@ const QVector<Preset>& presets() {
     static const QVector<Preset> p = {
         {"Essentials",
          {QStringLiteral("color"), QStringLiteral("swatches"), QStringLiteral("properties"),
-          QStringLiteral("adjustments"), QStringLiteral("layers"), QStringLiteral("channels"),
+          QStringLiteral("layers"), QStringLiteral("channels"),
           QStringLiteral("paths")}},
         {"Photography",
          {QStringLiteral("histogram"), QStringLiteral("navigator"), QStringLiteral("info"),
-          QStringLiteral("adjustments"), QStringLiteral("properties"), QStringLiteral("layers"),
+          QStringLiteral("properties"), QStringLiteral("layers"),
           QStringLiteral("history")}},
         {"Painting",
          {QStringLiteral("brushes"), QStringLiteral("color"), QStringLiteral("swatches"),
@@ -46,7 +46,7 @@ const QVector<Preset>& presets() {
           QStringLiteral("actions")}},
         {"Color Grading",
          {QStringLiteral("histogram"), QStringLiteral("info"), QStringLiteral("color"),
-          QStringLiteral("swatches"), QStringLiteral("adjustments"),
+          QStringLiteral("swatches"),
           QStringLiteral("properties"), QStringLiteral("layers"),
           QStringLiteral("channels")}},
     };

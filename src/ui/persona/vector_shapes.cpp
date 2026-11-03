@@ -298,7 +298,7 @@ std::shared_ptr<pittore::vector::ArtNode> makeShapeArt(ToolId tool,
             std::vector<Anchor> out;
             for (int i = 0; i < n; ++i) {
                 const float a = i * step;
-                for (const auto [frac, rad] :
+                for (const auto& [frac, rad] :
                      {std::pair<float, float>{0.0f, 1.0f},
                       std::pair<float, float>{0.4f, 1.0f},
                       std::pair<float, float>{0.5f, rIn},

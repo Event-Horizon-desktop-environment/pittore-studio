@@ -35,7 +35,10 @@ std::vector<ShapedGlyph> shape(Face& f, const std::string& text, float size,
 
     hb_buffer_t* buf = hb_buffer_create();
     hb_buffer_set_direction(buf, HB_DIRECTION_LTR);
-    hb_buffer_set_language(buf, hb_language_from_string("en", -1));
+    hb_buffer_set_language(
+        buf, hb_language_from_string(spec.language.empty() ? "en"
+                                                           : spec.language.c_str(),
+                                     -1));
     hb_buffer_add_utf8(buf, text.data(), static_cast<int>(text.size()), 0,
                        static_cast<int>(text.size()));
     hb_buffer_guess_segment_properties(buf);

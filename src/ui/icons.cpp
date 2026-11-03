@@ -1243,6 +1243,13 @@ void drawGlyphProcedural(QPainter& p, const QString& k, const QColor& c) {
         half.arcTo(QRectF(3.4, 3.4, 17.2, 17.2), 90, -180);
         half.closeSubpath();
         p.fillPath(half, fill);
+    } else if (k == "recolor") {
+        // Duotone mark: two overlapping discs, one solid and one outline, so
+        // the button reads as "swap the colour, keep the tone".
+        p.setBrush(fill);
+        p.drawEllipse(QPointF(9.2, 12), 5.2, 5.2);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(QPointF(14.8, 12), 5.2, 5.2);
     } else if (k == "properties") {
         p.drawLine(QPointF(4, 7), QPointF(20, 7));
         p.drawLine(QPointF(4, 12), QPointF(20, 12));

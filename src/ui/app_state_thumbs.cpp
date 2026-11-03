@@ -204,12 +204,31 @@ QImage layerThumbnail(const DocumentItem& d, const LayerItem& l, int box, bool c
     for (int ty = 0; ty < box; ++ty) {
         auto* row = reinterpret_cast<QRgb*>(thumb.scanLine(ty));
         for (int tx = 0; tx < box; ++tx) {
-            const pittore::RGBAf c =
+            pittore::RGBAf c =
                 l.pixels
                     ? thumbSample(realized, sw, sh, tx + 0.5, ty + 0.5, sox, soy,
                                   ssx, ssy)
                     : thumbSample(packed, sw, sh, tx + 0.5, ty + 0.5, sox, soy,
                                   ssx, ssy);
+            // Show the layer as it actually appears: a row with a mask previews
+            // the masked colour, not the raw pixels under a blank mask.
+            if (l.hasMask && l.mask && l.maskScaleX > 0.0 &&
+                l.maskScaleY > 0.0 && ssx != 0.0 && ssy != 0.0) {
+                const double sx = (tx + 0.5 - sox) / ssx;
+                const double sy = (ty + 0.5 - soy) / ssy;
+                const double dx = l.offset.x() + sx * l.scaleX;
+                const double dy = l.offset.y() + sy * l.scaleY;
+                const int mx = static_cast<int>(std::floor(
+                    (dx - l.maskOffset.x()) / l.maskScaleX));
+                const int my = static_cast<int>(std::floor(
+                    (dy - l.maskOffset.y()) / l.maskScaleY));
+                if (mx >= 0 && my >= 0 &&
+                    mx < static_cast<int>(l.mask->width()) &&
+                    my < static_cast<int>(l.mask->height()))
+                    c.a *= l.mask->at(mx, my).r;
+                else
+                    c.a = 0.0f;
+            }
             const int a = qBound(0, static_cast<int>(std::lround(c.a * 255.0f)), 255);
             const int r = qBound(0, static_cast<int>(std::lround(c.r * c.a * 255.0f)), 255);
             const int g = qBound(0, static_cast<int>(std::lround(c.g * c.a * 255.0f)), 255);
@@ -226,6 +245,13 @@ static inline void mixStamp(std::uint64_t& h, std::uint64_t v) {
     h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
 }
 
+// Quantise a doc-space coordinate for the hash: two values agreeing to within a
+// hundredth of a document pixel are the same placement for a preview, so this
+// keeps the stamp stable across edit jitter without letting a real move slip by.
+static inline std::uint64_t stampCoord(double v) {
+    return static_cast<std::uint64_t>(qRound64(v * 100.0));
+}
+
 QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
     if (box <= 0 || d.size.isEmpty() || groupIndex < 0 ||
         groupIndex >= d.layers.size() ||
@@ -238,6 +264,37 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
     // enclosing group. O(descendants) scan per call — the box is re-sampled
     // only when a real descendant change lands.
     std::uint64_t stamp = 14695981039346656037ull;   // FNV-1a offset basis
+    // Seed the hash with the group's OWN identity. Without this the stamp is a
+    // pure content hash, so two sibling groups whose members happen to agree on
+    // content+placement hash identically and one returns the other's cached
+    // `groupThumbnailCache` — exactly the two-artboards-show-the-same-image
+    // bug. `groupIndex` is the row's position in this document's layer vector,
+    // unique per row and stable between paints, so it separates every group. A
+    // board's geometry and fill are mixed in too: they drive the render but live
+    // on the board row, not on any descendant, so resizing or recolouring a
+    // board with unchanged children must still invalidate its preview.
+    const LayerItem& self = d.layers[groupIndex];
+    // Artboards are rendered from the document composite at their own rect:
+    // the board is a window onto the finished page, not a second composite of
+    // whatever rows happen to carry its indent.
+    if (self.isBoard()) {
+        const QRect r = self.boardRect.toAlignedRect().intersected(d.composite.rect());
+        if (!r.isEmpty())
+            return d.composite.copy(r).scaled(box, box, Qt::KeepAspectRatio,
+                                              Qt::SmoothTransformation);
+    }
+    mixStamp(stamp, static_cast<std::uint64_t>(groupIndex));
+    if (self.isBoard()) {
+        mixStamp(stamp, stampCoord(self.boardRect.x()));
+        mixStamp(stamp, stampCoord(self.boardRect.y()));
+        mixStamp(stamp, stampCoord(self.boardRect.width()));
+        mixStamp(stamp, stampCoord(self.boardRect.height()));
+        mixStamp(stamp, self.boardHasFill ? 1u : 0u);
+        if (self.boardHasFill) {
+            mixStamp(stamp, static_cast<std::uint64_t>(self.boardFill.alpha()));
+            mixStamp(stamp, stampCoord(self.boardFillOpacity));
+        }
+    }
     QVector<int> pix;   // pixel descendants with pixels, top-first (bounds)
     QVector<int> ops;   // pixel + live-adjustment rows, top-first (paint)
     {
@@ -293,16 +350,7 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
     // The group's own eye hides the whole subtree from the preview too.
     mixStamp(stamp, d.layers[groupIndex].visible ? 1u : 0u);
 
-    // THROWAWAY thumb logging (removed after diagnosis).
-    ::pittore::core::log::log_info(
-        "[thumb] group '%s' idx=%d pix=%d ops=%d",
-        d.layers[groupIndex].name.toUtf8().constData(), groupIndex,
-        pix.size(), ops.size());
-    if (pix.isEmpty()) {
-        ::pittore::core::log::log_info("[thumb] group '%s' NULL: no pixels",
-                                        d.layers[groupIndex].name.toUtf8().constData());
-        return QImage();
-    }
+    if (pix.isEmpty()) return QImage();
     // Combined previews stop scaling: past a few thousand descendants the
     // box resamples oversampling noise at O(box² × ops) CPU (tens of
     // millions of samples for an 80k-leaf import), so huge groups keep the
@@ -326,12 +374,7 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
             double(c.pixels ? c.pixels->height() : c.deferredHeight);
         b |= QRectF(c.offset, QSizeF(cw * c.scaleX, ch * c.scaleY));
     }
-    if (b.width() <= 0.0 || b.height() <= 0.0) {
-        // THROWAWAY thumb logging (removed after diagnosis).
-        ::pittore::core::log::log_info("[thumb] group '%s' NULL: bad bounds",
-                                        d.layers[groupIndex].name.toUtf8().constData());
-        return QImage();
-    }
+    if (b.width() <= 0.0 || b.height() <= 0.0) return QImage();
     const double k = std::min(box / b.width(), box / b.height());
     const double ox = (box - b.width() * k) * 0.5 - b.x() * k;
     const double oy = (box - b.height() * k) * 0.5 - b.y() * k;
@@ -427,12 +470,7 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
     }
     // Everything was invisible: report an empty group even though pixel rows
     // exist (the stamp still guards the cache).
-    // THROWAWAY thumb logging (removed after diagnosis).
-    if (!painted) {
-        ::pittore::core::log::log_info("[thumb] group '%s' NULL: unpainted",
-                                        d.layers[groupIndex].name.toUtf8().constData());
-        return QImage();
-    }
+    if (!painted) return QImage();
 
     QImage thumb(box, box, QImage::Format_ARGB32_Premultiplied);
     for (int ty = 0; ty < box; ++ty) {

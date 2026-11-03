@@ -223,5 +223,34 @@ std::optional<Placed> placeRaster(const Mat& map, Bitmap img) {
     return Placed{rect, std::move(r)};
 }
 
+std::optional<Placed> cropPlaced(Bitmap img, const IntRect& at, const IntRect& box) {
+    if (img.w == 0 || img.h == 0 ||
+        img.px.size() != std::size_t(img.w) * img.h * 4)
+        return std::nullopt;
+    if (at.width() != static_cast<int>(img.w) ||
+        at.height() != static_cast<int>(img.h))
+        return std::nullopt;
+    const int x0 = std::max(at.x0, box.x0);
+    const int y0 = std::max(at.y0, box.y0);
+    const int x1 = std::min(at.x1, box.x1);
+    const int y1 = std::min(at.y1, box.y1);
+    if (x1 <= x0 || y1 <= y0) return std::nullopt;
+    if (x0 == at.x0 && y0 == at.y0 && x1 == at.x1 && y1 == at.y1)
+        return Placed{at, std::move(img)};
+    const int w = x1 - x0;
+    const int h = y1 - y0;
+    const std::size_t srcPitch = static_cast<std::size_t>(at.width()) * 4;
+    Bitmap out;
+    out.w = static_cast<std::uint32_t>(w);
+    out.h = static_cast<std::uint32_t>(h);
+    out.px.resize(static_cast<std::size_t>(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+        std::memcpy(&out.px[static_cast<std::size_t>(y) * w * 4],
+                    &img.px[static_cast<std::size_t>(y0 - at.y0 + y) * srcPitch +
+                            static_cast<std::size_t>(x0 - at.x0) * 4],
+                    static_cast<std::size_t>(w) * 4);
+    return Placed{IntRect{x0, y0, x1, y1}, std::move(out)};
+}
+
 }  // namespace af_detail
 }  // namespace pittore::io

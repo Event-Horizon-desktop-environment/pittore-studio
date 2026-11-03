@@ -498,7 +498,7 @@ void ComputeBackend::composite_many_into(Buffer& bottom, std::uint32_t w,
         const PlacedLayer& l = layers[i];
         if (l.x0 >= l.x1 || l.y0 >= l.y1) continue;
         const RGBAf* src = nullptr;
-        if (!l.isAdjustment) {
+        if (!l.isAdjustment && !l.isFill) {
             if (!l.src || l.sw == 0 || l.sh == 0) continue;
             if (l.src->size() <
                 static_cast<std::size_t>(l.sw) * l.sh * sizeof(RGBAf))
@@ -552,6 +552,8 @@ void ComputeBackend::composite_many_into(Buffer& bottom, std::uint32_t w,
         e.clipped = l.clipped;
         e.clipBase = l.clipBase;
         e.isAdjustment = l.isAdjustment;
+        e.isFill = l.isFill;
+        e.fillColor = l.fillColor;
         e.adjKind = l.adjKind;
         for (int k = 0; k < 16; ++k) e.adjP[k] = l.adjP[k];
         e.adjAux = aux;

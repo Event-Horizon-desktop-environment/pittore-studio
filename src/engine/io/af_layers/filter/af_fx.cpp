@@ -318,7 +318,16 @@ std::optional<std::array<std::uint8_t, 4>> vectorColorBytes(const Graph& g,
                                                             const Node* colr) {
     if (!colr) return std::nullopt;
     const Value* v = g.field(colr, "_col");
-    if (!v || v->k != Value::K::Struct) return std::nullopt;
+    if (!v || v->k != Value::K::Struct) {
+        // A spot/global colour keeps the resolved values in `srgb` (and the
+        // document-space source in `base`) instead of carrying `_col` itself.
+        for (const char* key : {"srgb", "base"}) {
+            if (const Node* inner = g.child(colr, key)) {
+                if (auto c = vectorColorBytes(g, inner)) return c;
+            }
+        }
+        return std::nullopt;
+    }
     const std::vector<std::uint8_t>& raw = v->bytes;
     auto f = [&](std::size_t i) -> float {
         float x = 0.0f;
@@ -345,6 +354,10 @@ std::optional<std::array<std::uint8_t, 4>> vectorColorBytes(const Graph& g,
     }
     if (raw.size() == 4)
         return std::array<std::uint8_t, 4>{raw[0], raw[1], raw[2], raw[3]};
+    // Spot-colour endpoints are stored as RGBA floats without a colour class
+    // tag; their wrapper is the `srgb`/`base` node selected above.
+    if (raw.size() == 16)
+        return std::array<std::uint8_t, 4>{to(f(0)), to(f(1)), to(f(2)), to(f(3))};
     return std::nullopt;
 }
 

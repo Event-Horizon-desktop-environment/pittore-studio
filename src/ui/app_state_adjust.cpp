@@ -41,6 +41,26 @@ QString adjustmentKindName(int kind) {
             return QStringLiteral("Channel Mixer");
         case AdjustmentKind::ColorBalance:
             return QStringLiteral("Color Balance");
+        case AdjustmentKind::Recolour:
+            return QStringLiteral("Recolour");
+        case AdjustmentKind::SplitToning:
+            return QStringLiteral("Split Toning");
+        case AdjustmentKind::GradientMap:
+            return QStringLiteral("Gradient Map");
+        case AdjustmentKind::ToneCompression:
+            return QStringLiteral("Tone Compression");
+        case AdjustmentKind::ToneStretch:
+            return QStringLiteral("Tone Stretch");
+        case AdjustmentKind::SelectiveColour:
+            return QStringLiteral("Selective Colour");
+        case AdjustmentKind::LUT:
+            return QStringLiteral("LUT");
+        case AdjustmentKind::Normals:
+            return QStringLiteral("Normals");
+        case AdjustmentKind::SoftProof:
+            return QStringLiteral("Soft Proof");
+        case AdjustmentKind::OCIO:
+            return QStringLiteral("OCIO");
         case AdjustmentKind::None: break;
     }
     return QString();
@@ -111,6 +131,71 @@ QVector<AdjustmentParamDesc> adjustmentParamDescs(int kind) {
                 {"Highlights Magenta-Green", -100, 100, -100.0, 100.0},
                 {"Highlights Yellow-Blue", -100, 100, -100.0, 100.0},
                 {"Preserve Luminosity", 0, 1, 0.0, 1.0}};
+    if (k == AdjustmentKind::Recolour)
+        return {{"Hue", 0, 360, 0.0, 360.0},
+                {"Saturation", 0, 100, 0.0, 1.0},
+                {"Lightness", -100, 100, -1.0, 1.0}};
+    if (k == AdjustmentKind::ToneCompression ||
+        k == AdjustmentKind::ToneStretch)
+        return {{"Amount", 0, 100, 0.0, 1.0},
+                {"Pivot", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::SelectiveColour)
+        return {{"Reds Saturation", -100, 100, -1.0, 1.0},
+                {"Yellows Saturation", -100, 100, -1.0, 1.0},
+                {"Greens Saturation", -100, 100, -1.0, 1.0},
+                {"Cyans Saturation", -100, 100, -1.0, 1.0},
+                {"Blues Saturation", -100, 100, -1.0, 1.0},
+                {"Magentas Saturation", -100, 100, -1.0, 1.0},
+                {"Reds Lightness", -100, 100, -1.0, 1.0},
+                {"Yellows Lightness", -100, 100, -1.0, 1.0},
+                {"Greens Lightness", -100, 100, -1.0, 1.0},
+                {"Cyans Lightness", -100, 100, -1.0, 1.0},
+                {"Blues Lightness", -100, 100, -1.0, 1.0},
+                {"Magentas Lightness", -100, 100, -1.0, 1.0}};
+    if (k == AdjustmentKind::OCIO)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::SoftProof)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::LUT)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::Normals)
+        return {{"Strength", 0, 800, 0.0, 8.0}};
+    if (k == AdjustmentKind::SplitToning)
+        return {{"Shadow Red", 0, 255, 0.0, 1.0},
+                {"Shadow Green", 0, 255, 0.0, 1.0},
+                {"Shadow Blue", 0, 255, 0.0, 1.0},
+                {"Highlight Red", 0, 255, 0.0, 1.0},
+                {"Highlight Green", 0, 255, 0.0, 1.0},
+                {"Highlight Blue", 0, 255, 0.0, 1.0},
+                {"Balance", -100, 100, -1.0, 1.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
     return {};
 }
 
@@ -130,6 +215,16 @@ bool AppState::addAdjustmentLayer(int kind) {
     layer.adjustmentKind = kind;
     layer.swatch = QColor(0x9a, 0x72, 0xd0);
     setAdjustmentDefaults(layer);
+    // Recolour is a local grade by design: when it is created over a pixel
+    // layer, clip it to that layer so it does not silently grade the rest of
+    // the stack. The Properties panel still exposes the attach toggle.
+    if (kind == static_cast<int>(AdjustmentKind::Recolour) &&
+        d->activeLayer >= 0 &&
+        d->activeLayer < d->layers.size() &&
+        d->layers[d->activeLayer].kind == LayerItem::Kind::Pixel) {
+        layer.clipped = true;
+        layer.indent = d->layers[d->activeLayer].indent + 1;
+    }
     beginUndoStep();
     addLayer(std::move(layer));  // re-composites, selects, signals
     commitUndoStep(name, QStringLiteral("adjustments"));
@@ -160,6 +255,24 @@ bool AppState::setAdjustmentParam(int index, float value) {
     DocumentItem* d = activeDocument();
     if (!d) return false;
     return setAdjustmentParamAt(d->activeLayer, index, value);
+}
+
+bool AppState::setAdjustmentParams(int layerIndex, const float* params) {
+    using pittore::compute::AdjustmentKind;
+    DocumentItem* d = activeDocument();
+    if (!d || !params || layerIndex < 0 || layerIndex >= d->layers.size())
+        return false;
+    LayerItem* l = &d->layers[layerIndex];
+    if (l->kind != LayerItem::Kind::Adjustment) return false;
+    for (int i = 0; i < 16; ++i) l->adjustmentParams[i] = params[i];
+    const AdjustmentKind k = static_cast<AdjustmentKind>(l->adjustmentKind);
+    if (k == AdjustmentKind::Levels || k == AdjustmentKind::Curves)
+        rebuildAdjustmentLUT(*l);
+    else
+        ++l->adjustStamp;
+    d->rebuildComposite();
+    emit documentModified(d);
+    return true;
 }
 
 bool AppState::setAdjustmentCurve(const QVector<QPointF>& points) {

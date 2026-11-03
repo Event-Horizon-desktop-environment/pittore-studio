@@ -49,10 +49,20 @@ PersonaBar::PersonaBar(AppState* state, QWidget* parent) : QFrame(parent), state
     group_->addButton(pixelButton_, static_cast<int>(Persona::Pixel));
     group_->addButton(drawButton_, static_cast<int>(Persona::Draw));
     group_->addButton(colorButton_, static_cast<int>(Persona::Color));
+
+    artboardButton_ = new QToolButton(this);
+    artboardButton_->setText(tr("Artboard"));
+    artboardButton_->setToolTip(
+        tr("Artboard persona — create, size, reorder and export artboards"));
+    artboardButton_->setCheckable(true);
+    artboardButton_->setCursor(Qt::PointingHandCursor);
+    group_->addButton(artboardButton_, static_cast<int>(Persona::Artboard));
+
     row->addWidget(vectorButton_);
     row->addWidget(pixelButton_);
     row->addWidget(drawButton_);
     row->addWidget(colorButton_);
+    row->addWidget(artboardButton_);
     row->addStretch(1);
 
     connect(vectorButton_, &QToolButton::clicked, this,
@@ -63,6 +73,8 @@ PersonaBar::PersonaBar(AppState* state, QWidget* parent) : QFrame(parent), state
             [this] { emit personaSelected(Persona::Draw); });
     connect(colorButton_, &QToolButton::clicked, this,
             [this] { emit personaSelected(Persona::Color); });
+    connect(artboardButton_, &QToolButton::clicked, this,
+            [this] { emit personaSelected(Persona::Artboard); });
     connect(state_, &AppState::themeChanged, this, [this] { applyTheme(); });
     connect(state_, &AppState::settingsChanged, this, [this] {
         setFixedHeight(tabletBarHeight());
@@ -80,6 +92,8 @@ void PersonaBar::setPersona(Persona p) {
         drawButton_->setChecked(true);
     else if (p == Persona::Color)
         colorButton_->setChecked(true);
+    else if (p == Persona::Artboard)
+        artboardButton_->setChecked(true);
     else
         pixelButton_->setChecked(true);
 }

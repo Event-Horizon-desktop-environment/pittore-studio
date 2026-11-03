@@ -67,6 +67,7 @@ std::optional<TextRaster> rasterize(const TextSpec& spec) {
     if (face->capRatio) raster.capHeight = *face->capRatio * spec.size;
     raster.firstBaseline = laid.firstBaseline;
     raster.lineAdvance = laid.lineAdvance;
+    raster.lineCount = static_cast<int>(laid.lines.size());
     raster.layoutWidth = laid.layoutWidth;
 
     struct Done {
@@ -80,20 +81,35 @@ std::optional<TextRaster> rasterize(const TextSpec& spec) {
     setSize(*face, gs.size);
     const bool scaled = std::abs(gs.hScale - 1.0f) > 1e-4f ||
                         std::abs(gs.vScale - 1.0f) > 1e-4f;
-    if (scaled) {
+    const bool transformed = scaled || std::abs(spec.rotation) > 1e-6f ||
+                             std::abs(spec.shear) > 1e-6f;
+    const float rotC = std::cos(spec.rotation);
+    const float rotS = std::sin(spec.rotation);
+    const float shear = spec.shear;
+    auto tx = [&](float x, float y) { return x + shear * y; };
+    if (transformed) {
         FT_Matrix m;
-        m.xx = static_cast<FT_Fixed>(gs.hScale * 65536.0f);
-        m.xy = 0;
-        m.yx = 0;
-        m.yy = static_cast<FT_Fixed>(gs.vScale * 65536.0f);
+        // Shear in x, then rotate (y-down), then apply the glyph scale.
+        m.xx = static_cast<FT_Fixed>(rotC * gs.hScale * 65536.0f);
+        m.xy = static_cast<FT_Fixed>((rotC * shear - rotS) * gs.hScale * 65536.0f);
+        m.yx = static_cast<FT_Fixed>(rotS * gs.vScale * 65536.0f);
+        m.yy = static_cast<FT_Fixed>((rotS * shear + rotC) * gs.vScale * 65536.0f);
         FT_Set_Transform(face->ft, &m, nullptr);
     }
     for (const PlacedGlyph& g : laid.glyphs) {
         GlyphBitmap bm;
         if (!renderGlyph(*face, g.glyph, bm)) continue;
         if (bm.width == 0 || bm.height == 0) continue;
-        const int left = static_cast<int>(std::floor(g.x + bm.left));
-        const int top = static_cast<int>(std::floor(g.baseline - bm.top));
+        float px = g.x;
+        float py = g.baseline;
+        if (transformed) {
+            const float sx = tx(px, py);
+            const float sy = py;
+            px = rotC * sx - rotS * sy;
+            py = rotS * sx + rotC * sy;
+        }
+        const int left = static_cast<int>(std::floor(px + bm.left));
+        const int top = static_cast<int>(std::floor(py - bm.top));
         const vector::IRect rect = vector::IRect::fromXYWH(left, top, bm.width, bm.height);
         if (!haveBounds) {
             bounds = rect;
@@ -103,7 +119,7 @@ std::optional<TextRaster> rasterize(const TextSpec& spec) {
         }
         done.push_back(Done{rect, std::move(bm)});
     }
-    if (scaled) FT_Set_Transform(face->ft, nullptr, nullptr);
+    if (transformed) FT_Set_Transform(face->ft, nullptr, nullptr);
     if (!haveBounds || bounds.isEmpty()) return emptyRaster();
 
     // Decorations and the highlight box can reach past the glyph ink, so size

@@ -19,6 +19,10 @@ jobs:
   test:
     name: build (Ubuntu 26.04)
     runs-on: ubuntu-26.04
+    env:
+      # CUDA apt repo matching the runner release; matrix jobs derive
+      # theirs from ${{ matrix.cuda }}.
+      CUDA_REPO: ubuntu2604
     steps:
       - uses: actions/checkout@v6
       # ccache carries compiled objects across runs: restore keys match any
@@ -46,7 +50,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -69,6 +73,24 @@ jobs:
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
+          # ROCm 7.2's bundled lld links libxml2.so.2. Ubuntu renamed the
+          # package to libxml2-16 (soname libxml2.so.16) with the 26.04
+          # release, so the ROCm install itself succeeds but every amdgcn
+          # link dies when lld fails to load. When the soname is missing
+          # (24.04 still ships it, so nothing happens there: no sources are
+          # added and no apt run is needed), borrow the 2.9.14 library
+          # plus its ICU dependency from the noble archive. The pin sits
+          # below the runner's default 500 so noble can never out-rank any
+          # package 26.04 provides; both libraries come through the
+          # explicit /noble selection. Verified against 24.04 and 26.04
+          # containers.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            echo "deb https://archive.ubuntu.com/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/noble-libs.list
+            printf 'Package: libxml2 libicu74\nPin: release n=noble\nPin-Priority: 400\n' | sudo tee /etc/apt/preferences.d/noble-libs
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libxml2/noble libicu74/noble
+            sudo rm -f /etc/apt/sources.list.d/noble-libs.list /etc/apt/preferences.d/noble-libs
+          fi
           echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
           # UI tests enumerate installed font families (type-tool-ui needs
           # >100); a bare runner ships only a handful, so install Noto's
@@ -102,17 +124,35 @@ jobs:
       # locally via `just test`, which stays the pre-merge gate.
 
   deb:
-    name: deb (Ubuntu 26.04)
-    runs-on: ubuntu-26.04
+    # Built on both runner generations: 24.04 keeps the glibc floor low
+    # (2.39) so the artifact runs on current systems everywhere, 26.04
+    # tracks the newest toolchain. Filenames, package versions and cache
+    # lineages key on the distro so both variants upload distinctly.
+    name: deb (${{ matrix.os }})
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            distro: ubuntu24.04
+            cuda: ubuntu2404
+            cache: ccache-ubuntu24-
+          - os: ubuntu-26.04
+            distro: ubuntu26.04
+            cuda: ubuntu2604
+            cache: ccache-ubuntu-
+    runs-on: ${{ matrix.os }}
+    env:
+      CUDA_REPO: ${{ matrix.cuda }}
     steps:
       - uses: actions/checkout@v6
       - name: Restore ccache
         uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
-          key: ccache-ubuntu-deb-${{ github.run_id }}
-          restore-keys: ccache-ubuntu-
+          key: ${{ matrix.cache }}deb-${{ github.run_id }}
+          restore-keys: ${{ matrix.cache }}
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -127,7 +167,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -150,6 +190,24 @@ jobs:
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
+          # ROCm 7.2's bundled lld links libxml2.so.2. Ubuntu renamed the
+          # package to libxml2-16 (soname libxml2.so.16) with the 26.04
+          # release, so the ROCm install itself succeeds but every amdgcn
+          # link dies when lld fails to load. When the soname is missing
+          # (24.04 still ships it, so nothing happens there: no sources are
+          # added and no apt run is needed), borrow the 2.9.14 library
+          # plus its ICU dependency from the noble archive. The pin sits
+          # below the runner's default 500 so noble can never out-rank any
+          # package 26.04 provides; both libraries come through the
+          # explicit /noble selection. Verified against 24.04 and 26.04
+          # containers.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            echo "deb https://archive.ubuntu.com/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/noble-libs.list
+            printf 'Package: libxml2 libicu74\nPin: release n=noble\nPin-Priority: 400\n' | sudo tee /etc/apt/preferences.d/noble-libs
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libxml2/noble libicu74/noble
+            sudo rm -f /etc/apt/sources.list.d/noble-libs.list /etc/apt/preferences.d/noble-libs
+          fi
           echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and stage
         run: |
@@ -159,6 +217,10 @@ jobs:
           else
             VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
+          # One release carries both distro builds, so each deb gets a
+          # distro-tagged version; the tilde keeps it sorting below a
+          # plain same-version package under dpkg comparison.
+          VERSION="${VERSION}~${{ matrix.distro }}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           meson setup build ${{ env.MESON_OPTS }}
           n=$(nproc)
@@ -198,7 +260,7 @@ jobs:
         run: ccache --show-stats || true
       - uses: actions/upload-artifact@v7
         with:
-          name: deb
+          name: deb-${{ matrix.distro }}
           path: dist/*.deb
 
   rpm:
@@ -352,17 +414,35 @@ jobs:
           path: dist/*.pkg.tar.zst
 
   tarball:
-    name: portable tarball
-    runs-on: ubuntu-26.04
+    # Dual runner generations like the deb: the 24.04 artifact keeps the
+    # glibc floor low (2.39) for current systems, the 26.04 one tracks
+    # the newest toolchain. Filenames and cache lineages key on the
+    # distro so both variants upload with distinct names.
+    name: tarball (${{ matrix.os }})
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            distro: ubuntu24.04
+            cuda: ubuntu2404
+            cache: ccache-ubuntu24-
+          - os: ubuntu-26.04
+            distro: ubuntu26.04
+            cuda: ubuntu2604
+            cache: ccache-ubuntu-
+    runs-on: ${{ matrix.os }}
+    env:
+      CUDA_REPO: ${{ matrix.cuda }}
     steps:
       - uses: actions/checkout@v6
       - name: Restore ccache
         uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
-          key: ccache-ubuntu-tarball-${{ github.run_id }}
-          restore-keys: ccache-ubuntu-
+          key: ${{ matrix.cache }}tarball-${{ github.run_id }}
+          restore-keys: ${{ matrix.cache }}
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -377,7 +457,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -400,6 +480,24 @@ jobs:
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
+          # ROCm 7.2's bundled lld links libxml2.so.2. Ubuntu renamed the
+          # package to libxml2-16 (soname libxml2.so.16) with the 26.04
+          # release, so the ROCm install itself succeeds but every amdgcn
+          # link dies when lld fails to load. When the soname is missing
+          # (24.04 still ships it, so nothing happens there: no sources are
+          # added and no apt run is needed), borrow the 2.9.14 library
+          # plus its ICU dependency from the noble archive. The pin sits
+          # below the runner's default 500 so noble can never out-rank any
+          # package 26.04 provides; both libraries come through the
+          # explicit /noble selection. Verified against 24.04 and 26.04
+          # containers.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            echo "deb https://archive.ubuntu.com/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/noble-libs.list
+            printf 'Package: libxml2 libicu74\nPin: release n=noble\nPin-Priority: 400\n' | sudo tee /etc/apt/preferences.d/noble-libs
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libxml2/noble libicu74/noble
+            sudo rm -f /etc/apt/sources.list.d/noble-libs.list /etc/apt/preferences.d/noble-libs
+          fi
           echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and pack tarball
         run: |
@@ -418,7 +516,7 @@ jobs:
           rm -rf staging dist
           mkdir -p staging dist
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
-          tar -czf "dist/pittore-studio-${VERSION}-x86_64.tar.gz" -C staging usr
+          tar -czf "dist/pittore-studio-${VERSION}-x86_64-${{ matrix.distro }}.tar.gz" -C staging usr
           ls -l dist
         env:
           CC: 'ccache gcc'
@@ -429,21 +527,40 @@ jobs:
         run: ccache --show-stats || true
       - uses: actions/upload-artifact@v7
         with:
-          name: tarball
+          name: tarball-${{ matrix.distro }}
           path: dist/*.tar.gz
 
   appimage:
-    name: AppImage (Ubuntu 26.04)
-    runs-on: ubuntu-26.04
+    # Dual runner generations like the deb: the 24.04 artifact keeps the
+    # glibc floor low (2.39) for current systems, the 26.04 one tracks
+    # the newest toolchain. An AppImage bundles no system loader, so
+    # its build generation is the portability decision. Filenames and
+    # cache lineages key on the distro so both variants upload distinctly.
+    name: appimage (${{ matrix.os }})
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            distro: ubuntu24.04
+            cuda: ubuntu2404
+            cache: ccache-ubuntu24-
+          - os: ubuntu-26.04
+            distro: ubuntu26.04
+            cuda: ubuntu2604
+            cache: ccache-ubuntu-
+    runs-on: ${{ matrix.os }}
+    env:
+      CUDA_REPO: ${{ matrix.cuda }}
     steps:
       - uses: actions/checkout@v6
       - name: Restore ccache
         uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
-          key: ccache-ubuntu-appimage-${{ github.run_id }}
-          restore-keys: ccache-ubuntu-
+          key: ${{ matrix.cache }}appimage-${{ github.run_id }}
+          restore-keys: ${{ matrix.cache }}
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -459,7 +576,7 @@ jobs:
           set -euo pipefail
           # Build-time only: nvcc compiles our kernels here; the binary
           # links cudart statically, so users need just the NVIDIA driver.
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
           sudo apt-get install -y -qq cuda-nvcc-13-4 cuda-cudart-dev-13-4
@@ -482,6 +599,24 @@ jobs:
           printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/rocm
           sudo apt-get update -qq
           sudo apt-get install -y -qq hip-dev
+          # ROCm 7.2's bundled lld links libxml2.so.2. Ubuntu renamed the
+          # package to libxml2-16 (soname libxml2.so.16) with the 26.04
+          # release, so the ROCm install itself succeeds but every amdgcn
+          # link dies when lld fails to load. When the soname is missing
+          # (24.04 still ships it, so nothing happens there: no sources are
+          # added and no apt run is needed), borrow the 2.9.14 library
+          # plus its ICU dependency from the noble archive. The pin sits
+          # below the runner's default 500 so noble can never out-rank any
+          # package 26.04 provides; both libraries come through the
+          # explicit /noble selection. Verified against 24.04 and 26.04
+          # containers.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            echo "deb https://archive.ubuntu.com/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/noble-libs.list
+            printf 'Package: libxml2 libicu74\nPin: release n=noble\nPin-Priority: 400\n' | sudo tee /etc/apt/preferences.d/noble-libs
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libxml2/noble libicu74/noble
+            sudo rm -f /etc/apt/sources.list.d/noble-libs.list /etc/apt/preferences.d/noble-libs
+          fi
           echo "$(dirname "$(dpkg -L hipcc | grep 'bin/hipcc$' | head -1)")" >> "$GITHUB_PATH"
       - name: Build and pack AppImage
         run: |
@@ -529,7 +664,7 @@ jobs:
             --plugin qt \
             --output appimage
           mkdir -p dist
-          mv Pittore*.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage" 2>/dev/null || mv *.AppImage "dist/pittore-studio-${VERSION}-x86_64.AppImage"
+          mv Pittore*.AppImage "dist/pittore-studio-${VERSION}-x86_64-${{ matrix.distro }}.AppImage" 2>/dev/null || mv *.AppImage "dist/pittore-studio-${VERSION}-x86_64-${{ matrix.distro }}.AppImage"
           ls -l dist
         env:
           CC: 'ccache gcc'
@@ -540,7 +675,7 @@ jobs:
         run: ccache --show-stats || true
       - uses: actions/upload-artifact@v7
         with:
-          name: appimage
+          name: appimage-${{ matrix.distro }}
           path: dist/*.AppImage
 
   flatpak:

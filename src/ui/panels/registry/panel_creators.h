@@ -38,6 +38,8 @@ QWidget* createSymbolsPanel(AppState* state, QWidget* parent);
 QWidget* createDocPropsPanel(AppState* state, QWidget* parent);
 QWidget* createTracePanel(AppState* state, QWidget* parent);
 QWidget* createExtensionsPanel(AppState* state, QWidget* parent);
+QWidget* createArtboardsPanel(AppState* state, QWidget* parent);
+
 QWidget* createPagesPanel(AppState* state, QWidget* parent);
 QWidget* createMarkersPanel(AppState* state, QWidget* parent);
 QWidget* createLpePanel(AppState* state, QWidget* parent);

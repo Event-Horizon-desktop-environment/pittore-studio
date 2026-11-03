@@ -11,6 +11,8 @@
 // (header + "#Fil" zstd frames + cleartext previews + JSON tail).
 #include "engine/io/af.h"
 #include "engine/io/af_layers.h"
+#include "engine/io/af_layers/container/af_archive.h"
+#include "engine/io/af_layers/emit/af_write.h"
 
 #include <array>
 #include <cstdint>
@@ -760,6 +762,331 @@ void testRealFile() {
               "d.af flattened dims use the largest preview 2559×1439");
 }
 
+// ---------------------------------------------------------------------------
+// v12 FT4 grammar fixtures
+// ---------------------------------------------------------------------------
+//
+// Real containers are external fixtures; the reader's v12 branch (row
+// directories, delta/checkpoint element streams, damaged-block fallback) is
+// pinned here on synthesised bytes. Storage is comp=0 (stored) throughout so
+// the fixtures need only zlib. af_container_probe walks the same bytes from
+// the CLI against the research corpus.
+
+void put16le(std::vector<std::uint8_t>& out, std::uint16_t v) {
+    out.push_back(static_cast<std::uint8_t>(v & 0xff));
+    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+}
+
+void put64le(std::vector<std::uint8_t>& out, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xff));
+}
+
+void patch64le(std::vector<std::uint8_t>& out, std::size_t at, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        out[at + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+}
+
+void patch32le(std::vector<std::uint8_t>& out, std::size_t at, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+        out[at + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+}
+
+std::uint32_t crc32Of(const std::vector<std::uint8_t>& b) {
+    return static_cast<std::uint32_t>(crc32(0, b.data(), static_cast<uInt>(b.size())));
+}
+
+// 72-byte tagged header: magic, version 12, Prsn, #Inf (five u64), revision,
+// num, Prot. The #Inf fields are patched by the fixture that owns the file.
+std::vector<std::uint8_t> afContainerHeaderPrelude() {
+    std::vector<std::uint8_t> out = {0x00, 0xff, 0x4b, 0x41, 0x0c, 0x00, 0x00, 0x00};
+    out.insert(out.end(), {'P', 'r', 's', 'n'});
+    out.insert(out.end(), {'#', 'I', 'n', 'f'});
+    out.insert(out.end(), 40, 0);  // fat, thumb, length, unknown, date
+    put32le(out, 1);               // revision
+    put32le(out, 3);               // num
+    out.insert(out.end(), {'P', 'r', 'o', 't'});
+    put32le(out, 12);              // protocol revision
+    return out;
+}
+
+std::size_t addRecord(std::vector<std::uint8_t>& out,
+                      const std::vector<std::uint8_t>& payload, bool sentinel) {
+    if (sentinel) out.insert(out.end(), 4, 0xff);
+    const std::size_t tag = out.size();
+    out.insert(out.end(), {'#', 'F', 'i', 'l'});
+    out.insert(out.end(), payload.begin(), payload.end());
+    return tag;
+}
+
+// One v12 row: [us][cs][crc][comp|kind|u16][payload kind][stored crc]
+// [u16 name len + name][13-byte tail unless last].
+void appendRow(std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& payload,
+               const char* name, std::uint64_t nextTag, std::uint32_t id, bool last) {
+    put64le(out, payload.size());        // uncompressed
+    put64le(out, payload.size());        // compressed (stored)
+    put32le(out, crc32Of(payload));      // crc of the final bytes
+    put32le(out, 0);                     // compression 0 (stored) | kind | u16
+    out.push_back(0x21);                 // payload kind: named record
+    put32le(out, crc32Of(payload));      // crc of the stored bytes
+    const std::size_t nl = std::strlen(name);
+    put16le(out, static_cast<std::uint16_t>(nl));
+    out.insert(out.end(), name, name + nl);
+    if (!last) {
+        put32le(out, id);                // row id
+        out.push_back(0);
+        put64le(out, nextTag);           // next row's record tag
+    }
+}
+
+// [u32 prefixLen][u64 counter][prefix bytes] — one family summary.
+void appendFooter(std::vector<std::uint8_t>& out, const char* prefix,
+                  std::uint64_t count) {
+    const std::size_t nl = std::strlen(prefix);
+    put32le(out, static_cast<std::uint32_t>(nl));
+    put64le(out, count);
+    out.insert(out.end(), prefix, prefix + nl);
+}
+
+// A #FT4 row directory: doc.dat + d/1, stored, one "d/" trailer. This is the
+// grammar every fresh export uses.
+std::vector<std::uint8_t> synthRowDirectory() {
+    std::vector<std::uint8_t> out = afContainerHeaderPrelude();
+    const std::vector<std::uint8_t> docPayload = {'d', 'o', 'c', '!', 1, 2, 3};
+    const std::vector<std::uint8_t> tilePayload = {'t', 'i', 'l', 'e', 9, 9};
+    const std::size_t docTag = addRecord(out, docPayload, false);
+    const std::size_t tileTag = addRecord(out, tilePayload, true);
+
+    out.insert(out.end(), 4, 0xff);
+    const std::size_t fatOff = out.size();
+    out.insert(out.end(), {'#', 'F', 'T', '4'});
+    put64le(out, 0);             // next
+    put64le(out, 1000);          // savepoint
+    const std::size_t endAt = out.size();
+    put64le(out, 0);             // block end, patched
+    put64le(out, 0);             // document extent
+    put64le(out, 0);             // unknown
+    put64le(out, 2);             // row count
+    const std::size_t dirSizeAt = out.size();
+    put32le(out, 0);             // directory size, patched
+    put32le(out, 0x01020001);    // f56: compact row directory
+    put32le(out, 0x00000000);    // f60
+    put32le(out, static_cast<std::uint32_t>(docTag));  // first tag
+    put32le(out, 0);             // b68: row directory (no delta)
+    appendRow(out, docPayload, "doc.dat", tileTag, 40, false);
+    appendRow(out, tilePayload, "d/1", 0, 0, true);
+    appendFooter(out, "d/", 2);
+    const std::size_t end = out.size();
+    patch64le(out, endAt, end);
+    patch32le(out, dirSizeAt, static_cast<std::uint32_t>(end - fatOff - 59));
+    patch64le(out, 16, fatOff);  // o1
+    patch64le(out, 24, end);     // o2
+    return out;
+}
+
+// A delta/checkpoint block: one kind-2 token then the serial-1 document
+// struct (42 B), closed by the same family trailer.
+std::vector<std::uint8_t> synthDeltaBlock() {
+    std::vector<std::uint8_t> out = afContainerHeaderPrelude();
+    const std::vector<std::uint8_t> payload = {'d', 'e', 'l', 't', 'a'};
+    const std::size_t tag = addRecord(out, payload, false);
+
+    out.insert(out.end(), 4, 0xff);
+    const std::size_t fatOff = out.size();
+    out.insert(out.end(), {'#', 'F', 'T', '4'});
+    put64le(out, 0);             // next
+    put64le(out, 2000);          // savepoint
+    const std::size_t endAt = out.size();
+    put64le(out, 0);             // block end, patched
+    put64le(out, 0);             // document extent
+    put64le(out, 0);             // unknown
+    put64le(out, 0);             // row count (unused by the delta path)
+    const std::size_t dirSizeAt = out.size();
+    put32le(out, 0);             // directory size, patched
+    put32le(out, 0xe7000001);    // f56: tile-delta class
+    put32le(out, 0x02000004);    // f60
+    // Delta blocks are 64 B of header: the element stream starts at +64, so
+    // the bytes a row directory spends on firstTag/f68 are payload here and
+    // the +68 byte doubles as the discriminator (first element kind).
+    put32le(out, 235);           // element: kind-2 token, serial 235
+    out.push_back(2);
+    put32le(out, 1);             // element: kind-1 struct, serial 1 = the doc
+    out.push_back(1);
+    put64le(out, tag);           // record tag position (payload at +4)
+    put64le(out, payload.size());
+    put64le(out, payload.size());
+    put32le(out, crc32Of(payload));  // crc of final bytes
+    put32le(out, 0);                 // mid: compression low byte 0 (stored)
+    out.push_back(0);                // payload type
+    put32le(out, crc32Of(payload));  // crc of stored bytes
+    appendFooter(out, "d/", 1);
+    const std::size_t end = out.size();
+    patch64le(out, endAt, end);
+    patch32le(out, dirSizeAt, static_cast<std::uint32_t>(end - fatOff - 59));
+    patch64le(out, 16, fatOff);  // o1
+    patch64le(out, 24, end);     // o2
+    return out;
+}
+
+// Two-block chain: a damaged newest block (row count 5, 16 body bytes) whose
+// next pointer reaches a healthy older row directory. The reader must drop
+// the damaged block whole and resolve the document from the older one.
+std::vector<std::uint8_t> synthDamagedChain() {
+    std::vector<std::uint8_t> out = afContainerHeaderPrelude();
+    const std::vector<std::uint8_t> payload = {'o', 'l', 'd', 'd', 'o', 'c'};
+    const std::size_t tag = addRecord(out, payload, false);
+
+    out.insert(out.end(), 4, 0xff);
+    const std::size_t oldFat = out.size();
+    out.insert(out.end(), {'#', 'F', 'T', '4'});
+    put64le(out, 0);             // next: end of chain
+    put64le(out, 1000);          // savepoint
+    const std::size_t oldEndAt = out.size();
+    put64le(out, 0);             // block end, patched
+    put64le(out, 0);
+    put64le(out, 0);
+    put64le(out, 1);             // row count
+    const std::size_t oldDirSizeAt = out.size();
+    put32le(out, 0);             // directory size, patched
+    put32le(out, 0x01000001);
+    put32le(out, 0x01000000);
+    put32le(out, static_cast<std::uint32_t>(tag));
+    put32le(out, 0);
+    appendRow(out, payload, "doc.dat", 0, 0, true);
+    appendFooter(out, "d/", 1);
+    const std::size_t oldEnd = out.size();
+    patch64le(out, oldEndAt, oldEnd);
+    patch32le(out, oldDirSizeAt, static_cast<std::uint32_t>(oldEnd - oldFat - 59));
+
+    // Damaged newest block: correct header, nonsensical body (too short for
+    // its row count), pointing back at the healthy block.
+    out.insert(out.end(), 4, 0xff);
+    const std::size_t badFat = out.size();
+    out.insert(out.end(), {'#', 'F', 'T', '4'});
+    put64le(out, oldFat);        // next: the healthy older block
+    put64le(out, 2000);          // savepoint (newer)
+    const std::size_t badEndAt = out.size();
+    put64le(out, 0);             // block end, patched
+    put64le(out, 0);
+    put64le(out, 0);
+    put64le(out, 5);             // row count larger than the body
+    const std::size_t badDirSizeAt = out.size();
+    put32le(out, 0);             // directory size, patched
+    put32le(out, 0xc0000001);
+    put32le(out, 0x00000003);
+    put32le(out, 0);             // first tag
+    put32le(out, 0);             // b68: claims a row directory
+    out.insert(out.end(), 16, 0);
+    const std::size_t badEnd = out.size();
+    patch64le(out, badEndAt, badEnd);
+    patch32le(out, badDirSizeAt, static_cast<std::uint32_t>(badEnd - badFat - 59));
+    patch64le(out, 16, badFat);  // o1: newest (damaged) block first
+    patch64le(out, 24, badEnd);  // o2
+    return out;
+}
+
+void testV12Grammar() {
+    using pittore::io::af_detail::Archive;
+    using pittore::io::af_detail::ArchiveEntry;
+
+    const auto expectDoc = [](const Archive& ar, const char* what, std::size_t wantEntries,
+                              const std::vector<std::uint8_t>& wantPayload) {
+        check(ar.entries.size() == wantEntries, what);
+        const ArchiveEntry* doc = ar.head("doc.dat");
+        check(doc != nullptr, "v12: doc.dat resolves");
+        if (doc) {
+            const auto plain = ar.extract(*doc);
+            check(plain == wantPayload, "v12: doc.dat payload round-trips");
+        }
+    };
+
+    // Row directory: two rows, names, tail chain, trailer.
+    {
+        const std::vector<std::uint8_t> docPayload = {'d', 'o', 'c', '!', 1, 2, 3};
+        const std::vector<std::uint8_t> tilePayload = {'t', 'i', 'l', 'e', 9, 9};
+        const auto bytes = synthRowDirectory();
+        try {
+            const Archive ar = Archive::parse(bytes);
+            check(ar.entries.size() == 2, "v12 row directory: two entries");
+            const ArchiveEntry* doc = ar.head("doc.dat");
+            check(doc != nullptr, "v12 row directory: doc.dat head");
+            if (doc) check(ar.extract(*doc) == docPayload, "v12 row directory: doc payload");
+            const ArchiveEntry* tile = ar.head("d/1");
+            check(tile != nullptr, "v12 row directory: d/1 head");
+            if (tile)
+                check(ar.extract(*tile) == tilePayload, "v12 row directory: tile payload");
+            check(ar.names.count("doc.dat") == 1 && ar.names.count("d/1") == 1,
+                  "v12 row directory: name map built");
+        } catch (const std::exception& e) {
+            std::printf("  row directory threw: %s\n", e.what());
+            check(false, "v12 row directory parses");
+        }
+    }
+
+    // Delta/checkpoint block: token skipped, serial-1 struct resolves the doc.
+    {
+        const std::vector<std::uint8_t> docPayload = {'d', 'e', 'l', 't', 'a'};
+        const auto bytes = synthDeltaBlock();
+        try {
+            const Archive ar = Archive::parse(bytes);
+            expectDoc(ar, "v12 delta: one entry", 1, docPayload);
+        } catch (const std::exception& e) {
+            std::printf("  delta block threw: %s\n", e.what());
+            check(false, "v12 delta block parses");
+        }
+    }
+
+    // Damaged newest block: dropped whole, older block still resolves.
+    {
+        const std::vector<std::uint8_t> docPayload = {'o', 'l', 'd', 'd', 'o', 'c'};
+        const auto bytes = synthDamagedChain();
+        try {
+            const Archive ar = Archive::parse(bytes);
+            check(ar.entries.size() == 1, "v12 damaged block: entries from the old block only");
+            const ArchiveEntry* doc = ar.head("doc.dat");
+            if (doc) check(doc->savepoint == 1000, "v12 damaged block: old savepoint wins");
+            expectDoc(ar, "v12 damaged block: one entry", 1, docPayload);
+        } catch (const std::exception& e) {
+            std::printf("  damaged chain threw: %s\n", e.what());
+            check(false, "v12 damaged block falls back");
+        }
+    }
+
+    // Writer round trip: the fresh-export container must parse back with the
+    // same names and payloads (the reader/writer grammar contract).
+    {
+        using pittore::io::af_detail::OutEntry;
+        using pittore::io::af_detail::writeContainer;
+        std::vector<OutEntry> entries;
+        const std::vector<std::uint8_t> docPayload = {'e', 'x', 'p', 'o', 'r', 't'};
+        const std::vector<std::uint8_t> tilePayload = {'t', 'i', 'l', 'e', '0', '1'};
+        for (const auto& p : {docPayload, tilePayload}) {
+            OutEntry e;
+            e.payload = p;
+            e.plainSize = p.size();
+            e.comp = 0;
+            e.crc = crc32Of(p);
+            entries.push_back(std::move(e));
+        }
+        entries[0].name = "doc.dat";
+        entries[1].name = "d/1";
+        const auto bytes = writeContainer(entries, {}, 1234);
+        try {
+            const Archive ar = Archive::parse(bytes);
+            check(ar.entries.size() == 2, "writer round trip: two entries");
+            const ArchiveEntry* doc = ar.head("doc.dat");
+            check(doc != nullptr && ar.extract(*doc) == docPayload,
+                  "writer round trip: doc payload");
+            const ArchiveEntry* tile = ar.head("d/1");
+            check(tile != nullptr && ar.extract(*tile) == tilePayload,
+                  "writer round trip: tile payload");
+        } catch (const std::exception& e) {
+            std::printf("  writer round trip threw: %s\n", e.what());
+            check(false, "writer round trip parses");
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -770,6 +1097,7 @@ int main() {
     testMetadataScan();
     testLayeredDecode();
     testRealFile();
+    testV12Grammar();
 
     if (failures == 0) {
         std::printf("test_af: all checks passed\n");

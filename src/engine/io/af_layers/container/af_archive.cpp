@@ -141,6 +141,8 @@ Archive Archive::parse(const std::vector<std::uint8_t>& bytes) {
     std::size_t offset = static_cast<std::size_t>(fatOffset);
     std::set<std::size_t> visited;
     std::uint32_t blocks = 0;
+    // Synthetic ids for directory entries that carry no on-disk id.
+    std::uint32_t nextSyntheticId = 0x40000000u;
     while (offset != 0) {
         if (++blocks > 10000) fail("FAT chain does not terminate");
         if (offset > bytes.size() || bytes.size() - offset < 8) fail("FAT block is truncated");
@@ -153,6 +155,185 @@ Archive Archive::parse(const std::vector<std::uint8_t>& bytes) {
             fail("bad FAT block tag " + tagName(fatTag));
         const std::uint64_t nextOffset = fc.u64();
         const std::uint64_t savepoint = fc.u64();
+        if (fatTag == letag4("#FT4")) {
+            // v12 directory (verified against real files): three informational
+            // u64s, a u64 row count, five u32 fields, then rows from +72.
+            const std::uint64_t blockEnd = fc.u64();  // end of this directory
+            fc.u64();                                 // document extent
+            fc.u64();                                 // unknown
+            const std::uint64_t rowCount = fc.u64();
+            const std::uint32_t dirSize = fc.u32();   // block length - 59
+            fc.u32();                                  // family flags
+            fc.u32();                                  // unknown
+            const std::uint32_t firstTag = fc.u32();   // first row's record tag
+            const std::uint32_t firstKind = fc.u32();  // 0 = rows; low byte = delta element kind
+
+            // Rows are [uncompressed][compressed][crc32][compression byte |
+            // payload kind u8 | u16][payload type u8][stored-bytes crc32],
+            // an optional name (1..64 printable bytes; the terminal document
+            // row may omit it), and — for every row but the last — a 13-byte
+            // tail naming the next row's record tag. Records are "#Fil" plus
+            // the compressed payload at the tag. Parse into a scratch list so
+            // a damaged table (crash leftovers) is dropped whole instead of
+            // poisoning the archive.
+            std::vector<ArchiveEntry> rows;
+            bool sane = true;
+            std::uint64_t tag = firstTag;
+            for (std::uint64_t i = 0; i < rowCount && sane; ++i) {
+                if (fc.remaining() < 29) {
+                    sane = false;
+                    break;
+                }
+                ArchiveEntry e;
+                e.savepoint = savepoint;
+                e.offset = tag;
+                e.size = fc.u64();
+                e.compressedSize = fc.u64();
+                e.crc32 = fc.u32();
+                const std::uint32_t rowFlags = fc.u32();
+                e.compression = static_cast<std::uint8_t>(rowFlags & 0xff);
+                fc.u8();   // payload kind
+                fc.u32();  // checksum of the stored bytes
+                if (fc.remaining() >= 2) {
+                    const std::size_t save = fc.pos;
+                    const std::uint16_t len = fc.u16();
+                    if (len >= 1 && len <= 64 && fc.remaining() >= len) {
+                        const std::uint8_t* nb = fc.take(len);
+                        bool printable = true;
+                        for (std::size_t k = 0; k < len; ++k)
+                            if (nb[k] < 0x20 || nb[k] > 0x7e) {
+                                printable = false;
+                                break;
+                            }
+                        if (printable)
+                            e.name = std::string(reinterpret_cast<const char*>(nb), len);
+                    }
+                    if (!e.name) fc.seek(save);
+                }
+                std::uint64_t nextTag = 0;
+                if (i + 1 < rowCount) {
+                    if (fc.remaining() < 13) {
+                        sane = false;
+                        break;
+                    }
+                    fc.u32();  // row id
+                    fc.u8();   // unknown
+                    nextTag = fc.u64();
+                }
+                rows.push_back(std::move(e));
+                tag = nextTag;
+            }
+            if (sane) {
+                // The block ends where its own directory records end: the
+                // stored end first, the derived length as a backup. What
+                // remains after the rows is a multiple of the 14-byte family
+                // summaries (c/, d/, ...).
+                std::uint64_t end = blockEnd;
+                if (end < offset || end > bytes.size()) {
+                    end = offset + dirSize + 59;
+                    if (end < offset || end > bytes.size()) end = bytes.size();
+                }
+                if (end < offset + fc.pos || (end - offset - fc.pos) % 14 != 0) sane = false;
+            }
+            if (!sane && ((firstKind & 0xff) == 1 || (firstKind & 0xff) == 2)) {
+                // Delta/checkpoint directory (tile-commit saves): after the
+                // same 64-byte header comes a sequence of [u32 serial][u8 kind]
+                // elements instead of rows. kind 2 marks an entry carried over
+                // unchanged (its metadata lives in older blocks); kind 1 is an
+                // inline struct for the entry — observed only for the document
+                // (serial 1): [off u64][uncompressed][compressed][crc32]
+                // [compression | payload kind | u16][payload type u8]
+                // [stored-bytes crc32]. Family summaries close the block
+                // exactly as in row directories. Parse into the same scratch
+                // list so a damaged block is still dropped whole.
+                rows.clear();
+                sane = true;
+                fc.seek(64);
+                std::uint64_t end = blockEnd;
+                if (end < offset || end > bytes.size()) {
+                    end = offset + dirSize + 59;
+                    if (end < offset || end > bytes.size()) end = bytes.size();
+                }
+                const std::size_t blockLen = static_cast<std::size_t>(end - offset);
+                const auto u32At = [&](std::size_t rel) {
+                    std::uint32_t v;
+                    std::memcpy(&v, bytes.data() + offset + rel, 4);
+                    return v;
+                };
+                // One or more family summaries: [u32 prefixLen][u64 counter]
+                // [prefix bytes]. Returns their exact total length, or 0 if
+                // the bytes at rel are not a run of summaries.
+                const auto trailerRun = [&](std::size_t rel) -> std::size_t {
+                    std::size_t p = rel;
+                    while (p < blockLen) {
+                        if (blockLen - p < 12) return 0;
+                        const std::uint32_t plen = u32At(p);
+                        if (plen < 1 || plen > 8 || blockLen - p < 12 + plen) return 0;
+                        for (std::uint32_t k = 0; k < plen; ++k) {
+                            const std::uint8_t ch = bytes[offset + p + 12 + k];
+                            if (ch < 0x20 || ch > 0x7e) return 0;
+                        }
+                        p += 12 + plen;
+                    }
+                    return p - rel;
+                };
+                bool closed = false;
+                while (fc.pos < blockLen) {
+                    const std::size_t rem = blockLen - fc.pos;
+                    const std::size_t run = trailerRun(fc.pos);
+                    if (run != 0 && run == rem) {
+                        closed = true;
+                        break;
+                    }
+                    if (rem < 5) {
+                        sane = false;
+                        break;
+                    }
+                    const std::uint32_t serial = fc.u32();
+                    const std::uint8_t kind = fc.u8();
+                    if (kind == 2) continue;  // token: metadata lives in older blocks
+                    if (kind != 1 || rem < 42) {
+                        sane = false;
+                        break;
+                    }
+                    ArchiveEntry e;
+                    e.savepoint = savepoint;
+                    e.offset = fc.u64();
+                    e.size = fc.u64();
+                    e.compressedSize = fc.u64();
+                    e.crc32 = fc.u32();
+                    const std::uint32_t rowFlags = fc.u32();
+                    e.compression = static_cast<std::uint8_t>(rowFlags & 0xff);
+                    fc.u8();   // payload kind
+                    fc.u32();  // checksum of the stored bytes
+                    if (serial == 1) rows.push_back(std::move(e));  // the document
+                }
+                if (!closed) sane = false;
+            }
+            for (std::size_t i = 0; sane && i < rows.size(); ++i) {
+                if (rows[i].offset + 4 > bytes.size() ||
+                    std::memcmp(bytes.data() + rows[i].offset, "#Fil", 4) != 0)
+                    sane = false;
+            }
+            if (sane) {
+                for (ArchiveEntry& e : rows) {
+                    std::optional<std::string> nm = e.name;
+                    if (!nm && (e.compression & 0x40) == 0) nm = std::string("doc.dat");
+                    auto it = nm ? a.names.find(*nm) : a.names.end();
+                    if (it != a.names.end()) {
+                        e.id = it->second;
+                    } else {
+                        e.id = nextSyntheticId++;
+                        if (nm) a.names.emplace(*nm, e.id);
+                    }
+                    e.name = nm;
+                    e.flag = 0;
+                    a.entries.push_back(std::move(e));
+                }
+            }
+            offset = static_cast<std::size_t>(nextOffset);
+            continue;
+        }
         fc.u64();  // some offset
         fc.u64();  // some length
         fc.u64();  // unknown5

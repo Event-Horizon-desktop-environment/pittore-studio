@@ -288,6 +288,9 @@ class CanvasView final : public QAbstractScrollArea {
     // and the Ruler measurement. Drawn in the overlay layer so a note/count
     // never becomes document pixels.
     void paintAnnotationOverlay(QPainter& painter, const QTransform& t);
+    // Artboard chrome: each board's hairline outline and its name above the
+    // top-left corner. View space, so the label stays legible at any zoom.
+    void paintArtboardOverlay(QPainter& painter, const QTransform& t);
     // View-space hit tests for the annotation markers (7 px tolerance). Return
     // an index, or -1.
     int samplePinAtView(const QPointF& viewPos) const;

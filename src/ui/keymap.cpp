@@ -43,6 +43,13 @@ QMap<QString, QString> defaultKeymapEntries()
     m.insert(QStringLiteral("send-backward"), QStringLiteral("Ctrl+["));
     m.insert(QStringLiteral("send-to-back"), QStringLiteral("Ctrl+Shift+["));
     m.insert(QStringLiteral("toggle-clip"), QStringLiteral("Ctrl+Alt+G"));
+    // Second clipping binding: the Photoshop-alt layout for a brush-first
+    // workflow (Alt+Shift+G), routed through the same command.
+    m.insert(QStringLiteral("toggle-clip-alt"), QStringLiteral("Alt+Shift+G"));
+    // Painting blend-mode letters (Alt+Shift+<key>); with the Move tool they
+    // set the active layer's blend mode instead.
+    m.insert(QStringLiteral("blend-multiply"), QStringLiteral("Alt+Shift+M"));
+    m.insert(QStringLiteral("blend-screen"), QStringLiteral("Alt+Shift+S"));
     m.insert(QStringLiteral("merge-down"), QStringLiteral("Ctrl+E"));
     m.insert(QStringLiteral("merge-visible"), QStringLiteral("Ctrl+Shift+E"));
     m.insert(QStringLiteral("free-transform"), QStringLiteral("Ctrl+T"));
@@ -131,6 +138,20 @@ bool keyEventMatchesShortcut(const QKeyEvent *key, const QString &seq)
     const Qt::KeyboardModifiers gotMods =
         key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
     return wantMods == gotMods && combo.key() == Qt::Key(key->key());
+}
+
+bool keyEventMatchesShortcutExact(const QKeyEvent *key, const QString &seq)
+{
+    if (!key)
+        return false;
+    const QKeySequence want(seq, QKeySequence::PortableText);
+    if (want.isEmpty() || want.count() != 1)
+        return false;
+    const QKeyCombination combo = want[0];
+    const Qt::KeyboardModifiers all = Qt::ShiftModifier | Qt::ControlModifier |
+                                       Qt::AltModifier | Qt::MetaModifier;
+    return (combo.keyboardModifiers() & all) == (key->modifiers() & all) &&
+           combo.key() == Qt::Key(key->key());
 }
 
 }

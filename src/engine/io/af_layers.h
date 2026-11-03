@@ -39,14 +39,23 @@ struct AfMask {
 struct AfLayer {
     int left = 0, top = 0;                // placed origin in document space
     std::uint32_t width = 0, height = 0;  // placed extent
-    std::uint16_t opacity = 255;          // 0..255
+    std::uint32_t opacity = 255;          // 0..255
     bool visible = true;
     bool clipped = false;
     int indent = 0;             // group nesting depth (0 = top level)
+    // Owning Designer artboard as its page index in AfLayersDoc::pages, or
+    // -1 when the layer sits outside every artboard.
+    int board = -1;
     bool isGroup = false;       // group folders (children follow, indented)
     bool groupExpanded = true;
     // Rebuilt glyphs from a text layer, not a raster. UI shows text thumb + label.
     bool isText = false;
+    // Live adjustment layer recovered from the object graph. Only Recolour
+    // is decoded today; the params use the engine's AdjustmentParams layout
+    // (hue degrees, saturation 0..1, lightness -1..1).
+    bool isAdjustment = false;
+    int adjustmentKind = 0;
+    float adjustmentParams[16] = {};
     // Live text spec for plain (unrotated) layers: double-click keeps editing
     // via fonts. False when rotated or layout failed.
     bool hasText = false;
@@ -71,7 +80,12 @@ struct AfLayer {
 // every spread: the canvas is the vertical stack of these rects with a gap.
 struct AfPage {
     double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
-    std::string source;  // "PagR", "SprB" or "DfSz"
+    std::string source;  // "PagR", "SprB", "DfSz" or "ShpB"
+    // Designer artboard pages ("ShpN" carrying "ShNR"+"AbSz"): name is the
+    // node's "Desc" label, and the rect is the artboard's own bounds under
+    // its placement transform. Non-artboard pages have an empty name.
+    std::string name;
+    bool artboard = false;
 };
 
 // Layered doc in FILE order (bottom -> top). UI reverses for its panel.

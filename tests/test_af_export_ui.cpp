@@ -374,6 +374,50 @@ static void test_stashed_pixels() {
     CHECK(stashed.deferredRgba8 == expect);
 }
 
+// Recorded leading and paragraph spacing must survive the decode -> UI copy:
+// the canvas lays live text from the UI mirror, so dropping either field
+// there reverts an .af's spacing to the natural line step.
+static void test_af_text_spec_copy() {
+    AppState state;
+    pittore::io::AfLayersDoc pd;
+    pd.width = 100;
+    pd.height = 100;
+    pittore::io::AfLayer tx;
+    tx.name = "banner";
+    tx.isText = true;
+    tx.hasText = true;
+    tx.textSpec.text = "One\n\nTwo";
+    tx.textSpec.family = pittore::text::defaultFamily();
+    tx.textSpec.size = 48;
+    tx.textSpec.emLeading = 0.8f;
+    tx.textSpec.paragraphGap = 25.0f;
+    tx.textOriginX = 10;
+    tx.textOriginY = 20;
+    pd.layers.push_back(tx);
+
+    QString error;
+    const bool opened = state.openAfLayers(QStringLiteral("txt.afdesign"), pd,
+                                           QSize(100, 100), QImage(), &error);
+    CHECK(opened);
+    if (!opened) {
+        std::fprintf(stderr, "    open error: %s\n",
+                     error.toLocal8Bit().constData());
+        return;
+    }
+    DocumentItem* re = state.activeDocument();
+    CHECK(re != nullptr);
+    if (!re) return;
+    CHECK_EQ(re->layers.size(), 1);
+    if (re->layers.isEmpty()) return;
+    const LayerItem& li = re->layers[0];
+    CHECK(li.isText);
+    CHECK(li.liveText);
+    CHECK_EQ(li.textSpec.paragraphGap, 25.0);
+    // The cached layout metrics came from the recorded step: 0.8 em of 48.
+    CHECK_NEAR(li.textLineAdvance, 38.4, 0.01);
+    CHECK_NEAR(li.textSpec.emLeading, 0.8, 1e-6);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const QString logDir =        QDir::tempPath() + QStringLiteral("/pittore-af-export-log");
@@ -383,6 +427,7 @@ int main(int argc, char** argv) {
     test_af_edit_cycle();
     test_af_save_adopts();
     test_stashed_pixels();
+    test_af_text_spec_copy();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),
                 pittore_test::failures());

@@ -497,9 +497,56 @@ void setAdjustmentDefaults(LayerItem& l) {
         l.adjustmentParams[0] = 1.0f;
         l.adjustmentParams[4] = 1.0f;
         l.adjustmentParams[8] = 1.0f;
+    } else if (k == AdjustmentKind::ToneCompression ||
+               k == AdjustmentKind::ToneStretch) {
+        l.adjustmentParams[0] = 0.2f;
+        l.adjustmentParams[1] = 0.5f;
+    } else if (k == AdjustmentKind::OCIO) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::SoftProof) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::LUT) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::Normals) {
+        l.adjustmentParams[0] = 1.0f;
+    } else if (k == AdjustmentKind::SplitToning) {
+        l.adjustmentParams[0] = 0.5f;
+        l.adjustmentParams[1] = 0.5f;
+        l.adjustmentParams[2] = 0.5f;
+        l.adjustmentParams[3] = 0.5f;
+        l.adjustmentParams[4] = 0.5f;
+        l.adjustmentParams[5] = 0.5f;
+        l.adjustmentParams[6] = 0.0f;
+        l.adjustmentParams[7] = 0.0f;
+    } else if (k == AdjustmentKind::GradientMap) {
+        // Four stops: black -> mid grey -> light grey -> white.
+        l.adjustmentParams[0] = 0.0f;
+        l.adjustmentParams[1] = 0.333f;
+        l.adjustmentParams[2] = 0.666f;
+        l.adjustmentParams[3] = 1.0f;
+        for (int i = 0; i < 4; ++i) {
+            const float v = i / 3.0f;
+            l.adjustmentParams[4 + i * 3] = v;
+            l.adjustmentParams[5 + i * 3] = v;
+            l.adjustmentParams[6 + i * 3] = v;
+        }
     } else if (k == AdjustmentKind::ColorBalance) {
         // Neutral balances, luminosity preserved (the conventional defaults).
         l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::Recolour) {
+        // The zeroed table lands on hue 0 / lightness 0 correctly, but
+        // saturation must read as 100%, not 0%: a zero default would render
+        // the layer as a flat grey duotone.
+        l.adjustmentParams[1] = 1.0f;
     }
 }
 
@@ -790,6 +837,7 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
     data.dpi = doc.dpi;
     data.colorMode = doc.colorMode;
     data.iccProfile = doc.iccProfile;
+    data.boardIdCounter = doc.boardIdCounter;
     // Background label is derived from the bottom-most realised pixel layer so
     // the start page can restate it after a reload.
     data.background = QStringLiteral("white");
@@ -831,6 +879,14 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
         meta.lockTransparency = li.lockTransparency;
         meta.clipped = li.clipped;
         meta.indent = li.indent;
+        meta.isBoard = li.isBoard();
+        if (li.isBoard()) {
+            meta.boardId = li.boardId;
+            meta.boardRect = li.boardRect;
+            meta.boardHasFill = li.boardHasFill;
+            meta.boardFill = li.boardFill;
+            meta.boardFillOpacity = li.boardFillOpacity;
+        }
         if (li.hasMask && li.mask && li.mask->width() > 0 &&
             li.mask->height() > 0) {
             meta.hasMask = true;
@@ -852,6 +908,8 @@ ProjectFileData projectDataFromDocument(const DocumentItem& doc) {
             meta.textAlign = li.textSpec.align;
             meta.textSize = li.textSpec.size;
             meta.textLineHeight = li.textSpec.lineHeight;
+            meta.textEmLeading = li.textSpec.emLeading;
+            meta.textParagraphGap = li.textSpec.paragraphGap;
             meta.textTracking = li.textSpec.tracking;
             meta.textWrapWidth = li.textSpec.wrapWidth;
             meta.textFrameHeight = li.textSpec.frameHeight;

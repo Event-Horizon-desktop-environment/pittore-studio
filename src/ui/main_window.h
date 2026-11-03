@@ -57,6 +57,11 @@ class MainWindow final : public QMainWindow {
     // Panels are created lazily; this is also what the Window menu, the
     // collapsed icon rail and the workspace presets call.
     void showPanel(const QString& id, bool show = true);
+    // Raise a panel on the left rail next to Tools, regardless of where it
+    // normally docks. Used when a dialog wants the user's eye beside the
+    // canvas (Colour Grading surfaces the Adjustments panel this way). A
+    // floating panel stays where the user put it.
+    void raisePanelOnLeft(const QString& id);
     bool panelVisible(const QString& id) const;
 
     // Headless-safe command entry for the MCP bridge and tests. Only
@@ -165,6 +170,10 @@ class MainWindow final : public QMainWindow {
     // the first press and key auto-repeat, so holding [ / ] walks the size
     // for every brush tool (issue #8). Returns true when it handled the key.
     bool handleBrushSizeKey(QKeyEvent* key);
+    // Alt+Shift+<letter> family (keymap ids toggle-clip-alt, blend-multiply,
+    // blend-screen): strict modifier match (Shift counts), then route to the
+    // clip toggle or the tool/layer blend mode. Returns true when handled.
+    bool handleBlendModeKey(QKeyEvent* key);
     // Points the import profile-mismatch resolver at the modal dialog
     // (embedded-profile mismatch workflow). Re-armed after any
     // stretch that must stay silent (session restore).

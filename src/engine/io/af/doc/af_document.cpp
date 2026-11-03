@@ -21,6 +21,35 @@
 
 namespace pittore::io {
 
+namespace {
+
+std::uint64_t u64le(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 7; i >= 0; --i) v = (v << 8) | p[i];
+    return v;
+}
+
+// End of the last v12 directory block. The saved flattened preview sits after
+// it; a PNG inside the data area is an embedded source stored in the clear
+// (a placed logo sheet can be larger than the document preview), so the two
+// regions must not compete by area.
+std::uint64_t lastDirectoryEnd(const std::vector<std::uint8_t>& data) {
+    if (data.size() < 24) return 0;
+    std::uint64_t at = u64le(data.data() + 16);
+    std::uint64_t end = 0;
+    for (int guard = 0; at != 0 && guard < 10000; ++guard) {
+        if (at + 24 > data.size()) break;
+        if (std::memcmp(data.data() + at, "#FT4", 4) != 0) break;
+        end = std::max(end, u64le(data.data() + at + 20));
+        const std::uint64_t next = u64le(data.data() + at + 4);
+        if (next == at) break;
+        at = next;
+    }
+    return end;
+}
+
+}  // namespace
+
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -80,16 +109,33 @@ std::optional<AfDocument> afDecodeDocument(const std::vector<std::uint8_t>& data
         at = found + 8;
     }
     if (!doc.previews.empty()) {
-        // Primary = highest-fidelity preview (largest pixel area), not the last.
-        // The format writes thumbnail previews last (e.g. 1024x576) while a larger
-        // render (e.g. 2559x1439) sits earlier in the archive tail.
-        std::size_t best = 0;
-        for (std::size_t i = 1; i < doc.previews.size(); ++i) {
+        // Primary = the saved flattened preview, which the format writes after
+        // the directory block. Clear-text PNGs inside the data area are placed
+        // sources, not document renders. Among tail previews the largest wins:
+        // some files carry a small thumbnail beside a larger render.
+        const std::uint64_t tailStart = lastDirectoryEnd(data);
+        std::size_t best = doc.previews.size();
+        std::uint64_t bestArea = 0;
+        for (std::size_t i = 0; i < doc.previews.size(); ++i) {
+            if (tailStart != 0 && doc.previews[i].offset < tailStart) continue;
             const std::uint64_t area =
                 std::uint64_t(doc.previews[i].width) * doc.previews[i].height;
-            const std::uint64_t bestArea =
-                std::uint64_t(doc.previews[best].width) * doc.previews[best].height;
-            if (area > bestArea) best = i;
+            if (best == doc.previews.size() || area > bestArea) {
+                best = i;
+                bestArea = area;
+            }
+        }
+        if (best == doc.previews.size()) {
+            // Older archive layouts keep no preview region after the directory;
+            // fall back to the largest embedded render.
+            best = 0;
+            for (std::size_t i = 1; i < doc.previews.size(); ++i) {
+                const std::uint64_t area =
+                    std::uint64_t(doc.previews[i].width) * doc.previews[i].height;
+                const std::uint64_t chosen =
+                    std::uint64_t(doc.previews[best].width) * doc.previews[best].height;
+                if (area > chosen) best = i;
+            }
         }
         doc.primary = best;
     }

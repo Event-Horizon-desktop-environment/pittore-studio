@@ -39,11 +39,23 @@ struct Walker {
     const Graph& g;
     AfLayersDoc& doc;
     std::string baseDir;   // directory of the .af, for linked-source resolution
-    std::unordered_map<std::string, std::optional<Bitmap>> sourceCache;
+    std::unordered_map<std::string, std::optional<Bitmap>> sourceCache{};
     // Count of enclosing groups with live masks. Group masks are stored on
     // their group rows (not baked), but a masked ancestor still means vector
     // geometry alone cannot reproduce a descendant.
     int maskedAncestors = 0;
+    // Designer artboards detected by the document walk: artboard node to its
+    // page index in doc.pages. The board-set branch in emit() toggles
+    // `boardSplit` once the document prologue qualifies the file, and tags
+    // every layer it descends into with `currentBoard` (AfLayer::board).
+    std::unordered_map<const Node*, int> boardIndex{};
+    bool boardSplit = false;
+    int currentBoard = -1;
+    // Frame-text flow: the source document links frames through the text
+    // object's `Flow.Nods` chain. Each placement leaves the not-yet-shown tail
+    // for the next frame; that frame resumes at the matching suffix of its own
+    // story copy.
+    std::unordered_map<const Node*, std::string> textFlowRemaining{};
     Mat nodeCtm(const Node* node, const Mat& parent) const;
     std::optional<Bitmap> sourceImage(const Node* bitm, std::uint32_t w, std::uint32_t h,
                                   std::string& why);
@@ -57,14 +69,14 @@ struct Walker {
     void noteSkip(const Node* node, const std::string& why);
     void applyCommon(const Node* node, AfLayer& layer);
     std::vector<AfMask> placeMasks(const Node* node, const Mat& ctm,
-                              const IntRect* pad = nullptr);
+                              const IntRect* pad = nullptr, bool quiet = false);
     // Vector-crop shapes ("ShpN") and free paths ("PCrv") nested in a
     // layer's `AdCh` list, rasterized to live coverage masks. `pad`
     // optionally widens each mask to a footprint (the photo's placed
     // rect): masks reveal outside their own rect, so an unpadded crop
     // would show the photo past its frame.
     std::vector<AfMask> cropMasks(const Node* node, const Mat& base,
-                                  const IntRect* pad = nullptr);
+                                  const IntRect* pad = nullptr, bool quiet = false);
     void finishImageLayer(const Node* node, const Mat& ctm, int indent, bool clipped,
                       const std::string& display, const std::string& irfn,
                       render::Rgba8Image img, IntRect rect, bool isText = false,
@@ -74,6 +86,7 @@ struct Walker {
     void emitFill(const Node* node, const Mat& ctm, int indent, bool clipped);
     bool emitShape(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emitText(const Node* node, const Mat& ctm, int indent, bool clipped);
+    void emitRecolour(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emit(const Node* node, const Mat& ctm, int indent, bool clipped);
 };
 

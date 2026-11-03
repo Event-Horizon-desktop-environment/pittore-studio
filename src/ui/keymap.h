@@ -17,4 +17,9 @@ bool saveKeymapEntries(const QMap<QString, QString> &entries);
 // sequences never match.
 bool keyEventMatchesShortcut(const QKeyEvent *key, const QString &seq);
 
+// Strict variant: Shift is part of the binding, so every modifier must match
+// exactly (Alt+Shift+letter blend and clipping shortcuts, where Shift is
+// meaningful). Same single-key/empty rules as above.
+bool keyEventMatchesShortcutExact(const QKeyEvent *key, const QString &seq);
+
 }

@@ -122,6 +122,10 @@ void MainWindow::buildLayerMenu() {
         state_->addAdjustmentLayer(static_cast<int>(
             pittore::compute::AdjustmentKind::ChannelMixer));
     });
+    makeAction(adjustmentLayer, tr("Recolour…"), QString(), [this] {
+        state_->addAdjustmentLayer(static_cast<int>(
+            pittore::compute::AdjustmentKind::Recolour));
+    });
     for (const QString& name :
          {tr("Color Lookup…"), tr("Invert"),
           tr("Posterize…"), tr("Threshold…"), tr("Gradient Map…"), tr("Selective Color…")})

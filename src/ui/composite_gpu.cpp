@@ -62,7 +62,10 @@ bool DocumentItem::rebuildCompositeGPU(pittore::compute::ComputeBackend& be,
         for (const CompositedLayer& e : gathered) {
             const LayerItem& l = layers[e.layerIndex];
             pittore::compute::PlacedLayer p;
-            if (e.isAdjustment) {
+            if (e.isFill) {
+                p.isFill = true;
+                p.fillColor = e.fillColor;
+            } else if (e.isAdjustment) {
                 p.isAdjustment = true;
                 p.adjKind = e.adjKind;
                 for (int k = 0; k < 16; ++k) p.adjP[k] = e.adjP[k];
@@ -269,7 +272,10 @@ bool DocumentItem::renderRegionGPU(pittore::compute::ComputeBackend& be,
         for (const CompositedLayer& e : gathered) {
             const LayerItem& l = layers[e.layerIndex];
             pittore::compute::PlacedLayer p;
-            if (e.isAdjustment) {
+            if (e.isFill) {
+                p.isFill = true;
+                p.fillColor = e.fillColor;
+            } else if (e.isAdjustment) {
                 p.isAdjustment = true;
                 p.adjKind = e.adjKind;
                 for (int k = 0; k < 16; ++k) p.adjP[k] = e.adjP[k];
