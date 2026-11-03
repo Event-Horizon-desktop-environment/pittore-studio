@@ -69,6 +69,8 @@ void PersonaManager::apply(Persona p) {
             panelsCaptured_.insert(static_cast<int>(p), true);
         };
         if (p == Persona::Pixel) {
+            // Adjustments belong to the Colour persona only.
+            showPanel_(QStringLiteral("adjustments"), false);
             const QStringList restore =
                 !capturedPanels_.value(static_cast<int>(previous_)).isEmpty()
                     ? capturedPanels_.value(static_cast<int>(previous_))

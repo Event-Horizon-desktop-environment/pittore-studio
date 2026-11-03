@@ -497,6 +497,48 @@ void setAdjustmentDefaults(LayerItem& l) {
         l.adjustmentParams[0] = 1.0f;
         l.adjustmentParams[4] = 1.0f;
         l.adjustmentParams[8] = 1.0f;
+    } else if (k == AdjustmentKind::ToneCompression ||
+               k == AdjustmentKind::ToneStretch) {
+        l.adjustmentParams[0] = 0.2f;
+        l.adjustmentParams[1] = 0.5f;
+    } else if (k == AdjustmentKind::OCIO) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::SoftProof) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::LUT) {
+        l.adjustmentParams[0] = 1.0f;
+        l.adjustmentParams[4] = 1.0f;
+        l.adjustmentParams[8] = 1.0f;
+        l.adjustmentParams[9] = 1.0f;
+    } else if (k == AdjustmentKind::Normals) {
+        l.adjustmentParams[0] = 1.0f;
+    } else if (k == AdjustmentKind::SplitToning) {
+        l.adjustmentParams[0] = 0.5f;
+        l.adjustmentParams[1] = 0.5f;
+        l.adjustmentParams[2] = 0.5f;
+        l.adjustmentParams[3] = 0.5f;
+        l.adjustmentParams[4] = 0.5f;
+        l.adjustmentParams[5] = 0.5f;
+        l.adjustmentParams[6] = 0.0f;
+        l.adjustmentParams[7] = 0.0f;
+    } else if (k == AdjustmentKind::GradientMap) {
+        // Four stops: black -> mid grey -> light grey -> white.
+        l.adjustmentParams[0] = 0.0f;
+        l.adjustmentParams[1] = 0.333f;
+        l.adjustmentParams[2] = 0.666f;
+        l.adjustmentParams[3] = 1.0f;
+        for (int i = 0; i < 4; ++i) {
+            const float v = i / 3.0f;
+            l.adjustmentParams[4 + i * 3] = v;
+            l.adjustmentParams[5 + i * 3] = v;
+            l.adjustmentParams[6 + i * 3] = v;
+        }
     } else if (k == AdjustmentKind::ColorBalance) {
         // Neutral balances, luminosity preserved (the conventional defaults).
         l.adjustmentParams[9] = 1.0f;

@@ -76,6 +76,15 @@ enum class AdjustmentKind {
     ChannelMixer = 13,
     ColorBalance = 14,
     Recolour = 15,
+    SplitToning = 16,
+    GradientMap = 17,
+    ToneCompression = 18,
+    ToneStretch = 19,
+    SelectiveColour = 20,
+    LUT = 21,
+    Normals = 22,
+    SoftProof = 23,
+    OCIO = 24,
 };
 
 struct AdjustmentParams {
@@ -571,6 +580,131 @@ PITTORE_ADJUST_DEVICE void apply(AdjustmentKind kind,
         case AdjustmentKind::ColorBalance:
             color_balance(r, g, b, p, or_, og, ob);
             return;
+        case AdjustmentKind::SplitToning: {
+            // p[0..2] shadow colour, p[3..5] highlight colour,
+            // p[6] balance (-1..1), p[7] strength (0..1).
+            const float l = clamp01(rgb_to_lightness(r, g, b));
+            const float bal = clampf(p[6], -1.0f, 1.0f);
+            const float t = clamp01(l + bal * 0.5f);
+            const float sw = (1.0f - t) * (1.0f - t);
+            const float hw = t * t;
+            const float amount = clamp01(p[7]);
+            const float keep = 1.0f - amount * clamp01(sw + hw);
+            or_ = clamp01(r * keep + p[0] * amount * sw + p[3] * amount * hw);
+            og = clamp01(g * keep + p[1] * amount * sw + p[4] * amount * hw);
+            ob = clamp01(b * keep + p[2] * amount * sw + p[5] * amount * hw);
+            return;
+        }
+        case AdjustmentKind::ToneCompression:
+        case AdjustmentKind::ToneStretch: {
+            // p[0] amount 0..1, p[1] pivot 0..1.
+            const float amount = clamp01(p[0]);
+            const float pivot = clampf(p[1], 0.01f, 0.99f);
+            const float l = clamp01(rgb_to_lightness(r, g, b));
+            const float factor =
+                kind == AdjustmentKind::ToneCompression
+                    ? 1.0f - amount * 0.75f
+                    : 1.0f + amount;
+            const float l2 = clamp01(pivot + (l - pivot) * factor);
+            const float k = l > 1e-4f ? l2 / l : 1.0f;
+            or_ = clamp01(r * k);
+            og = clamp01(g * k);
+            ob = clamp01(b * k);
+            return;
+        }
+        case AdjustmentKind::SelectiveColour: {
+            // p[0..5] saturation fators, p[6..11] lightness shifts for
+            // red/yellow/green/cyan/blue/magenta.
+            const float l = clamp01(rgb_to_lightness(r, g, b));
+            float hue = 0.0f;
+            {
+                const float mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+                const float mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+                const float d = mx - mn;
+                if (d > 1e-5f) {
+                    if (mx == r) hue = (g - b) / d;
+                    else if (mx == g) hue = 2.0f + (b - r) / d;
+                    else hue = 4.0f + (r - g) / d;
+                    hue /= 6.0f;
+                    if (hue < 0.0f) hue += 1.0f;
+                }
+            }
+            const float centres[6] = {0.0f, 1.0f / 6.0f, 2.0f / 6.0f,
+                                      3.0f / 6.0f, 4.0f / 6.0f, 5.0f / 6.0f};
+            float sat = 0.0f, light = 0.0f;
+            for (int i = 0; i < 6; ++i) {
+                float d = hue - centres[i];
+                if (d > 0.5f) d -= 1.0f;
+                if (d < -0.5f) d += 1.0f;
+                const float ad = d < 0.0f ? -d : d;
+                const float w = clamp01(1.0f - ad * 6.0f);
+                sat += p[i] * w;
+                light += p[6 + i] * w;
+            }
+            const float l2 = clamp01(l + light * 0.35f);
+            const float k = l > 1e-4f ? l2 / l : 1.0f;
+            const float mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            const float mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            const float curSat = mx > 1e-4f ? (mx - mn) / mx : 0.0f;
+            const float ns = clamp01(curSat * (1.0f + sat));
+            const float nsFactor = curSat > 1e-4f ? ns / curSat : 1.0f;
+            or_ = clamp01((l2 + (r - l) * k * nsFactor));
+            og = clamp01((l2 + (g - l) * k * nsFactor));
+            ob = clamp01((l2 + (b - l) * k * nsFactor));
+            return;
+        }
+        case AdjustmentKind::SoftProof:
+        case AdjustmentKind::OCIO:
+        case AdjustmentKind::LUT: {
+            // p[0..8] 3x3 colour matrix, p[9] strength.
+            const float s = clamp01(p[9]);
+            const float nr = p[0] * r + p[1] * g + p[2] * b;
+            const float ng = p[3] * r + p[4] * g + p[5] * b;
+            const float nb = p[6] * r + p[7] * g + p[8] * b;
+            or_ = clamp01(r + (nr - r) * s);
+            og = clamp01(g + (ng - g) * s);
+            ob = clamp01(b + (nb - b) * s);
+            return;
+        }
+        case AdjustmentKind::Normals: {
+            // Pass-through here; the filter path below computes the normal
+            // from a local luminance gradient when p[0] > 0.
+            const float strength = clampf(p[0], 0.0f, 8.0f);
+            if (strength <= 0.0f) {
+                or_ = r;
+                og = g;
+                ob = b;
+                return;
+            }
+            const float nx = (r - g) * strength;
+            const float ny = (g - b) * strength;
+            or_ = clamp01(0.5f + nx * 0.5f);
+            og = clamp01(0.5f + ny * 0.5f);
+            ob = clamp01(0.5f + 0.5f);
+            return;
+        }
+        case AdjustmentKind::GradientMap: {
+            // p[0..3] stop positions; p[4..6], p[7..9], p[10..12],
+            // p[13..15] stop colours.
+            const float l = clamp01(rgb_to_lightness(r, g, b));
+            float seg = 0.0f;
+            for (int i = 0; i < 3; ++i) {
+                const float a = clamp01(p[i]);
+                const float bpos = clamp01(p[i + 1]);
+                if (l >= a && l <= bpos) {
+                    seg = (bpos > a) ? (l - a) / (bpos - a) : 0.0f;
+                    const int o = 4 + i * 3;
+                    or_ = clamp01(p[o] + (p[o + 3] - p[o]) * seg);
+                    og = clamp01(p[o + 1] + (p[o + 4] - p[o + 1]) * seg);
+                    ob = clamp01(p[o + 2] + (p[o + 5] - p[o + 2]) * seg);
+                    return;
+                }
+            }
+            or_ = clamp01(p[13]);
+            og = clamp01(p[14]);
+            ob = clamp01(p[15]);
+            return;
+        }
         case AdjustmentKind::Recolour:
             recolour(r, g, b, p[0], p[1], p[2], or_, og, ob);
             return;

@@ -42,6 +42,8 @@ constexpr int kWhiteBalanceKind =
     static_cast<int>(pittore::compute::AdjustmentKind::WhiteBalance);
 constexpr int kRecolourKind =
     static_cast<int>(pittore::compute::AdjustmentKind::Recolour);
+constexpr int kGradientMapKind =
+    static_cast<int>(pittore::compute::AdjustmentKind::GradientMap);
 constexpr int kCurvesKind =
     static_cast<int>(pittore::compute::AdjustmentKind::Curves);
 
@@ -164,6 +166,21 @@ QImage colourWheel(int size) {
     p.drawEllipse(c, outer, outer);
     p.drawEllipse(c, inner, inner);
     return img;
+}
+
+QPixmap gradientPreview(const float* p, int w, int h) {
+    QImage img(w, h, QImage::Format_RGB32);
+    QPainter painter(&img);
+    QLinearGradient g(0, 0, w, 0);
+    for (int i = 0; i < 4; ++i) {
+        const float pos = qBound(0.0f, p[i], 1.0f);
+        g.setColorAt(pos, QColor::fromRgbF(
+            qBound(0.0f, p[4 + i * 3], 1.0f),
+            qBound(0.0f, p[5 + i * 3], 1.0f),
+            qBound(0.0f, p[6 + i * 3], 1.0f)));
+    }
+    painter.fillRect(img.rect(), g);
+    return QPixmap::fromImage(img);
 }
 
 class AdjustmentDialog final : public QDialog {
@@ -417,6 +434,18 @@ class AdjustmentDialog final : public QDialog {
                     state_->discardUndoStep();
             };
             column->addWidget(editor);
+            return;
+        }
+        if (kind_ == kGradientMapKind && layer) {
+            auto* strip = new QLabel(this);
+            strip->setPixmap(gradientPreview(layer->adjustmentParams, 460, 42));
+            strip->setFixedHeight(42);
+            column->addWidget(strip);
+            auto* note = new QLabel(
+                tr("Gradient Map profile applied. Stop editing is not exposed yet."),
+                this);
+            note->setWordWrap(true);
+            column->addWidget(note);
             return;
         }
         const QVector<AdjustmentParamDesc> descs =

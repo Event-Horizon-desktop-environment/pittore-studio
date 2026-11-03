@@ -127,6 +127,69 @@ const AdjustmentPreset kThreshold[] = {
     {"Lightness Contrast Curve", {0.5f}},
 };
 
+const AdjustmentPreset kToneCompression[] = {
+    {"(Default)", {0.2f, 0.5f}},
+    {"Balanced", {0.25f, 0.5f}},
+    {"Vibrant Sunset", {0.30f, 0.55f}},
+    {"Colourful", {0.35f, 0.5f}},
+    {"Punchy 3D Render", {0.40f, 0.45f}},
+    {"Maximum Range", {0.55f, 0.5f}},
+    {"Colour & Contrast", {0.30f, 0.4f}},
+    {"Dark & Moody", {0.45f, 0.35f}},
+    {"Bright & Muted", {0.25f, 0.65f}},
+};
+
+const AdjustmentPreset kToneStretch[] = {
+    {"(Default)", {0.2f, 0.5f}},
+    {"Soft", {0.15f, 0.5f}},
+    {"Strong", {0.45f, 0.5f}},
+    {"Inspection", {0.70f, 0.5f}},
+};
+
+const AdjustmentPreset kSelectiveColour[] = {
+    {"(Default)", {0,0,0,0,0,0, 0,0,0,0,0,0}},
+    {"Golden Reds", {0.35f,0,0,0,0,0, 0.10f,0,0,0,0,0}},
+    {"Golden Yellows", {0,0.40f,0,0,0,0, 0,0.12f,0,0,0,0}},
+    {"Punchy Cyans", {0,0,0,0.50f,0,0, 0,0,0,0.10f,0,0}},
+    {"Punchy Blues", {0,0,0,0,0.50f,0, 0,0,0,0,0.10f,0}},
+    {"Autumnal", {0.20f,0.25f,-0.30f,0,0,0, 0.08f,0.10f,-0.10f,0,0,0}},
+    {"Blue Cast", {0,0,0,0.15f,0.25f,0, 0,0,0,0,0.08f,0}},
+    {"Redden Foliage", {0.20f,0,-0.20f,0,0,0, 0.05f,0,-0.10f,0,0,0}},
+    {"Neon Dreams", {0.35f,0.35f,0.35f,0.35f,0.35f,0.35f, 0.10f,0.10f,0.10f,0.10f,0.10f,0.10f}},
+};
+
+const AdjustmentPreset kSoftProof[] = {
+    {"(Default)", {1,0,0, 0,1,0, 0,0,1, 0}},
+    {"Coated FOGRA27", {0.95f,0.03f,0.0f, 0.02f,0.94f,0.02f, 0.0f,0.03f,0.90f, 1}},
+    {"Euroscale Coated v2", {0.92f,0.04f,0.02f, 0.03f,0.90f,0.05f, 0.02f,0.06f,0.88f, 1}},
+    {"Greyscale D50", {0.30f,0.59f,0.11f, 0.30f,0.59f,0.11f, 0.30f,0.59f,0.11f, 1}},
+};
+
+const AdjustmentPreset kLut[] = {
+    {"(Default)", {1,0,0, 0,1,0, 0,0,1, 1}},
+    {"Deuteranope (Simulate)", {0.625f,0.375f,0, 0.70f,0.30f,0, 0,0.30f,0.70f, 1}},
+    {"Protanope (Simulate)", {0.567f,0.433f,0, 0.558f,0.442f,0, 0,0.242f,0.758f, 1}},
+    {"Tritanope (Simulate)", {0.95f,0.05f,0, 0,0.433f,0.567f, 0,0.475f,0.525f, 1}},
+    {"Deuteranope (Daltonize)", {1.0f,0.25f,0, 0.20f,1.10f,0, 0,0.20f,1.05f, 1}},
+    {"Protanope (Daltonize)", {1.10f,0.15f,0, 0.25f,0.95f,0, 0,0.15f,1.10f, 1}},
+    {"Tritanope (Daltonize)", {1.05f,0,0.10f, 0,1.0f,0.15f, 0.10f,0.15f,1.0f, 1}},
+};
+
+// Gradient Map: four stop positions, then four RGB stop colours.
+const AdjustmentPreset kGradientMap[] = {
+    {"(Default)", {0, 0.333f, 0.666f, 1, 0,0,0, 0.333f,0.333f,0.333f, 0.666f,0.666f,0.666f, 1,1,1}},
+    {"Ultra Violet", {0, 0.333f, 0.666f, 1, 0.05f,0,0.10f, 0.30f,0,0.50f, 0.80f,0.20f,0.90f, 1.0f,0.80f,1.0f}},
+    {"Nuclear", {0, 0.333f, 0.666f, 1, 0.01f,0.02f,0.0f, 0.05f,0.35f,0.05f, 0.55f,0.85f,0.05f, 1.0f,0.95f,0.30f}},
+    {"Tritone Posterisation", {0, 0.333f, 0.666f, 1, 0.03f,0.05f,0.15f, 0.55f,0.20f,0.10f, 0.90f,0.60f,0.25f, 1.0f,0.92f,0.75f}},
+    {"Duotone Posterisation", {0, 0.333f, 0.666f, 1, 0.02f,0.02f,0.02f, 0.20f,0.10f,0.05f, 0.65f,0.35f,0.15f, 0.95f,0.75f,0.45f}},
+    {"Pastel", {0, 0.333f, 0.666f, 1, 0.60f,0.75f,0.95f, 0.85f,0.75f,0.90f, 0.95f,0.80f,0.75f, 1.0f,0.95f,0.85f}},
+    {"OOC Infrared", {0, 0.333f, 0.666f, 1, 0.10f,0.0f,0.05f, 0.55f,0.0f,0.25f, 0.95f,0.20f,0.45f, 1.0f,0.85f,0.85f}},
+    {"Dreamy Haze", {0, 0.333f, 0.666f, 1, 0.05f,0.10f,0.25f, 0.35f,0.30f,0.55f, 0.75f,0.60f,0.65f, 1.0f,0.88f,0.75f}},
+    {"Smooth", {0, 0.333f, 0.666f, 1, 0.0f,0.0f,0.0f, 0.25f,0.25f,0.25f, 0.70f,0.70f,0.70f, 1.0f,1.0f,1.0f}},
+    {"Murky", {0, 0.333f, 0.666f, 1, 0.08f,0.07f,0.05f, 0.25f,0.24f,0.16f, 0.50f,0.50f,0.42f, 0.75f,0.75f,0.70f}},
+    {"Bleached", {0, 0.333f, 0.666f, 1, 0.05f,0.04f,0.03f, 0.35f,0.30f,0.22f, 0.75f,0.70f,0.55f, 1.0f,0.98f,0.92f}},
+};
+
 // Channel Mixer: 3x3 output matrix, three constants, monochrome flag.
 const AdjustmentPreset kChannelMixer[] = {
     {"(Default)", {1,0,0, 0,1,0, 0,0,1, 0,0,0, 0}},
@@ -234,6 +297,24 @@ const AdjustmentPreset* adjustmentPresets(int kind, int* count) {
         case AdjustmentKind::PhotoFilter:
             if (count) *count = int(sizeof(kPhotoFilter) / sizeof(kPhotoFilter[0]));
             return kPhotoFilter;
+        case AdjustmentKind::GradientMap:
+            if (count) *count = int(sizeof(kGradientMap) / sizeof(kGradientMap[0]));
+            return kGradientMap;
+        case AdjustmentKind::ToneCompression:
+            if (count) *count = int(sizeof(kToneCompression) / sizeof(kToneCompression[0]));
+            return kToneCompression;
+        case AdjustmentKind::ToneStretch:
+            if (count) *count = int(sizeof(kToneStretch) / sizeof(kToneStretch[0]));
+            return kToneStretch;
+        case AdjustmentKind::SelectiveColour:
+            if (count) *count = int(sizeof(kSelectiveColour) / sizeof(kSelectiveColour[0]));
+            return kSelectiveColour;
+        case AdjustmentKind::LUT:
+            if (count) *count = int(sizeof(kLut) / sizeof(kLut[0]));
+            return kLut;
+        case AdjustmentKind::SoftProof:
+            if (count) *count = int(sizeof(kSoftProof) / sizeof(kSoftProof[0]));
+            return kSoftProof;
         default:
             break;
     }

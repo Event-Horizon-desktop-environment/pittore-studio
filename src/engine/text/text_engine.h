@@ -17,7 +17,7 @@
 namespace pittore::text {
 
 // Horizontal alignment of wrapped lines.
-enum class Align { Left, Center, Right };
+enum class Align { Left, Center, Right, Justify };
 
 // OpenType features the engine can switch on, one bit per tag. They map
 // directly onto the Typography section of the Character panel.
@@ -52,6 +52,29 @@ struct TextSpec {
     // a paragraph break ('\v' in `text`), not after an ordinary '\n'.
     float emLeading = 0.0f;     // line advance as a fraction of the em size
     float paragraphGap = 0.0f;  // distance between paragraphs, in px
+    // Paragraph-panel indents and spacing, in pixels.
+    float indentStart = 0.0f;
+    float indentEnd = 0.0f;
+    float firstLineIndent = 0.0f;
+    float spaceBefore = 0.0f;
+    float spaceAfter = 0.0f;
+    // Frame insets and vertical alignment (frame text only).
+    float insetLeft = 0.0f;
+    float insetRight = 0.0f;
+    float insetTop = 0.0f;
+    float insetBottom = 0.0f;
+    int verticalAlign = 0;  // 0 top, 1 centre, 2 bottom
+    float frameHeight = 0.0f;
+    int columns = 1;
+    float columnGutter = 0.0f;
+    bool autoFit = false;
+    float tabInterval = 48.0f;  // default distance between tab stops, px
+    bool noBreak = false;
+    bool hyphenate = false;
+    int listType = 0;      // 0 none, 1 bullet, 2 numbered
+    int listStart = 1;
+    float listIndent = 24.0f;
+    bool keepLinesTogether = false;
     float tracking = 0.0f;    // extra spacing between characters, in pixels
     std::optional<float> wrapWidth;  // px; nullopt never wraps
 
@@ -72,6 +95,9 @@ struct TextSpec {
     float baselineShift = 0.0f;
     float hScale = 1.0f;
     float vScale = 1.0f;
+    float rotation = 0.0f;  // radians, clockwise (y-down)
+    float shear = 0.0f;     // x shear factor: x' = x + shear*y
+    std::string language = "en";
     // Synthetic super/subscript: -1 subscript, +1 superscript (shrinks the
     // glyphs and shifts the baseline, unlike the real `sups`/`subs` features).
     int superSub = 0;

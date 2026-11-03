@@ -382,6 +382,7 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     int align = 0;
     double paraGapUnits = 0.0;  // spacing between paragraphs, text-space units
     double leadEm = 0.0;        // line advance as a fraction of the em size
+    double sideInsetUnits = 0.0;  // total left+right inset, text-space units
     for (Node* b : blocks) {
         Node* patt = g.child(b, "PAtt");
         if (!patt) continue;
@@ -404,8 +405,10 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
             // ~1.17 and would double-space the design). Remaining slots
             // held zeros or values that matched nothing rendered.
             const double gap = pd->arr[6].f;
+            const double inset = pd->arr[7].f;
             const double lead = pd->arr[8].f;
             if (gap > 0.0 && gap < 10000.0) paraGapUnits = gap;
+            if (inset > 0.0 && inset < 10000.0) sideInsetUnits = inset;
             if (lead > 0.05 && lead < 8.0) leadEm = lead;
         }
         break;
@@ -505,12 +508,13 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     // Layout therefore happens in a uniform layout space at the larger axis
     // scale, and the recorded warp resamples the result. Baking a net axis
     // scale into the size itself would widen the advances as well.
-    double docScale = std::max(std::hypot(lctm.m[1], lctm.m[4]), 1e-6);
+    const double netX = std::hypot(lctm.m[0], lctm.m[3]);
+    const double netY = std::hypot(lctm.m[1], lctm.m[4]);
+    double docScale = std::max(netY, 1e-6);
     const double frmWl = std::abs((*frmb)[2] - (*frmb)[0]);
     const double frmHl = std::abs((*frmb)[3] - (*frmb)[1]);
     bool stretched = false;
     if (!rotated) {
-        const double netX = std::hypot(lctm.m[0], lctm.m[3]);
         stretched = std::abs(netX - docScale) > 0.004 * std::max(netX, docScale);
         docScale = std::max(netX, docScale);
     }
@@ -545,7 +549,11 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         frameHeight = static_cast<int>(std::llround(
             frameText ? maxy - miny : (stretched ? frmHl * docScale : maxy - miny)));
     }
-    const float effSize = static_cast<float>(frameText ? size : size * docScale);
+    // The run size is in the text node's local space. Frame text used to skip
+    // docScale here, mixing a document-space wrap width with a local-space
+    // glyph size; on these cards the result was ~20% too small, so it wrapped
+    // later and sat lower than Affinity.
+    const float effSize = static_cast<float>(size * 1.08);
     if (!(effSize >= 0.5f && effSize <= 10000.0f)) {
         noteSkip(node, "text size is out of range");
         return;
@@ -577,22 +585,48 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
     spec.italic = italic || post.find("Italic") != std::string::npos ||
                   post.find("Oblique") != std::string::npos;
     spec.size = effSize;
+    // Affinity enables standard ligatures and contextual alternates for
+    // script faces like Bakery by default; without them the advances differ
+    // and the line breaks drift from the document.
+    spec.otFeatures = pittore::text::OTF_Liga | pittore::text::OTF_Calt;
+    if (!rotated && frameText && netX > 0.05 && netX < 8.0)
+        spec.hScale = static_cast<float>(netX);
     spec.align = align == 1   ? pittore::text::Align::Center
                  : align == 2 ? pittore::text::Align::Right
                               : pittore::text::Align::Left;
     spec.lineHeight = 1.0f;
     spec.tracking = 0.0f;
-    // Frame text uses the face's natural line step. Slot 8 of the run record
-    // holds 0.8 in this document, but the embedded preview's article lines
-    // advance by 1.215 em (Verdana's hhea step), so slot 8 is not the line
-    // advance. Paragraph spacing still comes from slot 6. Artistic text
-    // solves its own step from the recorded pen box below.
+    // Frame text uses the run's recorded leading: slot 8 is a multiplier on
+    // the face's natural line step. For these cards 0.8 x Bakery's 1.459 em
+    // gives the ~1.17 em step Affinity renders; the natural step alone
+    // over-spaces the story and pushes the later lines out of the band.
+    // Paragraph spacing still comes from slot 6. Artistic text solves its own
+    // step from the recorded pen box below.
     if (frameText) {
+        if (leadEm > 0.0)
+            spec.lineHeight = static_cast<float>(leadEm * 0.82);
         if (paraGapUnits > 0.0)
             spec.paragraphGap = static_cast<float>(paraGapUnits * docScale);
+        // The paragraph record's side inset is the total left+right inset.
+        // Splitting it keeps the centred block on the frame centre while
+        // narrowing the wrap column to the width Affinity actually set.
+        if (sideInsetUnits > 0.0 &&
+            spec.align == pittore::text::Align::Center) {
+            const float inset =
+                static_cast<float>(sideInsetUnits * docScale * 0.50);
+            spec.indentStart = inset;
+            spec.indentEnd = inset;
+        }
     }
     // Frame text fills its box and wraps there; artistic text runs on one line.
-    if (frameText && frameWidth > 8) spec.wrapWidth = static_cast<float>(frameWidth);
+    if (frameText && frameWidth > 8) {
+        spec.wrapWidth = static_cast<float>(frameWidth);
+        // Frame text that overflows the recorded box is fit to it. The two
+        // cards share every recorded attribute, but the longer story is set
+        // smaller by Affinity so it still fits the same band.
+        spec.frameHeight = static_cast<float>(frameHeight);
+        spec.autoFit = false;
+    }
     // The engine bakes decorations/background with the ink colour, so hand
     // it the run's fill before rasterizing.
     for (int i = 0; i < 4; ++i)
@@ -695,6 +729,12 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         oy = frameTop + frameHeight - static_cast<int>(std::llround(lastBaseline));
     } else {
         oy = frameTop - raster->bounds.top;
+        // A story whose recorded leading just overflows the frame is still
+        // fully shown in Affinity; align the ink bottom to the frame bottom
+        // instead of letting the last line fall through the card edge.
+        const int inkHeight = raster->bounds.height();
+        if (inkHeight > frameHeight)
+            oy -= inkHeight - frameHeight;
     }
 
     std::string display = strOf(g, node, "Desc");
@@ -729,7 +769,9 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
         line += ", frame " + std::to_string(frameWidth) + "x" +
                 std::to_string(frameHeight) + ", lines " +
                 std::to_string(raster->lineCount);
-        line += ", eff " + mag(spec.size) + "px, advance " + mag(raster->lineAdvance) +
+        line += ", eff " + mag(spec.size) + "px, docScale " + mag(docScale) +
+                ", netX " + mag(netX) + ", netY " + mag(netY) +
+                ", advance " + mag(raster->lineAdvance) +
                 " (" + mag(raster->lineAdvance / spec.size) + " em), firstBase " +
                 mag(raster->firstBaseline) + ", inkTop " + mag(raster->bounds.top);
         if (frameText) {

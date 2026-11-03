@@ -362,6 +362,17 @@ void test_decorations_only_paint_when_enabled() {
     if (a) CHECK(a->colorRgba.empty());
 }
 
+void test_hyphenation_splits_a_long_word() {
+    TextSpec s = base("extraordinary");
+    s.size = 48.0f;
+    s.wrapWidth = 120.0f;
+    s.hyphenate = true;
+    const auto laid = layoutText(s);
+    CHECK(laid.has_value());
+    if (!laid) return;
+    CHECK(laid->lines.size() >= 2);
+}
+
 void run() {
     test_family_discovery();
     test_family_names_listed();
@@ -387,6 +398,7 @@ void run() {
     test_underline_and_strike_extend_bounds();
     test_background_box_sizes_and_paints();
     test_decorations_only_paint_when_enabled();
+    test_hyphenation_splits_a_long_word();
 }
 
 }  // namespace

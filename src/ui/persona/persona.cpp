@@ -197,7 +197,7 @@ QStringList pixelOnlyPanels() {
 QStringList pixelFallbackPanels() {
     // Mirrors the Essentials preset in workspace.cpp.
     return {QStringLiteral("color"), QStringLiteral("swatches"),
-            QStringLiteral("properties"), QStringLiteral("adjustments"),
+            QStringLiteral("properties"),
             QStringLiteral("layers"), QStringLiteral("channels"),
             QStringLiteral("paths")};
 }

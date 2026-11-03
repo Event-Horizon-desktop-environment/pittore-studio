@@ -103,6 +103,27 @@ struct TextItem {
     double emLeading = 0.0;  // > 0 = line advance as an em fraction, replaces
                              // the natural step entirely
     double paragraphGap = 0.0;  // distance after every paragraph break, px
+    // Paragraph-panel indents/spacing, in document pixels.
+    double indentStart = 0.0;
+    double indentEnd = 0.0;
+    double firstLineIndent = 0.0;
+    double spaceBefore = 0.0;
+    double spaceAfter = 0.0;
+    double insetLeft = 0.0;
+    double insetRight = 0.0;
+    double insetTop = 0.0;
+    double insetBottom = 0.0;
+    int verticalAlign = 0;  // 0 top, 1 centre, 2 bottom
+    int columns = 1;
+    double columnGutter = 0.0;
+    bool autoFit = false;
+    double tabInterval = 48.0;
+    bool noBreak = false;
+    bool hyphenate = false;
+    int listType = 0;
+    int listStart = 1;
+    double listIndent = 24.0;
+    bool keepLinesTogether = false;
     double tracking = 0.0;   // extra spacing per character, document pixels
     double wrapWidth = 0.0;  // > 0 = frame text that reflows, 0 = artistic
     double frameHeight = 0.0;  // frame text box height (overlay only)
@@ -120,6 +141,9 @@ struct TextItem {
     double baselineShift = 0.0;  // document pixels, positive = up
     double hScale = 100.0;       // percent; 100 = natural width
     double vScale = 100.0;       // percent; 100 = natural height
+    double rotation = 0.0;       // degrees, clockwise
+    double shear = 0.0;          // degrees
+    QString language = QStringLiteral("en");
     int superSub = 0;            // -1 subscript, 0 none, +1 superscript
     bool allCaps = false;
     bool kerning = true;

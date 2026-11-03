@@ -200,11 +200,16 @@ class CharacterPanel final : public QWidget {
         superSub_->addItem(tr("Subscript"), -1);
         posForm->addRow(tr("Position"), superSub_);
 
+        rotation_ = new QDoubleSpinBox(body);
+        rotation_->setRange(-3600, 3600);
+        rotation_->setDecimals(1);
+        rotation_->setSuffix(QStringLiteral(" \u00B0"));
+        posForm->addRow(tr("Rotation"), rotation_);
+
         shear_ = new QDoubleSpinBox(body);
         shear_->setRange(-89, 89);
+        shear_->setDecimals(1);
         shear_->setSuffix(QStringLiteral(" \u00B0"));
-        shear_->setEnabled(false);
-        shear_->setToolTip(tr("Shear is not available yet."));
         posForm->addRow(tr("Shear"), shear_);
 
         noBreak_ = new QCheckBox(tr("No break"), body);
@@ -253,11 +258,21 @@ class CharacterPanel final : public QWidget {
 
         // --- language ------------------------------------------------------
         column->addWidget(sectionLabel(tr("Language"), state_, body));
-        auto* language = new QComboBox(body);
-        language->addItem(tr("English (Default)"));
-        language->setEnabled(false);
-        language->setToolTip(tr("Language-specific shaping is not available yet."));
-        column->addWidget(language);
+        language_ = new QComboBox(body);
+        const std::pair<const char*, const char*> langs[] = {
+            {"en", "English"},   {"en-GB", "English (UK)"},
+            {"en-US", "English (US)"}, {"de", "German"},
+            {"fr", "French"},    {"es", "Spanish"},
+            {"it", "Italian"},   {"pt", "Portuguese"},
+            {"nl", "Dutch"},     {"sv", "Swedish"},
+            {"pl", "Polish"},    {"cs", "Czech"},
+            {"ru", "Russian"},   {"ja", "Japanese"},
+            {"zh", "Chinese"},   {"ko", "Korean"},
+            {"ar", "Arabic"},    {"he", "Hebrew"},
+        };
+        for (const auto& l : langs)
+            language_->addItem(tr(l.second), QString::fromLatin1(l.first));
+        column->addWidget(language_);
         column->addStretch(1);
 
         // Stable object names so tests can drive the panel.
@@ -276,6 +291,9 @@ class CharacterPanel final : public QWidget {
         baseline_->setObjectName(QStringLiteral("character.baseline"));
         hScale_->setObjectName(QStringLiteral("character.hScale"));
         vScale_->setObjectName(QStringLiteral("character.vScale"));
+        rotation_->setObjectName(QStringLiteral("character.rotation"));
+        shear_->setObjectName(QStringLiteral("character.shear"));
+        language_->setObjectName(QStringLiteral("character.language"));
         superSub_->setObjectName(QStringLiteral("character.superSub"));
         allCaps_->setObjectName(QStringLiteral("character.allCaps"));
         kerning_->setObjectName(QStringLiteral("character.kerning"));
@@ -315,6 +333,16 @@ class CharacterPanel final : public QWidget {
                 [this](bool on) { apply(QStringLiteral("allCaps"), on); });
         connect(kerning_, &QCheckBox::toggled, this,
                 [this](bool on) { apply(QStringLiteral("kerning"), on); });
+        connect(rotation_, &QDoubleSpinBox::valueChanged, this,
+                [this](double v) { apply(QStringLiteral("rotation"), v); });
+        connect(shear_, &QDoubleSpinBox::valueChanged, this,
+                [this](double v) { apply(QStringLiteral("shear"), v); });
+        connect(language_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) {
+                    if (!updating_)
+                        apply(QStringLiteral("language"),
+                              language_->currentData());
+                });
         connect(fontColor_, &QToolButton::clicked, this, [this] {
             pickColor(QStringLiteral("color"), tr("Fill Colour"));
         });
@@ -377,6 +405,12 @@ class CharacterPanel final : public QWidget {
         baseline_->setValue(t.baselineShift);
         hScale_->setValue(qRound(t.hScale));
         vScale_->setValue(qRound(t.vScale));
+        rotation_->setValue(t.rotation);
+        shear_->setValue(t.shear);
+        {
+            const int li = language_->findData(t.language);
+            if (li >= 0) language_->setCurrentIndex(li);
+        }
         underline_->setCurrentIndex(underline_->findData(t.underline));
         strike_->setCurrentIndex(strike_->findData(t.strike));
         superSub_->setCurrentIndex(superSub_->findData(t.superSub));
@@ -422,13 +456,15 @@ class CharacterPanel final : public QWidget {
     QToolButton* underlineColor_ = nullptr;
     QComboBox* strike_ = nullptr;
     QToolButton* strikeColor_ = nullptr;
+    QDoubleSpinBox* rotation_ = nullptr;
+    QDoubleSpinBox* shear_ = nullptr;
+    QComboBox* language_ = nullptr;
     QDoubleSpinBox* tracking_ = nullptr;
     QDoubleSpinBox* leading_ = nullptr;
     QDoubleSpinBox* baseline_ = nullptr;
     QSpinBox* hScale_ = nullptr;
     QSpinBox* vScale_ = nullptr;
     QComboBox* superSub_ = nullptr;
-    QDoubleSpinBox* shear_ = nullptr;
     QCheckBox* noBreak_ = nullptr;
     QCheckBox* allCaps_ = nullptr;
     QCheckBox* kerning_ = nullptr;

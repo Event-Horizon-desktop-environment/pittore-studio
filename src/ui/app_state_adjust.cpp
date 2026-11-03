@@ -43,6 +43,24 @@ QString adjustmentKindName(int kind) {
             return QStringLiteral("Color Balance");
         case AdjustmentKind::Recolour:
             return QStringLiteral("Recolour");
+        case AdjustmentKind::SplitToning:
+            return QStringLiteral("Split Toning");
+        case AdjustmentKind::GradientMap:
+            return QStringLiteral("Gradient Map");
+        case AdjustmentKind::ToneCompression:
+            return QStringLiteral("Tone Compression");
+        case AdjustmentKind::ToneStretch:
+            return QStringLiteral("Tone Stretch");
+        case AdjustmentKind::SelectiveColour:
+            return QStringLiteral("Selective Colour");
+        case AdjustmentKind::LUT:
+            return QStringLiteral("LUT");
+        case AdjustmentKind::Normals:
+            return QStringLiteral("Normals");
+        case AdjustmentKind::SoftProof:
+            return QStringLiteral("Soft Proof");
+        case AdjustmentKind::OCIO:
+            return QStringLiteral("OCIO");
         case AdjustmentKind::None: break;
     }
     return QString();
@@ -117,6 +135,67 @@ QVector<AdjustmentParamDesc> adjustmentParamDescs(int kind) {
         return {{"Hue", 0, 360, 0.0, 360.0},
                 {"Saturation", 0, 100, 0.0, 1.0},
                 {"Lightness", -100, 100, -1.0, 1.0}};
+    if (k == AdjustmentKind::ToneCompression ||
+        k == AdjustmentKind::ToneStretch)
+        return {{"Amount", 0, 100, 0.0, 1.0},
+                {"Pivot", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::SelectiveColour)
+        return {{"Reds Saturation", -100, 100, -1.0, 1.0},
+                {"Yellows Saturation", -100, 100, -1.0, 1.0},
+                {"Greens Saturation", -100, 100, -1.0, 1.0},
+                {"Cyans Saturation", -100, 100, -1.0, 1.0},
+                {"Blues Saturation", -100, 100, -1.0, 1.0},
+                {"Magentas Saturation", -100, 100, -1.0, 1.0},
+                {"Reds Lightness", -100, 100, -1.0, 1.0},
+                {"Yellows Lightness", -100, 100, -1.0, 1.0},
+                {"Greens Lightness", -100, 100, -1.0, 1.0},
+                {"Cyans Lightness", -100, 100, -1.0, 1.0},
+                {"Blues Lightness", -100, 100, -1.0, 1.0},
+                {"Magentas Lightness", -100, 100, -1.0, 1.0}};
+    if (k == AdjustmentKind::OCIO)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::SoftProof)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::LUT)
+        return {{"Red from Red", -200, 200, -2.0, 2.0},
+                {"Red from Green", -200, 200, -2.0, 2.0},
+                {"Red from Blue", -200, 200, -2.0, 2.0},
+                {"Green from Red", -200, 200, -2.0, 2.0},
+                {"Green from Green", -200, 200, -2.0, 2.0},
+                {"Green from Blue", -200, 200, -2.0, 2.0},
+                {"Blue from Red", -200, 200, -2.0, 2.0},
+                {"Blue from Green", -200, 200, -2.0, 2.0},
+                {"Blue from Blue", -200, 200, -2.0, 2.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
+    if (k == AdjustmentKind::Normals)
+        return {{"Strength", 0, 800, 0.0, 8.0}};
+    if (k == AdjustmentKind::SplitToning)
+        return {{"Shadow Red", 0, 255, 0.0, 1.0},
+                {"Shadow Green", 0, 255, 0.0, 1.0},
+                {"Shadow Blue", 0, 255, 0.0, 1.0},
+                {"Highlight Red", 0, 255, 0.0, 1.0},
+                {"Highlight Green", 0, 255, 0.0, 1.0},
+                {"Highlight Blue", 0, 255, 0.0, 1.0},
+                {"Balance", -100, 100, -1.0, 1.0},
+                {"Strength", 0, 100, 0.0, 1.0}};
     return {};
 }
 
