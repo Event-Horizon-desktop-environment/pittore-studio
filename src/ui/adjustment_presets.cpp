@@ -30,13 +30,13 @@ const AdjustmentPreset kBrightnessContrast[] = {
 // p[4] outWhite.
 const AdjustmentPreset kLevels[] = {
     {"(Default)", {0.0f, 1.0f, 1.0f, 0.0f, 1.0f}},
-    {"Darken", {0.0f, 1.0f, 0.80f, 0.0f, 1.0f}},
-    {"Lighten", {0.0f, 1.0f, 1.25f, 0.0f, 1.0f}},
-    {"Raise Black Level", {0.10f, 1.0f, 1.0f, 0.0f, 1.0f}},
-    {"Lower White Level", {0.0f, 0.90f, 1.0f, 0.0f, 1.0f}},
-    {"Increase Gamma", {0.0f, 1.0f, 1.30f, 0.0f, 1.0f}},
-    {"Decrease Gamma", {0.0f, 1.0f, 0.75f, 0.0f, 1.0f}},
-    {"Highlight Burn", {0.0f, 1.0f, 1.0f, 0.0f, 0.88f}},
+    {"Darken", {0.2018f, 1.0f, 1.0f, 0.0f, 1.0f}},
+    {"Lighten", {0.0f, 0.799f, 1.0f, 0.0f, 1.0f}},
+    {"Raise Black Level", {0.0f, 1.0f, 1.0f, 0.10f, 1.0f}},
+    {"Lower White Level", {0.0f, 1.0f, 1.0f, 0.0f, 0.90f}},
+    {"Increase Gamma", {0.0f, 1.0f, 2.0f, 0.0f, 1.0f}},
+    {"Decrease Gamma", {0.0f, 1.0f, 0.5f, 0.0f, 1.0f}},
+    {"Highlight Burn", {0.40f, 1.0f, 1.0f, 0.0f, 1.0f}},
 };
 
 // White Balance: p[0] temperature Kelvin, p[1] tint (- green, + magenta).
@@ -79,12 +79,13 @@ const AdjustmentPreset kHueSaturation[] = {
 // Recolour: p[0] hue degrees, p[1] saturation [0,1], p[2] lightness [-1,1].
 const AdjustmentPreset kRecolour[] = {
     {"(Default)", {0.0f, 1.0f, 0.0f}},
-    {"Coarse Sepia", {32.0f, 0.55f, -0.02f}},
-    {"Fire", {18.0f, 0.95f, 0.02f}},
-    {"Night", {225.0f, 0.55f, -0.12f}},
-    {"Purple Hour", {285.0f, 0.55f, 0.0f}},
-    {"Blue Hour", {215.0f, 0.65f, -0.05f}},
-    {"Wine", {345.0f, 0.70f, -0.08f}},
+    // Real Affinity factory values (adjustments.propcol, AdjP/RecP fields).
+    {"Coarse Sepia", {30.0f, 0.42f, 0.0f}},
+    {"Fire", {40.0f, 1.0f, 0.0f}},
+    {"Night", {210.0f, 0.25f, 0.0f}},
+    {"Purple Hour", {285.0f, 0.20f, 0.0f}},
+    {"Blue Hour", {250.0f, 0.55f, 0.0f}},
+    {"Wine", {0.0f, 0.50161f, -0.59576f}},
 };
 
 // Black & White: p[0..5] R/Y/G/C/B/M weights (50 neutral).

@@ -54,7 +54,7 @@ QString lightnessStops(float hue, float saturation) {
 
 class RecolourControls final : public QWidget {
   public:
-    RecolourControls(AppState* state, QWidget* parent)
+    RecolourControls(AppState* state, QWidget* parent, bool showAttach)
         : QWidget(parent), state_(state) {
         auto* grid = new QGridLayout(this);
         grid->setContentsMargins(0, 0, 0, 0);
@@ -98,22 +98,24 @@ class RecolourControls final : public QWidget {
                                  QStringLiteral("RecolourLightnessSpin"),
                                  lightness * 100.0f);
 
-        auto* attach = new QCheckBox(tr("Attach to layer below"), this);
-        attach->setObjectName(QStringLiteral("RecolourAttach"));
-        attach->setToolTip(
-            tr("Clip this adjustment to the layer below so it does not grade "
-               "the rest of the stack."));
-        attach->setChecked(layer && layer->clipped);
-        grid->addWidget(attach, 3, 0, 1, 3);
-        connect(attach, &QCheckBox::toggled, this, [this](bool on) {
-            LayerItem* current = state_->activeLayer();
-            if (!current || current->clipped == on) return;
-            // layersChanged rebuilds this panel, so run the mutation after the
-            // checkbox signal has finished.
-            QTimer::singleShot(0, this, [this] {
-                state_->toggleLayerClipped();
+        if (showAttach) {
+            auto* attach = new QCheckBox(tr("Attach to layer below"), this);
+            attach->setObjectName(QStringLiteral("RecolourAttach"));
+            attach->setToolTip(
+                tr("Clip this adjustment to the layer below so it does not "
+                   "grade the rest of the stack."));
+            attach->setChecked(layer && layer->clipped);
+            grid->addWidget(attach, 3, 0, 1, 3);
+            connect(attach, &QCheckBox::toggled, this, [this](bool on) {
+                LayerItem* current = state_->activeLayer();
+                if (!current || current->clipped == on) return;
+                // layersChanged rebuilds this panel, so run the mutation after
+                // the checkbox signal has finished.
+                QTimer::singleShot(0, this, [this] {
+                    state_->toggleLayerClipped();
+                });
             });
-        });
+        }
 
         connect(hue_, &QSlider::sliderPressed, this,
                 [this] { beginDrag(hue_); });
@@ -278,8 +280,9 @@ class RecolourControls final : public QWidget {
 
 }  // namespace
 
-QWidget* createRecolourControls(AppState* state, QWidget* parent) {
-    return new RecolourControls(state, parent);
+QWidget* createRecolourControls(AppState* state, QWidget* parent,
+                                bool showAttach) {
+    return new RecolourControls(state, parent, showAttach);
 }
 
 }  // namespace pittore::ui

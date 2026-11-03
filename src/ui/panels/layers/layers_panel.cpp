@@ -54,6 +54,8 @@
 #include "engine/compute/adjust.h"
 #include "ui/curve_editor.h"
 #include "ui/panels/shared/panel_helpers.h"
+#include "ui/panels/properties/recolour_dialog.h"
+#include "engine/compute/adjust.h"
 
 namespace pittore::ui {
 namespace {
@@ -664,6 +666,17 @@ class LayerRow final : public QWidget {
 
     void mouseDoubleClickEvent(QMouseEvent* event) override {
         if (synthetic()) return;
+        DocumentItem* doc = state_->activeDocument();
+        if (doc && index_ >= 0 && index_ < doc->layers.size()) {
+            const LayerItem& layer = doc->layers[index_];
+            if (layer.kind == LayerItem::Kind::Adjustment &&
+                layer.adjustmentKind == static_cast<int>(
+                    pittore::compute::AdjustmentKind::Recolour)) {
+                state_->setActiveLayerIndex(index_);
+                showRecolourDialog(state_, index_, this);
+                return;
+            }
+        }
         // Double-clicking the layer name opens the inline rename; a double-click
         // anywhere else on the row just re-selects it.
         if (nameRect().contains(event->position().toPoint())) {
