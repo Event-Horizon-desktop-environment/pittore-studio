@@ -13,17 +13,17 @@ using pittore::compute::AdjustmentKind;
 // Brightness/Contrast: p[0] brightness [-1,1], p[1] contrast [-1,1].
 const AdjustmentPreset kBrightnessContrast[] = {
     {"(Default)", {0.0f, 0.0f}},
-    {"Lighter", {0.12f, 0.0f}},
-    {"Darker", {-0.12f, 0.0f}},
-    {"Lower Contrast", {0.0f, -0.30f}},
-    {"Increase Contrast", {0.0f, 0.30f}},
-    // Brightness/Contrast has no saturation control; these two are contrast
-    // fits so the names still resolve to something usable.
-    {"Saturate", {0.0f, 0.16f}},
-    {"Desaturate", {0.0f, -0.16f}},
-    {"Muted Colours 01", {0.04f, -0.12f}},
-    {"Muted Colours 02", {0.08f, -0.20f}},
-    {"Subtle Punch", {0.0f, 0.18f}},
+    {"Lighter", {0.25f, 0.0f}},
+    {"Darker", {-0.25f, 0.0f}},
+    {"Lower Contrast", {0.0f, -0.25f}},
+    {"Increase Contrast", {0.0f, 0.25f}},
+    {"Saturate", {0.0f, 1.0f}},
+    {"Desaturate", {-1.0f, -1.0f}},
+    {"Muted Colours 01", {1.0f, -1.0f}},
+    {"Muted Colours 02", {-1.0f, 1.0f}},
+    {"Subtle Punch", {0.10f, 0.10f}},
+    {"Dodge", {0.15f, 0.30f}},
+    {"Burn", {-0.15f, 0.15f}},
 };
 
 // Levels: p[0] inBlack, p[1] inWhite, p[2] gamma, p[3] outBlack,
@@ -91,11 +91,85 @@ const AdjustmentPreset kRecolour[] = {
 // Black & White: p[0..5] R/Y/G/C/B/M weights (50 neutral).
 const AdjustmentPreset kBlackWhite[] = {
     {"(Default)", {40.0f, 60.0f, 40.0f, 60.0f, 20.0f, 80.0f}},
-    {"Cold", {30.0f, 50.0f, 45.0f, 60.0f, 70.0f, 50.0f}},
-    {"Warm", {70.0f, 65.0f, 45.0f, 40.0f, 30.0f, 50.0f}},
-    {"Crunch", {55.0f, 60.0f, 45.0f, 50.0f, 35.0f, 60.0f}},
-    {"Darken Blues/Cyans", {40.0f, 60.0f, 40.0f, 25.0f, 10.0f, 60.0f}},
-    {"Red/Blue Contrast", {85.0f, 60.0f, 40.0f, 45.0f, 15.0f, 70.0f}},
+    // Affinity stores weights 0..3; Pittore's engine uses -200..300 with 50 neutral.
+    {"Cold", {50.0f, 100.0f, 100.0f, 100.0f, 50.0f, 0.0f}},
+    {"Warm", {100.0f, 0.0f, -100.0f, -50.0f, 50.0f, 150.0f}},
+    {"Crunch", {0.0f, 50.0f, 50.0f, 0.0f, 50.0f, 50.0f}},
+    {"Darken Blues/Cyans", {50.0f, 50.0f, -50.0f, -50.0f, 50.0f, 50.0f}},
+    {"Red/Blue Contrast", {100.0f, 50.0f, 0.0f, 0.0f, 50.0f, 50.0f}},
+};
+
+// Exposure: p[0] is stops.
+const AdjustmentPreset kExposure[] = {
+    {"(Default)", {0.0f}},
+    {"-1 Stop", {-1.0f}}, {"+1 Stop", {1.0f}},
+    {"-2 Stops", {-2.0f}}, {"+2 Stops", {2.0f}},
+    {"-3 Stops", {-3.0f}}, {"+3 Stops", {3.0f}},
+    {"-4 Stops", {-4.0f}}, {"+4 Stops", {4.0f}},
+    {"-5 Stops", {-5.0f}}, {"+5 Stops", {5.0f}},
+    {"-6 Stops", {-6.0f}}, {"+6 Stops", {6.0f}},
+};
+
+// Threshold: p[0] threshold 0..1.
+const AdjustmentPreset kThreshold[] = {
+    {"(Default)", {0.5f}},
+    {"Favour Light", {0.25f}},
+    {"Favour Dark", {0.75f}},
+    {"S-Curve", {0.5f}},
+    {"S-Curve Stronger", {0.5f}},
+    {"Inverse S-Curve", {0.5f}},
+    {"Inverse S-Curve Stronger", {0.5f}},
+    {"Weighted Contrast", {0.5f}},
+    {"Matte Black", {0.6f}},
+    {"Matte Contrast", {0.45f}},
+    {"Reduce Highlights", {0.55f}},
+    {"Punchy", {0.35f}},
+    {"Lightness Contrast Curve", {0.5f}},
+};
+
+// Channel Mixer: 3x3 output matrix, three constants, monochrome flag.
+const AdjustmentPreset kChannelMixer[] = {
+    {"(Default)", {1,0,0, 0,1,0, 0,0,1, 0,0,0, 0}},
+    {"Infrared RB Swap", {0,0,1, 0,1,0, 1,0,0, 0,0,0, 0}},
+    {"Infrared RGB Swap", {0,1,0, 1,0,0, 0,0,1, 0,0,0, 0}},
+    {"Infrared Emulation", {0.4f,0.4f,0.2f, 0.2f,0.5f,0.3f, 0.1f,0.2f,0.7f, 0,0,0, 0}},
+    {"LAB Gold Punch", {1.1f,0.1f,0.0f, 0.0f,1.0f,0.1f, 0.0f,0.1f,0.9f, 0,0,0, 0}},
+    {"Two Strip", {1,0,0, 0,1,0, 0,1,0, 0,0,0, 0}},
+    {"Three Strip", {1,0,0, 0,1,0, 0,0,1, 0,0,0, 0}},
+    {"Weighted Greyscale", {0.3f,0.59f,0.11f, 0.3f,0.59f,0.11f, 0.3f,0.59f,0.11f, 0,0,0, 0}},
+    {"A to B", {0,0,1, 0,1,0, 1,0,0, 0,0,0, 0}},
+    {"B to A", {0,1,0, 1,0,0, 0,0,1, 0,0,0, 0}},
+    {"A+B 50:50", {0.5f,0,0.5f, 0.5f,0.5f,0, 0,0.5f,0.5f, 0,0,0, 0}},
+    {"A Lightness", {0.6f,0.3f,0.1f, 0.3f,0.6f,0.1f, 0.1f,0.3f,0.6f, 0,0,0, 0}},
+    {"B Lightness", {0.2f,0.6f,0.2f, 0.2f,0.2f,0.6f, 0.6f,0.2f,0.2f, 0,0,0, 0}},
+    {"Hazy Saturation", {0.8f,0.15f,0.05f, 0.05f,0.8f,0.15f, 0.15f,0.05f,0.8f, 0.05f,0.05f,0.05f, 0}},
+    {"Earthy Tones", {1.05f,0.1f,-0.05f, 0.0f,0.95f,0.05f, -0.05f,0.1f,0.85f, 0.02f,0.01f,0.0f, 0}},
+    {"Urban Crush", {0.9f,0.1f,0.1f, 0.1f,0.85f,0.1f, 0.1f,0.1f,0.9f, -0.02f,-0.02f,-0.02f, 0}},
+    {"Night Vision", {0.0f,0.4f,0.0f, 0.0f,0.8f,0.0f, 0.0f,0.4f,0.0f, 0,0,0, 0}},
+};
+
+// Photo Filter / Lens Filter: p[0..2] filter colour, p[3] density, p[4] preserve.
+const AdjustmentPreset kPhotoFilter[] = {
+    {"(Default)", {0,0,0, 0,0}},
+    {"Cool", {0.35f,0.55f,1.0f, 0.25f, 0}},
+    {"Warm", {1.0f,0.65f,0.30f, 0.25f, 0}},
+    {"Moody", {0.35f,0.45f,0.75f, 0.35f, 0}},
+    {"Menacing", {0.75f,0.25f,0.20f, 0.35f, 0}},
+    {"Red/Blue Split", {0.9f,0.2f,0.5f, 0.25f, 0}},
+    {"Blue/Red Split", {0.2f,0.4f,0.9f, 0.25f, 0}},
+    {"Golden Brown", {0.85f,0.55f,0.20f, 0.30f, 0}},
+    {"Retro Tint", {0.90f,0.70f,0.40f, 0.30f, 0}},
+    {"Soft Cool Tint", {0.55f,0.75f,0.95f, 0.15f, 0}},
+    {"Soft Warm Tint", {0.95f,0.80f,0.55f, 0.15f, 0}},
+    {"Acid Crunch", {0.70f,0.95f,0.20f, 0.30f, 0}},
+};
+
+// Colour Balance: shadows/midtones/highlights × CR/MG/YB.
+const AdjustmentPreset kColorBalance[] = {
+    {"(Default)", {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+    {"Subtle Blue Cast", {0.0f, 0.0f, 20.0f, 0.0f, 0.0f, 20.0f, 0.0f, 0.0f, 0.0f}},
+    {"Subtle Red Cast", {5.0f, 0.0f, 0.0f, 40.19f, 0.0f, 0.0f, 5.0f, 0.0f, 0.0f}},
+    {"Tinted Lift", {100.0f, 0.0f, 100.0f, 0.0f, 100.0f, -100.0f, 0.0f, 0.0f, 100.0f}},
 };
 
 // Posterize: p[0] level count.
@@ -145,6 +219,21 @@ const AdjustmentPreset* adjustmentPresets(int kind, int* count) {
         case AdjustmentKind::Vibrance:
             if (count) *count = int(sizeof(kVibrance) / sizeof(kVibrance[0]));
             return kVibrance;
+        case AdjustmentKind::Exposure:
+            if (count) *count = int(sizeof(kExposure) / sizeof(kExposure[0]));
+            return kExposure;
+        case AdjustmentKind::Threshold:
+            if (count) *count = int(sizeof(kThreshold) / sizeof(kThreshold[0]));
+            return kThreshold;
+        case AdjustmentKind::ColorBalance:
+            if (count) *count = int(sizeof(kColorBalance) / sizeof(kColorBalance[0]));
+            return kColorBalance;
+        case AdjustmentKind::ChannelMixer:
+            if (count) *count = int(sizeof(kChannelMixer) / sizeof(kChannelMixer[0]));
+            return kChannelMixer;
+        case AdjustmentKind::PhotoFilter:
+            if (count) *count = int(sizeof(kPhotoFilter) / sizeof(kPhotoFilter[0]));
+            return kPhotoFilter;
         default:
             break;
     }

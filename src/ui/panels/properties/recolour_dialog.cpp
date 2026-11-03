@@ -433,8 +433,36 @@ class AdjustmentDialog final : public QDialog {
         grid->setHorizontalSpacing(8);
         grid->setVerticalSpacing(5);
         grid->setColumnStretch(1, 1);
+        int gridRow = 0;
         for (int pi = 0; pi < descs.size(); ++pi) {
             const AdjustmentParamDesc& dd = descs[pi];
+            QString section;
+            if (kind_ == static_cast<int>(
+                            pittore::compute::AdjustmentKind::ColorBalance) &&
+                pi % 3 == 0)
+                section = pi == 0 ? tr("Shadows")
+                          : pi == 3 ? tr("Midtones")
+                                    : tr("Highlights");
+            if (kind_ == static_cast<int>(
+                            pittore::compute::AdjustmentKind::ChannelMixer) &&
+                (pi == 0 || pi == 3 || pi == 6 || pi == 9))
+                section = pi == 0 ? tr("Red Output")
+                          : pi == 3 ? tr("Green Output")
+                          : pi == 6 ? tr("Blue Output")
+                                    : tr("Constants");
+            if (kind_ == static_cast<int>(
+                            pittore::compute::AdjustmentKind::BlackWhite) &&
+                pi == 0)
+                section = tr("Channel Weights");
+            if (!section.isEmpty()) {
+                auto* head = new QLabel(section, this);
+                QFont hf = head->font();
+                hf.setBold(true);
+                hf.setPixelSize(11);
+                head->setFont(hf);
+                head->setStyleSheet(QStringLiteral("color:#b9b9b9;"));
+                grid->addWidget(head, gridRow++, 0, 1, 3);
+            }
             const double factor = factorFor(kind_, pi);
             const QString suffix = suffixFor(kind_, pi);
             auto* label = new QLabel(dd.label, this);
@@ -509,9 +537,10 @@ class AdjustmentDialog final : public QDialog {
                         else
                             state_->discardUndoStep();
                     });
-            grid->addWidget(label, pi, 0);
-            grid->addWidget(slider, pi, 1);
-            grid->addWidget(spin, pi, 2);
+            grid->addWidget(label, gridRow, 0);
+            grid->addWidget(slider, gridRow, 1);
+            grid->addWidget(spin, gridRow, 2);
+            ++gridRow;
         }
         column->addLayout(grid);
     }

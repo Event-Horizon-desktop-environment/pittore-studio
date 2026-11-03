@@ -79,7 +79,8 @@ const AdjustmentEntry kAdjustments[] = {
     {"Soft Proof", "proof", -1,
      "Preview the document through an output profile.", false},
     {"LUT", "layers", -1, "Apply a 3D colour lookup table.", false},
-    {"Lens Filter", "gradient", -1,
+    {"Lens Filter", "gradient",
+     static_cast<int>(pittore::compute::AdjustmentKind::PhotoFilter),
      "Warm or cool the image like a camera filter.", false},
     {"Split Toning", "swatches", -1,
      "Tint shadows and highlights independently.", false},
@@ -125,6 +126,48 @@ QImage profilePreview(const QImage& source, int kind, const float* params) {
         }
     }
     return base;
+}
+
+QStringList staticProfilesFor(const QString& name) {
+    static const QHash<QString, QStringList> table = {
+        {QStringLiteral("Gradient Map"),
+         {QStringLiteral("Ultra Violet"), QStringLiteral("Nuclear"),
+          QStringLiteral("Tritone Posterisation"),
+          QStringLiteral("Duotone Posterisation"), QStringLiteral("Pastel"),
+          QStringLiteral("OOC Infrared"), QStringLiteral("Dreamy Haze"),
+          QStringLiteral("Smooth"), QStringLiteral("Murky"),
+          QStringLiteral("Bleached")}},
+        {QStringLiteral("Selective Colour"),
+         {QStringLiteral("Golden Reds"), QStringLiteral("Golden Yellows"),
+          QStringLiteral("Punchy Cyans"), QStringLiteral("Punchy Blues"),
+          QStringLiteral("Autumnal"), QStringLiteral("Blue Cast"),
+          QStringLiteral("Redden Foliage"), QStringLiteral("Neon Dreams")}},
+        {QStringLiteral("Soft Proof"),
+         {QStringLiteral("Coated FOGRA27"),
+          QStringLiteral("Euroscale Coated v2"),
+          QStringLiteral("Greyscale D50")}},
+        {QStringLiteral("LUT"),
+         {QStringLiteral("Deuteranope (Simulate)"),
+          QStringLiteral("Protanope (Simulate)"),
+          QStringLiteral("Tritanope (Simulate)"),
+          QStringLiteral("Deuteranope (Daltonize)"),
+          QStringLiteral("Protanope (Daltonize)"),
+          QStringLiteral("Tritanope (Daltonize)")}},
+        {QStringLiteral("Lens Filter"),
+         {QStringLiteral("Cool"), QStringLiteral("Warm"),
+          QStringLiteral("Moody"), QStringLiteral("Menacing"),
+          QStringLiteral("Red/Blue Split"), QStringLiteral("Blue/Red Split"),
+          QStringLiteral("Golden Brown"), QStringLiteral("Retro Tint"),
+          QStringLiteral("Soft Cool Tint"), QStringLiteral("Soft Warm Tint"),
+          QStringLiteral("Acid Crunch")}},
+        {QStringLiteral("Tone Compression"),
+         {QStringLiteral("Balanced"), QStringLiteral("Vibrant Sunset"),
+          QStringLiteral("Colourful"), QStringLiteral("Punchy 3D Render"),
+          QStringLiteral("Maximum Range"),
+          QStringLiteral("Colour & Contrast"), QStringLiteral("Dark & Moody"),
+          QStringLiteral("Bright & Muted")}},
+    };
+    return table.value(name);
 }
 
 QString panelStyle() {
@@ -216,22 +259,32 @@ class AdjustmentRow final : public QFrame {
 
         int presetCount = 0;
         const AdjustmentPreset* presets = adjustmentPresets(kind_, &presetCount);
-        if (presets && presetCount > 0) {
+        QStringList staticNames;
+        if (!presets || presetCount == 0)
+            staticNames = staticProfilesFor(tr(entry.name));
+        const int count = presets ? presetCount : staticNames.size();
+        if (count > 0) {
             auto* grid = new QGridLayout;
             grid->setContentsMargins(6, 0, 4, 8);
             grid->setHorizontalSpacing(4);
             grid->setVerticalSpacing(6);
             DocumentItem* doc = state_->activeDocument();
             const QImage source = doc ? doc->composite : QImage();
-            for (int pi = 0; pi < presetCount; ++pi) {
-                const AdjustmentPreset& preset = presets[pi];
+            for (int pi = 0; pi < count; ++pi) {
+                const AdjustmentPreset* preset =
+                    presets ? &presets[pi] : nullptr;
+                const QString presetName =
+                    preset ? tr(preset->name) : staticNames.at(pi);
                 auto* tile = new QToolButton(body);
                 tile->setObjectName(QStringLiteral("ProfileTile"));
                 tile->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
                 tile->setIcon(QIcon(QPixmap::fromImage(
-                    profilePreview(source, kind_, preset.params))));
+                    preset ? profilePreview(source, kind_, preset->params)
+                           : source.scaled(144, 96, Qt::KeepAspectRatioByExpanding,
+                                           Qt::SmoothTransformation)
+                                 .copy(0, 0, 144, 96))));
                 tile->setIconSize(QSize(68, 44));
-                QString label = tr(preset.name);
+                QString label = presetName;
                 if (label.size() > 12) {
                     const int split = label.lastIndexOf(QLatin1Char(' '), 12);
                     if (split > 0)
@@ -239,14 +292,21 @@ class AdjustmentRow final : public QFrame {
                                 label.mid(split + 1);
                 }
                 tile->setText(label);
-                tile->setToolTip(tr(preset.name));
+                tile->setToolTip(presetName);
                 QFont tileFont = tile->font();
                 tileFont.setPixelSize(10);
                 tile->setFont(tileFont);
                 tile->setFixedSize(118, 86);
-                tile->setCursor(Qt::PointingHandCursor);
-                const float* params = preset.params;
+                tile->setCursor(preset ? Qt::PointingHandCursor
+                                       : Qt::ArrowCursor);
+                const float* params = preset ? preset->params : nullptr;
                 connect(tile, &QToolButton::clicked, this, [this, params] {
+                    if (!params) {
+                        state_->setStatusHint(
+                            tr("This Affinity adjustment is not implemented "
+                               "in Pittore yet."));
+                        return;
+                    }
                     state_->addAdjustmentLayer(kind_);
                     DocumentItem* d = state_->activeDocument();
                     if (!d || d->activeLayer < 0 ||
@@ -255,7 +315,7 @@ class AdjustmentRow final : public QFrame {
                     state_->setAdjustmentParams(d->activeLayer, params);
                     showAdjustmentDialog(state_, d->activeLayer, window());
                 });
-                profileTiles_.append(qMakePair(tile, &preset));
+                profileTiles_.append(qMakePair(tile, params));
                 grid->addWidget(tile, pi / 2, pi % 2);
             }
             bodyLayout->addLayout(grid);
@@ -290,14 +350,16 @@ class AdjustmentRow final : public QFrame {
     void refreshPreviews() {
         DocumentItem* doc = state_->activeDocument();
         const QImage source = doc ? doc->composite : QImage();
-        for (const auto& entry : profileTiles_)
+        for (const auto& entry : profileTiles_) {
+            if (!entry.second) continue;
             entry.first->setIcon(QIcon(QPixmap::fromImage(
-                profilePreview(source, kind_, entry.second->params))));
+                profilePreview(source, kind_, entry.second))));
+        }
     }
 
     AppState* state_ = nullptr;
     int kind_ = -1;
-    QVector<QPair<QToolButton*, const AdjustmentPreset*>> profileTiles_;
+    QVector<QPair<QToolButton*, const float*>> profileTiles_;
     bool expanded_ = false;
     QToolButton* chevron_ = nullptr;
     QLabel* detail_ = nullptr;
