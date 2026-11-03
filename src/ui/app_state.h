@@ -185,6 +185,10 @@ struct LayerItem {
     QVector<QPointF> adjustmentCurveB;
     std::uint64_t adjustStamp = 0;
     int indent = 0;                // group nesting depth
+    // Panel-only nesting for a child row (mask/adjustment under a pixel).
+    // Compositing still uses `indent` so the child stays in the base's clip
+    // scope; this only changes how the Layers panel draws the row.
+    int panelIndent = -1;          // -1 = use indent
     bool groupExpanded = true;
     // --- Artboard payload (a board IS a Kind::Group row: D1, INV-011) -----
     // A board is a container group that additionally clips to `boardRect`

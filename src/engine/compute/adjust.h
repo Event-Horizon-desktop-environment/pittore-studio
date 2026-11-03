@@ -456,7 +456,13 @@ PITTORE_ADJUST_DEVICE void white_balance(float r, float g, float b,
 PITTORE_ADJUST_DEVICE void recolour(float r, float g, float b, float hueDeg,
                                     float sat, float lightAdj, float& or_,
                                     float& og, float& ob) {
-    const float l = clamp01(rgb_to_lightness(r, g, b) + lightAdj);
+    // Lightness is a blend toward white (+) or black (-), not a flat offset:
+    // the Affinity reference for Lee's Card (+4.56% on HSL L 0.3765, hue 16.4)
+    // renders (206,56,0); an additive offset gave (215,59,0), so recoloured
+    // areas no longer matched the flat fill under them.
+    const float l0 = rgb_to_lightness(r, g, b);
+    const float la = clampf(lightAdj, -1.0f, 1.0f);
+    const float l = clamp01(la >= 0.0f ? l0 + la * (1.0f - l0) : l0 * (1.0f + la));
     float h = hueDeg / 360.0f;
     if (!(h >= 0.0f)) h = 0.0f;  // NaN guard: degenerate hue reads as 0
     if (h > 1.0f) h = 1.0f;

@@ -239,7 +239,10 @@ bool AppState::openProject(const QString& path, QString* error) {
     // board, and the id counter resumes above every loaded id (INV-006/007).
     doc->boardOrder.clear();
     std::uint64_t maxBoardId = 0;
-    for (const LayerItem& li : doc->layers) {
+    // Affinity lists boards bottom-to-top (page order), while the layer
+    // vector is top-first. Reverse so the panel matches the file.
+    for (int i = doc->layers.size() - 1; i >= 0; --i) {
+        const LayerItem& li = doc->layers[i];
         if (!li.isBoard()) continue;
         doc->boardOrder.append(li.boardId);
         if (li.boardId > maxBoardId) maxBoardId = li.boardId;
@@ -407,6 +410,7 @@ bool AppState::openPsdLayers(const QString& path, const pittore::io::PsdLayersDo
                 li.maskSelected = false;
                 li.maskOffset = QPointF(0, 0);
                 li.maskScaleX = li.maskScaleY = 1.0;
+                li.maskFeather = 0.0f;  // the .af mask is already antialiased; extra feather leaves a blue rim at the recolour edge
                 li.maskStamp = 1;
             }
             // Verbatim foreign blocks ride along with their guard stamps;
@@ -794,8 +798,18 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         LayerItem li;
         li.name = QString::fromStdString(l.name);
         if (li.name.isEmpty()) li.name = l.isGroup ? tr("Group") : tr("Layer");
-        li.kind = l.isGroup ? LayerItem::Kind::Group : LayerItem::Kind::Pixel;
+        li.kind = l.isGroup ? LayerItem::Kind::Group
+                  : (l.isAdjustment ? LayerItem::Kind::Adjustment
+                                    : LayerItem::Kind::Pixel);
         li.isText = !l.isGroup && l.isText;
+        if (l.isAdjustment) {
+            li.adjustmentKind = l.adjustmentKind;
+            for (int k = 0; k < 16; ++k)
+                li.adjustmentParams[k] = l.adjustmentParams[k];
+            li.adjustmentType = adjustmentKindName(li.adjustmentKind);
+            li.swatch = QColor(0x9a, 0x72, 0xd0);
+            rebuildAdjustmentLUT(li);
+        }
         // The layer opens exactly as the file recorded it, enabled or not.
         li.visible = l.visible;
         li.opacity = qBound(1, qRound(l.opacity * 100.0 / 255.0), 100);
@@ -804,8 +818,27 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         li.indent = l.indent;
         li.groupExpanded = l.groupExpanded;
         li.clipped = !l.isGroup && l.clipped;
+        if (l.isAdjustment && !l.masks.empty()) {
+            std::vector<const pittore::io::AfMask*> combined;
+            for (const auto& groupMasks : activeGroupMasks)
+                for (const auto& m : groupMasks) combined.push_back(&m);
+            for (const auto& m : l.masks) combined.push_back(&m);
+            auto mask = afMasksToImage(0, 0, pass.size.width(),
+                                       pass.size.height(), combined);
+            if (mask) {
+                li.mask = std::move(mask);
+                li.hasMask = true;
+                li.maskEnabled = true;
+                li.maskLinked = true;
+                li.maskSelected = false;
+                li.maskOffset = QPointF(0, 0);
+                li.maskScaleX = li.maskScaleY = 1.0;
+                li.maskFeather = 0.0f;  // the .af mask is already antialiased; extra feather leaves a blue rim at the recolour edge
+                li.maskStamp = 1;
+            }
+        }
         const bool huge = l.rgba.size() * 2 >= (64u << 20);
-        if (!l.isGroup) {
+        if (!l.isGroup && !l.isAdjustment) {
             li.offset = QPointF(l.left, l.top);
             li.scaleX = 1.0;
             li.scaleY = 1.0;
@@ -928,6 +961,11 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                 li.textLineAdvance = laid.lineAdvance;
             }
         }
+        // Imported rows start with no cached preview: a stale grey frame from
+        // the packed decode must never win over the rendered composite.
+        li.thumbnail = QImage();
+        li.groupThumbnailCache = QImage();
+        li.groupThumbnailStamp = 0;
         const int idx = nodes.size();
         nodes.append(Node{std::move(li), {}, l.masks});
         if (!open.isEmpty()) nodes[open.back()].children.append(idx);
@@ -947,6 +985,28 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
                 std::to_string(pittore::io::af_detail::rssMiB()) + " MiB, peak " +
                 std::to_string(pittore::io::af_detail::peakRssMiB()) + " MiB";
             ::pittore::core::log::log_info("%s", msg.c_str());
+        }
+    }
+    // A clipped adjustment is a child of its base in the panel, even though
+    // the file stores both at the group's depth. Deepen its indent so the
+    // Layers panel can nest it under the base row.
+    for (int i = 0; i < nodes.size(); ++i) {
+        LayerItem& adj = nodes[i].item;
+        if (adj.kind != LayerItem::Kind::Adjustment || !adj.clipped) continue;
+        int parent = -1;
+        for (int p = 0; p < nodes.size() && parent < 0; ++p)
+            if (nodes[p].children.contains(i)) parent = p;
+        if (parent < 0) continue;
+        const QVector<int> siblings = nodes[parent].children;
+        int pos = -1;
+        for (int k = 0; k < siblings.size(); ++k)
+            if (siblings[k] == i) pos = k;
+        for (int k = pos - 1; k >= 0; --k) {
+            const LayerItem& base = nodes[siblings[k]].item;
+            if (base.kind == LayerItem::Kind::Pixel) {
+                adj.panelIndent = base.indent + 1;
+                break;
+            }
         }
     }
     {
@@ -1025,7 +1085,7 @@ bool AppState::openAfLayers(const QString& path, pittore::io::AfLayersDoc& pd,
         // active row in sync.
         doc->boardOrder.clear();
         std::uint64_t maxBoardId = 0;
-        for (int i = 0; i < doc->layers.size(); ++i) {
+        for (int i = doc->layers.size() - 1; i >= 0; --i) {
             const LayerItem& li = doc->layers[i];
             if (!li.isBoard()) continue;
             doc->boardOrder.append(li.boardId);

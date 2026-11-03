@@ -56,6 +56,7 @@
 #include "engine/filter/registry/filter_registry.h"
 #include "ui/adjustment_presets.h"
 #include "ui/curve_editor.h"
+#include "ui/panels/properties/recolour_controls.h"
 #include "ui/panels/shared/panel_helpers.h"
 #include "ui/persona/vector_edit.h"
 
@@ -297,56 +298,73 @@ class PropertiesPanel final : public QWidget {
                         });
                 form_->addRow(tr("Preset"), combo);
             }
-            // Live parameter rows, in param-index order. Slider drags write
-            // straight through to the layer and recomposite immediately;
-            // the drag holds one undo step (begin on press, commit on
-            // release) so Ctrl+Z undoes the whole drag at once.
-            const QVector<AdjustmentParamDesc> descs =
-                adjustmentParamDescs(layer->adjustmentKind);
-            for (int pi = 0; pi < descs.size(); ++pi) {
-                const AdjustmentParamDesc& dd = descs[pi];
-                auto* slider = new QSlider(Qt::Horizontal, this);
-                const int span = dd.sliderMax - dd.sliderMin;
-                slider->setRange(0, span > 0 ? span : 1);
-                const double cur = layer->adjustmentParams[pi];
-                const int pos = qBound(
-                    0,
-                    static_cast<int>(std::lround(
-                        (cur - dd.realMin) / (dd.realMax - dd.realMin) * span)),
-                    span);
-                {
-                    const QSignalBlocker block(slider);
-                    slider->setValue(pos);
+            if (layer->adjustmentKind ==
+                static_cast<int>(
+                    pittore::compute::AdjustmentKind::Recolour)) {
+                // Recolour gets a purpose-built colour ramp UI: hue and
+                // saturation read as colours, not anonymous numbers, and the
+                // attach toggle makes its clipping scope explicit.
+                form_->addRow(createRecolourControls(state_, this));
+            } else {
+                // Live parameter rows, in param-index order. Slider drags
+                // write straight through to the layer and recomposite
+                // immediately; the drag holds one undo step (begin on press,
+                // commit on release) so Ctrl+Z undoes the whole drag at once.
+                const QVector<AdjustmentParamDesc> descs =
+                    adjustmentParamDescs(layer->adjustmentKind);
+                for (int pi = 0; pi < descs.size(); ++pi) {
+                    const AdjustmentParamDesc& dd = descs[pi];
+                    auto* slider = new QSlider(Qt::Horizontal, this);
+                    const int span = dd.sliderMax - dd.sliderMin;
+                    slider->setRange(0, span > 0 ? span : 1);
+                    const double cur = layer->adjustmentParams[pi];
+                    const int pos = qBound(
+                        0,
+                        static_cast<int>(std::lround(
+                            (cur - dd.realMin) /
+                            (dd.realMax - dd.realMin) * span)),
+                        span);
+                    {
+                        const QSignalBlocker block(slider);
+                        slider->setValue(pos);
+                    }
+                    slider->setToolTip(
+                        QStringLiteral("%1 (%2–%3)")
+                            .arg(dd.label)
+                            .arg(dd.realMin)
+                            .arg(dd.realMax));
+                    connect(slider, &QSlider::sliderPressed, this,
+                            [this, slider] {
+                                if (state_->activeLayer() &&
+                                    !state_->undoStepActive()) {
+                                    state_->beginUndoStep();
+                                    sliderGesture_ = true;
+                                    sliderStart_ = slider->value();
+                                }
+                            });
+                    connect(slider, &QSlider::sliderReleased, this,
+                            [this, slider] {
+                                if (sliderGesture_) {
+                                    sliderGesture_ = false;
+                                    if (slider->value() == sliderStart_)
+                                        state_->discardUndoStep();
+                                    else
+                                        state_->commitUndoStep(
+                                            tr("Adjustments"),
+                                            QStringLiteral("adjustments"));
+                                }
+                            });
+                    connect(slider, &QSlider::valueChanged, this,
+                            [this, pi, dd, span](int v) {
+                                const double real =
+                                    dd.realMin +
+                                    (dd.realMax - dd.realMin) * v / span;
+                                if (state_->activeLayer())
+                                    state_->setAdjustmentParam(
+                                        pi, static_cast<float>(real));
+                            });
+                    form_->addRow(dd.label, slider);
                 }
-                slider->setToolTip(
-                    QStringLiteral("%1 (%2–%3)").arg(dd.label).arg(dd.realMin).arg(dd.realMax));
-                connect(slider, &QSlider::sliderPressed, this, [this, slider] {
-                    if (state_->activeLayer() && !state_->undoStepActive()) {
-                        state_->beginUndoStep();
-                        sliderGesture_ = true;
-                        sliderStart_ = slider->value();
-                    }
-                });
-                connect(slider, &QSlider::sliderReleased, this, [this, slider] {
-                    if (sliderGesture_) {
-                        sliderGesture_ = false;
-                        if (slider->value() == sliderStart_)
-                            state_->discardUndoStep();
-                        else
-                            state_->commitUndoStep(tr("Adjustments"),
-                                                   QStringLiteral("adjustments"));
-                    }
-                });
-                connect(slider, &QSlider::valueChanged, this,
-                        [this, pi, dd, span](int v) {
-                            const double real =
-                                dd.realMin +
-                                (dd.realMax - dd.realMin) * v / span;
-                            if (state_->activeLayer())
-                                state_->setAdjustmentParam(
-                                    pi, static_cast<float>(real));
-                        });
-                form_->addRow(dd.label, slider);
             }
             if (layer->adjustmentKind ==
                 static_cast<int>(

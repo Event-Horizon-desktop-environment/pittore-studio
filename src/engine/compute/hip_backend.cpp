@@ -321,6 +321,35 @@ __global__ void k_composite_many_rows(const KPlacedManyParam* params,
         if (x < c.x0 || x >= c.x1) continue;
         const KPlacedManyParam prm = params[c.layer];
         float4 s;
+        if (prm.isAdjustment && prm.clipped && prm.clipBase >= 0 &&
+            prm.mode == 0) {
+            // Clipped Normal adjustment: grade the base layer's own colour and
+            // re-composite its coverage (acc + c*m*(R(B)-B)). Grading the
+            // accumulator scaled by base coverage leaves an un-graded 1px rim
+            // where the base is antialiased. Mirrors layer_mask.cpp.
+            const KPlacedManyParam bprm = params[prm.clipBase];
+            float4 B = k_sample_cell(bprm, x, y, static_cast<std::size_t>(idx));
+            float cov = B.w * bprm.fold *
+                        k_mask_coverage(bprm.mask, bprm.msw, bprm.msh,
+                                        static_cast<double>(x),
+                                        static_cast<double>(y), bprm.mox,
+                                        bprm.moy, bprm.msx, bprm.msy);
+            const float m =
+                prm.fold *
+                k_mask_coverage(prm.mask, prm.msw, prm.msh,
+                                static_cast<double>(x), static_cast<double>(y),
+                                prm.mox, prm.moy, prm.msx, prm.msy);
+            if (cov > 0.0f && m > 0.0f && acc.w > 0.0f) {
+                float gr, gg, gb;
+                adjust::apply(static_cast<AdjustmentKind>(prm.adjKind),
+                              prm.adjP, prm.adjAux, B.x, B.y, B.z, gr, gg, gb);
+                const float kk = fminf(1.0f, cov * m / acc.w);
+                acc.x = fminf(1.0f, fmaxf(0.0f, acc.x + kk * (gr - B.x)));
+                acc.y = fminf(1.0f, fmaxf(0.0f, acc.y + kk * (gg - B.y)));
+                acc.z = fminf(1.0f, fmaxf(0.0f, acc.z + kk * (gb - B.z)));
+            }
+            continue;
+        }
         if (prm.isAdjustment) {
             s = k_apply_adjustment(prm, acc);
         } else {

@@ -96,9 +96,9 @@ QWidget* createArtboardsPanel(AppState* state, QWidget* parent)
         list->clear();
         const DocumentItem* d = state->activeDocument();
         if (!d) return;
-        // Stack order: Lee's Card first, Bryan's Card second — the same order
-        // the Layers panel shows. Walking layers[] forward gives it.
-        for (int i = 0; i < d->layers.size(); ++i) {
+        // Affinity lists boards in page order (bottom of the layer tree
+        // first), which is the reverse of the panel's top-first rows.
+        for (int i = d->layers.size() - 1; i >= 0; --i) {
             const LayerItem& L = d->layers[i];
             if (!L.isBoard()) continue;
             const QSize as(qMax(1, qRound(L.boardRect.width())),
@@ -106,6 +106,9 @@ QWidget* createArtboardsPanel(AppState* state, QWidget* parent)
             // `i` IS this board's row. Routing through boardRowIndex() was an
             // unnecessary indirection that gave both rows the same thumbnail.
             const QImage img = groupThumbnail(*d, i, kThumbMax);
+            // Share the already-correct board projection with the Layers panel
+            // instead of recompositing the same group there.
+            d->layers[i].thumbnail = img;
             auto* item = new QListWidgetItem(list);
             item->setData(Qt::DisplayRole, L.name);
             item->setData(Qt::UserRole, img);

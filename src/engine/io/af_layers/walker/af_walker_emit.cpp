@@ -894,6 +894,60 @@ void Walker::emitText(const Node* node, const Mat& ctm, int indent, bool clipped
                      editable ? &payload : nullptr);
 }
 
+// Recolour adjustment: the node's params live in the nested AdjP -> RecP
+// class (stream bytes PjdA/PceR, fields HceR/SceR/LceR). Hue is stored as a
+// 0..1 fraction of a turn; the engine's AdjustmentParams carry degrees.
+void Walker::emitRecolour(const Node* node, const Mat& ctm, int indent,
+                          bool clipped) {
+    AfLayer layer;
+    layer.indent = indent;
+    layer.clipped = clipped;
+    layer.isAdjustment = true;
+    layer.adjustmentKind = 15;  // compute::AdjustmentKind::Recolour
+    layer.name = strOf(g, node, "Desc");
+    if (layer.name.empty()) layer.name = "Recolour";
+    applyCommon(node, layer);
+
+    // AdjP is one class value whose class UID is RecP; RecH/RecS/RecL are
+    // fields on that class, not a nested RecP child node.
+    if (const Node* adjp = g.child(node, "AdjP")) {
+        const float hue = f32Of(g, adjp, "RecH").value_or(0.0f);
+        const float sat = f32Of(g, adjp, "RecS").value_or(1.0f);
+        const float light = f32Of(g, adjp, "RecL").value_or(0.0f);
+        layer.adjustmentParams[0] =
+            std::clamp(hue, 0.0f, 1.0f) * 360.0f;
+        layer.adjustmentParams[1] = std::clamp(sat, 0.0f, 1.0f);
+        layer.adjustmentParams[2] = std::clamp(light, -1.0f, 1.0f);
+    }
+    // The adjustment's own Bitm is the painted-band coverage (the red area,
+    // not the gold ribbon). Keep it live so the grade is scoped to the band.
+    if (Node* bitm = g.child(node, "Bitm");
+        bitm && g.typeTag(bitm) == tag4("DyBm")) {
+        std::string why;
+        if (auto img = decodeBitmap(bitm, why)) {
+            auto placed = placeRaster(nodeCtm(node, ctm), std::move(*img));
+            if (placed && placed->img.w > 0 && placed->img.h > 0) {
+                AfMask mask;
+                mask.left = placed->rect.x0;
+                mask.top = placed->rect.y0;
+                mask.width = static_cast<std::uint32_t>(placed->img.w);
+                mask.height = static_cast<std::uint32_t>(placed->img.h);
+                mask.px.resize(static_cast<std::size_t>(mask.width) *
+                               mask.height);
+                for (std::size_t i = 0; i < mask.px.size(); ++i)
+                    mask.px[i] = placed->img.px[i * 4];
+                layer.masks.push_back(std::move(mask));
+            }
+        }
+    }
+    doc.layers.push_back(std::move(layer));
+    // Keep any rows nested under the adjustment (clipped followers or a
+    // mask carrier). They stay siblings because an adjustment is not a
+    // container kind; dropping them would silently lose content.
+    for (Node* ch : g.children(node, "Chld"))
+        emit(ch, nodeCtm(node, ctm), indent, false);
+}
+
 void Walker::emit(const Node* node, const Mat& ctm, int indent, bool clipped) {
     if (!node) return;
     const std::uint32_t kind = g.typeTag(node);
@@ -914,6 +968,10 @@ void Walker::emit(const Node* node, const Mat& ctm, int indent, bool clipped) {
         if (maskedGroup) ++maskedAncestors;
         for (Node* ch : g.children(node, "Chld")) emit(ch, childCtm, indent + 1, false);
         if (maskedGroup) --maskedAncestors;
+        return;
+    }
+    if (kind == tag4("RcRA")) {
+        emitRecolour(node, ctm, indent, clipped);
         return;
     }
     if (kind == tag4("Rstr") || kind == tag4("ImgN")) {

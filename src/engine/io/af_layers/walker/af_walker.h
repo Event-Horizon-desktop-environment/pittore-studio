@@ -86,6 +86,7 @@ struct Walker {
     void emitFill(const Node* node, const Mat& ctm, int indent, bool clipped);
     bool emitShape(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emitText(const Node* node, const Mat& ctm, int indent, bool clipped);
+    void emitRecolour(const Node* node, const Mat& ctm, int indent, bool clipped);
     void emit(const Node* node, const Mat& ctm, int indent, bool clipped);
 };
 

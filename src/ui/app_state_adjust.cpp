@@ -136,6 +136,16 @@ bool AppState::addAdjustmentLayer(int kind) {
     layer.adjustmentKind = kind;
     layer.swatch = QColor(0x9a, 0x72, 0xd0);
     setAdjustmentDefaults(layer);
+    // Recolour is a local grade by design: when it is created over a pixel
+    // layer, clip it to that layer so it does not silently grade the rest of
+    // the stack. The Properties panel still exposes the attach toggle.
+    if (kind == static_cast<int>(AdjustmentKind::Recolour) &&
+        d->activeLayer >= 0 &&
+        d->activeLayer < d->layers.size() &&
+        d->layers[d->activeLayer].kind == LayerItem::Kind::Pixel) {
+        layer.clipped = true;
+        layer.indent = d->layers[d->activeLayer].indent + 1;
+    }
     beginUndoStep();
     addLayer(std::move(layer));  // re-composites, selects, signals
     commitUndoStep(name, QStringLiteral("adjustments"));

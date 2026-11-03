@@ -336,6 +336,40 @@ static void test_place_ui_gpu() {
     CHECK(d->composite.pixelColor(12, 6).blue() > 0);
 }
 
+// A Recolour created over a pixel layer attaches to it: the grade applies to
+// that layer's footprint only, leaving the rest of the stack untouched.
+static void test_recolour_attach_ui() {
+    using pittore::compute::AdjustmentKind;
+    AppState state;
+    DocumentItem* d = state.addDocument(QStringLiteral("r"), QSize(32, 24), 300);
+    CHECK(d != nullptr);
+    if (!d) return;
+
+    // Blue base over the whole frame; red patch on top.
+    state.placeImageLayer(solidImage(32, 24, 0xFF0000FF),
+                          QStringLiteral("blue"), QPointF(16, 12), 1.0);
+    state.placeImageLayer(solidImage(8, 8, 0xFFFF0000),
+                          QStringLiteral("red"), QPointF(16, 12), 1.0);
+
+    CHECK(state.addAdjustmentLayer(
+        static_cast<int>(AdjustmentKind::Recolour)));
+    LayerItem* adj = state.activeLayer();
+    CHECK(adj && adj->kind == LayerItem::Kind::Adjustment);
+    CHECK(adj && adj->clipped);
+    CHECK(adj && adj->indent == 1);  // child row under the pixel layer
+    if (!adj) return;
+
+    CHECK(state.setAdjustmentParam(0, 120.0f));  // hue: green
+    CHECK(state.setAdjustmentParam(1, 1.0f));    // saturation 100%
+    CHECK(state.setAdjustmentParam(2, 0.0f));    // lightness 0
+
+    // Inside the red base the grade lands; outside it the blue is untouched.
+    const QColor graded = d->composite.pixelColor(16, 12);
+    CHECK(graded.green() > 200 && graded.red() < 30 && graded.blue() < 30);
+    const QColor outside = d->composite.pixelColor(2, 2);
+    CHECK(outside.blue() > 200 && outside.red() < 10);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const QString logDir =
@@ -346,6 +380,7 @@ int main(int argc, char** argv) {
     test_layer_masks_ui();
     test_af_masks_ui();
     test_adjustment_layers_ui();
+    test_recolour_attach_ui();
     test_place_ui_gpu();
     const int rc = pittore_test::failures() == 0 ? 0 : 1;
     std::printf("  checks=%d failures=%d\n", pittore_test::checks(),

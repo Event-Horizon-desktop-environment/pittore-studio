@@ -257,8 +257,19 @@ void DocumentItem::effectiveVisibility(QVector<char>& vis,
 
 bool DocumentItem::rowHiddenByCollapsedGroup(int index) const {
     if (index < 0 || index >= layers.size()) return false;
-    for (int g : enclosingGroups(index))
-        if (!layers[g].groupExpanded) return true;
+    // Any row can own children (a pixel layer with a mask/adjustment child),
+    // not just groups: walk every shallower ancestor and honour its chevron.
+    const auto panelIndent = [](const LayerItem& l) {
+        return l.panelIndent >= 0 ? l.panelIndent : l.indent;
+    };
+    int indent = panelIndent(layers[index]);
+    for (int i = index - 1; i >= 0; --i) {
+        const LayerItem& parent = layers[i];
+        if (panelIndent(parent) >= indent) continue;
+        if (!parent.groupExpanded) return true;
+        indent = panelIndent(parent);
+        if (indent <= 0) break;
+    }
     return false;
 }
 

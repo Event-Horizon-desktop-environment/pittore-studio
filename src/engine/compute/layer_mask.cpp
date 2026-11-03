@@ -212,6 +212,49 @@ void composite_many_host(RGBAf* bottom, std::uint32_t w, std::uint32_t h,
                             static_cast<int>(x) >= c.x1)
                             continue;
                         const HostPlacedLayer& l = kept[c.layer];
+                        // Clipped Normal adjustment: grade the BASE layer's own
+                        // colour, then re-composite its coverage. Running the
+                        // kind over the accumulator and scaling by the base
+                        // coverage grades the backdrop mixed into the base's
+                        // antialiased edge, which leaves a 1px un-graded rim.
+                        // For acc = c*B + (1-c)*U (Normal blend) the exact
+                        // result is acc + c*m*(R(B)-B).
+                        if (l.isAdjustment && l.clipped && l.clipBase >= 0 &&
+                            l.mode == BlendMode::Normal) {
+                            const HostPlacedLayer& base =
+                                kept[static_cast<std::size_t>(l.clipBase)];
+                            if (!base.isFill &&
+                                (!base.src || base.sw == 0 || base.sh == 0))
+                                continue;
+                            RGBAf B = sample_source_or_direct(
+                                base, base.src, w, idx, static_cast<int>(x),
+                                static_cast<int>(y));
+                            float cov = B.a * base.fold;
+                            if (base.mask)
+                                cov *= mask_coverage_host(
+                                    base.mask, base.msw, base.msh,
+                                    static_cast<double>(x),
+                                    static_cast<double>(y), base.mox, base.moy,
+                                    base.msx, base.msy);
+                            float m = l.fold;
+                            if (l.mask)
+                                m *= mask_coverage_host(
+                                    l.mask, l.msw, l.msh,
+                                    static_cast<double>(x),
+                                    static_cast<double>(y), l.mox, l.moy,
+                                    l.msx, l.msy);
+                            if (cov <= 0.0f || m <= 0.0f || acc.a <= 0.0f)
+                                continue;
+                            float gr, gg, gb;
+                            adjust::apply(
+                                static_cast<AdjustmentKind>(l.adjKind), l.adjP,
+                                l.adjAux, B.r, B.g, B.b, gr, gg, gb);
+                            const float k = std::min(1.0f, cov * m / acc.a);
+                            acc.r = std::clamp(acc.r + k * (gr - B.r), 0.0f, 1.0f);
+                            acc.g = std::clamp(acc.g + k * (gg - B.g), 0.0f, 1.0f);
+                            acc.b = std::clamp(acc.b + k * (gb - B.b), 0.0f, 1.0f);
+                            continue;
+                        }
                         RGBAf s;
                         if (l.isAdjustment) {
                             // The adjustment reads the composite-so-far: run

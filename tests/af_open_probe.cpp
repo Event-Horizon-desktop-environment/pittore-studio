@@ -53,6 +53,7 @@ std::string jsonEscape(const QString& s) {
 const char* kindOf(const LayerItem& l) {
     if (l.isText) return "text";
     if (l.kind == LayerItem::Kind::Group) return "group";
+    if (l.kind == LayerItem::Kind::Adjustment) return "adjustment";
     return "pixel";
 }
 
@@ -133,13 +134,22 @@ int main(int argc, char** argv) {
                     const LayerItem& l = doc->layers[li];
                     std::printf(
                         "%s{\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"w\":%d,\"h\":%d,"
-                        "\"kind\":\"%s\",\"visible\":%s,\"blend\":\"%s\",\"opacity\":%d,"
-                        "\"mask\":%s,\"packed\":%s}",
+                        "\"kind\":\"%s\",\"visible\":%s,\"clipped\":%s,"
+                        "\"indent\":%d,\"blend\":\"%s\",\"opacity\":%d,"
+                        "\"mask\":%s,\"packed\":%s,"
+                        "\"adjKind\":%d,\"adjParams\":[%g,%g,%g,%g],"
+                        "\"boardId\":%llu,\"isBoard\":%s}",
                         li ? "," : "", jsonEscape(l.name).c_str(),
                         l.offset.x(), l.offset.y(), widthOf(l), heightOf(l), kindOf(l),
-                        l.visible ? "true" : "false", jsonEscape(l.blendMode).c_str(),
+                        l.visible ? "true" : "false", l.clipped ? "true" : "false",
+                        l.indent, jsonEscape(l.blendMode).c_str(),
                         l.opacity, l.hasMask ? "true" : "false",
-                        pittore::ui::hasDeferredPixels(l) ? "true" : "false");
+                        pittore::ui::hasDeferredPixels(l) ? "true" : "false",
+                        l.adjustmentKind, l.adjustmentParams[0],
+                        l.adjustmentParams[1], l.adjustmentParams[2],
+                        l.adjustmentParams[3],
+                        static_cast<unsigned long long>(l.boardId),
+                        l.isBoard() ? "true" : "false");
                 }
                 std::printf("]}");
             } else {

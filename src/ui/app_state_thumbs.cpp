@@ -204,12 +204,31 @@ QImage layerThumbnail(const DocumentItem& d, const LayerItem& l, int box, bool c
     for (int ty = 0; ty < box; ++ty) {
         auto* row = reinterpret_cast<QRgb*>(thumb.scanLine(ty));
         for (int tx = 0; tx < box; ++tx) {
-            const pittore::RGBAf c =
+            pittore::RGBAf c =
                 l.pixels
                     ? thumbSample(realized, sw, sh, tx + 0.5, ty + 0.5, sox, soy,
                                   ssx, ssy)
                     : thumbSample(packed, sw, sh, tx + 0.5, ty + 0.5, sox, soy,
                                   ssx, ssy);
+            // Show the layer as it actually appears: a row with a mask previews
+            // the masked colour, not the raw pixels under a blank mask.
+            if (l.hasMask && l.mask && l.maskScaleX > 0.0 &&
+                l.maskScaleY > 0.0 && ssx != 0.0 && ssy != 0.0) {
+                const double sx = (tx + 0.5 - sox) / ssx;
+                const double sy = (ty + 0.5 - soy) / ssy;
+                const double dx = l.offset.x() + sx * l.scaleX;
+                const double dy = l.offset.y() + sy * l.scaleY;
+                const int mx = static_cast<int>(std::floor(
+                    (dx - l.maskOffset.x()) / l.maskScaleX));
+                const int my = static_cast<int>(std::floor(
+                    (dy - l.maskOffset.y()) / l.maskScaleY));
+                if (mx >= 0 && my >= 0 &&
+                    mx < static_cast<int>(l.mask->width()) &&
+                    my < static_cast<int>(l.mask->height()))
+                    c.a *= l.mask->at(mx, my).r;
+                else
+                    c.a = 0.0f;
+            }
             const int a = qBound(0, static_cast<int>(std::lround(c.a * 255.0f)), 255);
             const int r = qBound(0, static_cast<int>(std::lround(c.r * c.a * 255.0f)), 255);
             const int g = qBound(0, static_cast<int>(std::lround(c.g * c.a * 255.0f)), 255);
@@ -255,6 +274,15 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
     // on the board row, not on any descendant, so resizing or recolouring a
     // board with unchanged children must still invalidate its preview.
     const LayerItem& self = d.layers[groupIndex];
+    // Artboards are rendered from the document composite at their own rect:
+    // the board is a window onto the finished page, not a second composite of
+    // whatever rows happen to carry its indent.
+    if (self.isBoard()) {
+        const QRect r = self.boardRect.toAlignedRect().intersected(d.composite.rect());
+        if (!r.isEmpty())
+            return d.composite.copy(r).scaled(box, box, Qt::KeepAspectRatio,
+                                              Qt::SmoothTransformation);
+    }
     mixStamp(stamp, static_cast<std::uint64_t>(groupIndex));
     if (self.isBoard()) {
         mixStamp(stamp, stampCoord(self.boardRect.x()));

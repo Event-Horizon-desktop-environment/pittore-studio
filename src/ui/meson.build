@@ -171,6 +171,7 @@ if has_qt6
     'panels/paths/paths_panel.cpp',
     'panels/adjustments/adjustments_panel.cpp',
     'panels/properties/properties_panel.cpp',
+    'panels/properties/recolour_controls.cpp',
     'panels/color/color_panel.cpp',
     'panels/swatches/swatches_panel.cpp',
     'panels/history/history_panel.cpp',

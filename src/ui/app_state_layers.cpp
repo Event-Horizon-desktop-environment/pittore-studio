@@ -602,9 +602,7 @@ bool AppState::ungroupSelectedLayers() {
 void AppState::toggleLayerGroupExpanded(int groupIndex, bool subtree,
                                         bool allGroups) {
     DocumentItem* d = activeDocument();
-    if (!d || groupIndex < 0 || groupIndex >= d->layers.size() ||
-        d->layers[groupIndex].kind != LayerItem::Kind::Group)
-        return;
+    if (!d || groupIndex < 0 || groupIndex >= d->layers.size()) return;
     if (allGroups) {
         // Ctrl/Cmd+chevron: flip every group row in the document.
         for (LayerItem& l : d->layers)

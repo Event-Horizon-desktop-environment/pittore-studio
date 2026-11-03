@@ -411,6 +411,49 @@ static void test_adjust() {
     CHECK_NEAR(og, 0.0f, 1e-4f);
     CHECK_NEAR(ob, 0.0f, 1e-4f);
 
+    // --- Recolour -------------------------------------------------------------
+    // Grey keeps its HSL lightness and takes the target hue at full
+    // saturation: HSL(120, 1, 0.5) is pure green.
+    const float rec[16] = {120.0f, 1.0f, 0.0f};
+    applyOne(AdjustmentKind::Recolour, rec, nullptr, 0.5f, 0.5f, 0.5f, or_,
+             og, ob);
+    CHECK_NEAR(or_, 0.0f, 1e-5f);
+    CHECK_NEAR(og, 1.0f, 1e-5f);
+    CHECK_NEAR(ob, 0.0f, 1e-5f);
+    // Black and white stay at the ends of the lightness ramp.
+    applyOne(AdjustmentKind::Recolour, rec, nullptr, 0.0f, 0.0f, 0.0f, or_,
+             og, ob);
+    CHECK_NEAR(or_, 0.0f, 1e-6f);
+    CHECK_NEAR(og, 0.0f, 1e-6f);
+    CHECK_NEAR(ob, 0.0f, 1e-6f);
+    applyOne(AdjustmentKind::Recolour, rec, nullptr, 1.0f, 1.0f, 1.0f, or_,
+             og, ob);
+    CHECK_NEAR(or_, 1.0f, 1e-6f);
+    CHECK_NEAR(og, 1.0f, 1e-6f);
+    CHECK_NEAR(ob, 1.0f, 1e-6f);
+    // Zero saturation is a grey at the source lightness, not black.
+    const float rec_grey[16] = {120.0f, 0.0f, 0.0f};
+    applyOne(AdjustmentKind::Recolour, rec_grey, nullptr, 0.25f, 0.25f, 0.25f,
+             or_, og, ob);
+    CHECK_NEAR(or_, 0.25f, 1e-5f);
+    CHECK_NEAR(og, 0.25f, 1e-5f);
+    CHECK_NEAR(ob, 0.25f, 1e-5f);
+    // Positive lightness blends the carried L toward white before the hue is
+    // applied: L 0.5 + 0.5*(1-0.5) = 0.75 -> hsl(120, 1, 0.75) = (0.5, 1, 0.5).
+    const float rec_light[16] = {120.0f, 1.0f, 0.5f};
+    applyOne(AdjustmentKind::Recolour, rec_light, nullptr, 0.5f, 0.5f, 0.5f,
+             or_, og, ob);
+    CHECK_NEAR(or_, 0.5f, 1e-5f);
+    CHECK_NEAR(og, 1.0f, 1e-5f);
+    CHECK_NEAR(ob, 0.5f, 1e-5f);
+    // Full lightness reaches white; negative blends toward black.
+    const float rec_full[16] = {120.0f, 1.0f, 1.0f};
+    applyOne(AdjustmentKind::Recolour, rec_full, nullptr, 0.5f, 0.5f, 0.5f,
+             or_, og, ob);
+    CHECK_NEAR(or_, 1.0f, 1e-6f);
+    CHECK_NEAR(og, 1.0f, 1e-6f);
+    CHECK_NEAR(ob, 1.0f, 1e-6f);
+
     // --- None is identity ------------------------------------------------------
     applyOne(AdjustmentKind::None, zero, nullptr, 0.1f, 0.2f, 0.3f, or_, og,
              ob);

@@ -50,6 +50,12 @@ struct AfLayer {
     bool groupExpanded = true;
     // Rebuilt glyphs from a text layer, not a raster. UI shows text thumb + label.
     bool isText = false;
+    // Live adjustment layer recovered from the object graph. Only Recolour
+    // is decoded today; the params use the engine's AdjustmentParams layout
+    // (hue degrees, saturation 0..1, lightness -1..1).
+    bool isAdjustment = false;
+    int adjustmentKind = 0;
+    float adjustmentParams[16] = {};
     // Live text spec for plain (unrotated) layers: double-click keeps editing
     // via fonts. False when rotated or layout failed.
     bool hasText = false;

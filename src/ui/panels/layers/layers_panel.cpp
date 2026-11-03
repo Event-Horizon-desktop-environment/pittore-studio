@@ -67,6 +67,61 @@ constexpr int kRowHeight = 40;
 constexpr int kWindowOver = 10;
 constexpr int kEndSlack = 200;
 
+int panelIndent(const LayerItem& l) {
+    return l.panelIndent >= 0 ? l.panelIndent : l.indent;
+}
+
+// Synthetic mask/clipping rows share the row pool with layers. Negative
+// codes keep the panel's QVector<int> order: -(i+1) is a mask row and
+// -(100000+i) a clipping row for layer i.
+constexpr int kClipRowBase = 100000;
+bool isSyntheticRow(int code) { return code < 0; }
+bool isMaskRowCode(int code) { return code < 0 && code > -kClipRowBase; }
+int rowLayerIndex(int code) {
+    if (code >= 0) return code;
+    return isMaskRowCode(code) ? -code - 1 : -code - kClipRowBase;
+}
+
+bool thumbnailHasContent(const QImage& img) {
+    if (img.isNull()) return false;
+    for (int y = 0; y < img.height(); ++y) {
+        const QRgb* row = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        for (int x = 0; x < img.width(); ++x)
+            if (qAlpha(row[x]) != 0) return true;
+    }
+    return false;
+}
+
+QImage compositeThumbnail(const DocumentItem& d, const QRectF& bounds,
+                          int box) {
+    if (box <= 0 || bounds.isEmpty() || d.composite.isNull()) return QImage();
+    QRect r = bounds.toAlignedRect().intersected(d.composite.rect());
+    if (r.isEmpty()) return QImage();
+    return d.composite.copy(r).scaled(box, box, Qt::KeepAspectRatio,
+                                      Qt::SmoothTransformation);
+}
+
+QRectF groupBounds(const DocumentItem& d, int index) {
+    if (index < 0 || index >= d.layers.size()) return {};
+    const int base = d.layers[index].indent;
+    QRectF out;
+    bool any = false;
+    for (int i = index + 1; i < d.layers.size(); ++i) {
+        if (d.layers[i].indent <= base) break;
+        if (d.layers[i].kind != LayerItem::Kind::Pixel) continue;
+        const LayerItem& c = d.layers[i];
+        const double cw = double(c.pixels ? c.pixels->width()
+                                          : c.deferredWidth);
+        const double ch = double(c.pixels ? c.pixels->height()
+                                          : c.deferredHeight);
+        if (cw <= 0.0 || ch <= 0.0) continue;
+        const QRectF b(c.offset, QSizeF(cw * c.scaleX, ch * c.scaleY));
+        if (b.isEmpty()) continue;
+        out = any ? out.united(b) : b;
+        any = true;
+    }
+    return out;
+}
 
 class LayerRow final : public QWidget {
   public:
@@ -102,12 +157,16 @@ class LayerRow final : public QWidget {
         // Observable binding for tests and tools: pooled rows move, so
         // position in the child list means nothing.
         setProperty("layerIndex", index_);
+        setAcceptDrops(!isSyntheticRow(index));
         dragStarted_ = false;
         pressWasMulti_ = false;
         update();
     }
 
-    int layerIndex() const { return index_; }
+    int layerIndex() const { return rowLayerIndex(index_); }
+    bool synthetic() const { return isSyntheticRow(index_); }
+    bool maskRow() const { return isMaskRowCode(index_); }
+    void setHasKids(bool on) { hasKids_ = on; }
 
     // Opens the inline editor on this row, pre-filled with the layer name and
     // fully selected so typing replaces it. Used by the context menu, by
@@ -116,7 +175,9 @@ class LayerRow final : public QWidget {
     // never renamed, so most rows never pay for it.
     void startRename() {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ < 0 || index_ >= d->layers.size() || renaming_) return;
+        if (!d || synthetic() || index_ < 0 || index_ >= d->layers.size() ||
+            renaming_)
+            return;
         if (!renameEdit_) {
             renameEdit_ = new QLineEdit(this);
             renameEdit_->hide();
@@ -135,14 +196,67 @@ class LayerRow final : public QWidget {
         renameEdit_->selectAll();
     }
 
+  private:
+    void paintSyntheticRow(DocumentItem* d) {
+        const int li = layerIndex();
+        if (!d || li < 0 || li >= d->layers.size()) return;
+        const LayerItem& layer = d->layers[li];
+        const ThemeColors c = colorsFor(state_->theme());
+        const bool active = maskRow() ? layer.maskSelected
+                                      : d->activeLayer == li;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.fillRect(rect(), active ? c.accent.darker(135) : c.chrome);
+        p.setPen(QPen(c.border, 1));
+        p.drawLine(0, height() - 1, width(), height() - 1);
+
+        const int indent = (panelIndent(layer) + 1) * 12;
+        const bool on = maskRow() ? layer.maskEnabled : layer.visible;
+        if (on)
+            p.drawPixmap(QRect(5, 12, 16, 16),
+                         glyphPixmap(QStringLiteral("eye"), 16, c.text,
+                                     p.device() ? qreal(p.device()->devicePixelRatioF())
+                                                : 1.0));
+        else {
+            p.setPen(QPen(c.textDim, 1));
+            p.drawRect(QRect(8, 15, 10, 10));
+        }
+
+        const QRect thumb(26 + indent, 4, 32, 32);
+        p.fillRect(thumb, QColor(0x22, 0x22, 0x22));
+        if (maskRow()) {
+            const QImage preview = layerMaskThumbnail(layer, 32);
+            if (!preview.isNull()) p.drawImage(thumb, preview);
+        } else {
+            p.setPen(QPen(c.textDim, 1));
+            p.drawRect(thumb.adjusted(6, 6, -6, -6));
+        }
+        p.setPen(c.textDim);
+        QFont f = p.font();
+        f.setPixelSize(12);
+        p.setFont(f);
+        p.drawText(QRect(26 + indent + 38, 0, width() - 80, height()),
+                   Qt::AlignVCenter | Qt::AlignLeft,
+                   maskRow() ? tr("Mask") : tr("Clipping Mask"));
+    }
+
   protected:
     void paintEvent(QPaintEvent*) override {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ < 0 || index_ >= d->layers.size()) return;
+        if (!d) return;
+        if (synthetic()) {
+            paintSyntheticRow(d);
+            return;
+        }
+        if (index_ < 0 || index_ >= d->layers.size()) return;
         const LayerItem& layer = d->layers[index_];
         const ThemeColors c = colorsFor(state_->theme());
-        const bool active = d->activeLayer == index_;
-        const bool selected = d->selectedLayers.contains(index_);
+        // When a layer's mask is targeted, the mask child row is the focused
+        // row: the parent row must not also look selected.
+        const bool maskFocused = layer.hasMask && layer.maskSelected;
+        const bool active = d->activeLayer == index_ && !maskFocused;
+        const bool selected =
+            d->selectedLayers.contains(index_) && !maskFocused;
 
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
@@ -152,7 +266,7 @@ class LayerRow final : public QWidget {
         p.setPen(QPen(c.border, 1));
         p.drawLine(0, height() - 1, width(), height() - 1);
 
-        const int indent = layer.indent * 12;
+        const int indent = panelIndent(layer) * 12;
 
         // Visibility eye.
         if (layer.visible) {
@@ -162,15 +276,17 @@ class LayerRow final : public QWidget {
             p.drawRect(QRect(8, 15, 10, 10));
         }
 
-        // Thumbnail. Group rows sit behind a disclosure chevron, so their
-        // content (and combined preview) starts 14px further right.
+        // Thumbnail. Rows that own children sit behind a disclosure chevron,
+        // so their content (and a group's combined preview) starts 14px right.
         const bool isGroup = layer.kind == LayerItem::Kind::Group;
-        const QRect thumb(26 + indent + (isGroup ? 14 : 0), 4, 32, 32);
+        const bool hasKids = hasKids_;
+        const bool hasChevron = isGroup || hasKids;
+        const QRect thumb(26 + indent + (hasChevron ? 14 : 0), 4, 32, 32);
         p.fillRect(thumb, QColor(0x22, 0x22, 0x22));
-        if (isGroup) {
+        if (hasChevron) {
             // Disclosure chevron: ▾ while expanded, ► while collapsed. A plain
-            // click toggles this group; Ctrl/Cmd toggles every group, Alt/Option
-            // toggles this group's whole nested subtree.
+            // click toggles this row; Ctrl/Cmd toggles every group, Alt/Option
+            // toggles this row's whole nested subtree.
             const QRect chevron(26 + indent, 13, 12, 12);
             const QPoint cc = chevron.center();
             QPolygon tri;
@@ -185,13 +301,20 @@ class LayerRow final : public QWidget {
             p.setPen(Qt::NoPen);
             p.setBrush(c.textDim);
             p.drawPolygon(tri);
+            // Reset: the brush is otherwise inherited by the thumbnail border
+            // drawRect() below, which then fills the whole thumb flat textDim
+            // and hides the preview on every row that has a chevron.
+            p.setBrush(Qt::NoBrush);
         }
         if (isGroup) {
             // A group row previews its combined descendant content, like
             // The default group thumbnails; empty groups keep the folder
             // glyph. Sampled through groupThumbnail's content stamp so only a
             // real descendant change recomposites the box.
-            const QImage preview = groupThumbnail(*d, index_, 30);
+            const QRectF gb = groupBounds(*d, index_);
+            QImage preview = compositeThumbnail(*d, gb, 30);
+            if (!thumbnailHasContent(preview))
+                preview = compositeThumbnail(*d, d->composite.rect(), 30);
             if (preview.isNull()) {
                 p.drawPixmap(thumb.adjusted(7, 7, -7, -7),
                              glyphPixmap(QStringLiteral("group"), 18, c.text, p.device() ? qreal(p.device()->devicePixelRatioF()) : 1.0));
@@ -216,7 +339,15 @@ class LayerRow final : public QWidget {
             // the transparency checkerboard (falling back to the flat swatch
             // until pixels exist).
             const QRect inner = thumb.adjusted(1, 1, -1, -1);
-            const QImage preview = layerThumbnail(*d, layer, inner.width(), layer.isText);
+            QImage preview =
+                layerThumbnail(*d, layer, inner.width(), layer.isText);
+            if (!thumbnailHasContent(preview)) {
+                preview = compositeThumbnail(*d, layerBounds(*d, layer),
+                                             inner.width());
+                if (!thumbnailHasContent(preview))
+                    preview = compositeThumbnail(*d, d->composite.rect(),
+                                                 inner.width());
+            }
             if (preview.isNull()) {
                 p.fillRect(inner, layer.swatch);
             } else {
@@ -234,21 +365,6 @@ class LayerRow final : public QWidget {
         p.setPen(QPen(active ? c.accentText : c.border, 1));
         p.drawRect(thumb);
 
-        // Layer mask thumbnail: actual coverage, not a placeholder swatch.
-        if (layer.hasMask) {
-            const QRect mask = layerMaskThumbRect(layer);
-            const QImage preview = layerMaskThumbnail(
-                layer, mask.adjusted(1, 1, -1, -1).width());
-            if (preview.isNull()) {
-                p.fillRect(mask, Qt::white);
-            } else {
-                p.drawImage(mask.adjusted(1, 1, -1, -1), preview);
-            }
-            p.setPen(QPen(layer.maskSelected ? c.accentText : c.border,
-                          layer.maskSelected ? 2 : 1));
-            p.drawRect(mask);
-        }
-
         // Name plus clipping indicator.
         p.setPen(active ? c.accentText : c.text);
         QFont f = p.font();
@@ -262,10 +378,10 @@ class LayerRow final : public QWidget {
         // still signals that content is tucked away.
         int badge = width() - 20;
         if (isGroup && !layer.groupExpanded) {
-            const int base = layer.indent;
+            const int base = panelIndent(layer);
             bool hasChildren = false;
             for (int i = index_ + 1; i < d->layers.size(); ++i) {
-                if (d->layers[i].indent <= base) break;
+                if (panelIndent(d->layers[i]) <= base) break;
                 hasChildren = true;
             }
             if (hasChildren) {
@@ -311,7 +427,29 @@ class LayerRow final : public QWidget {
 
     void mousePressEvent(QMouseEvent* event) override {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ < 0 || index_ >= static_cast<int>(d->layers.size())) return;
+        if (!d) return;
+        if (synthetic()) {
+            if (event->button() != Qt::LeftButton) return;
+            const int li = layerIndex();
+            if (li < 0 || li >= d->layers.size()) return;
+            if (event->position().x() < 24) {
+                if (maskRow())
+                    state_->setLayerMaskEnabled(
+                        !d->layers[li].maskEnabled);
+                else
+                    state_->setLayersVisible({li}, !d->layers[li].visible);
+                return;
+            }
+            // A mask/clip child is not a second layer selection: make the
+            // parent active for editing, but keep the multi-selection empty
+            // so a later layer command does not act on an extra row.
+            d->selectedLayers.clear();
+            d->activeLayer = li;
+            emit state_->activeLayerChanged();
+            if (maskRow()) state_->setLayerMaskSelected(li, true);
+            return;
+        }
+        if (index_ < 0 || index_ >= static_cast<int>(d->layers.size())) return;
         // Only the left button selects. A right-click must not collapse the
         // multi-selection: it is delivered as BOTH a press and a
         // contextMenuEvent, and the menu must operate on the set as it was.
@@ -325,42 +463,21 @@ class LayerRow final : public QWidget {
         if (event->modifiers().testFlag(Qt::ControlModifier)) {
             const bool isGroup =
                 d->layers[index_].kind == LayerItem::Kind::Group;
-            const QRect thumb(26 + d->layers[index_].indent * 12 + (isGroup ? 14 : 0),
+            const QRect thumb(26 + panelIndent(d->layers[index_]) * 12 +
+                                  (isGroup ? 14 : 0),
                               4, 32, 32);
             if (thumb.contains(event->position().toPoint())) {
                 state_->selectFromLayerAlpha(index_);
                 return;
             }
         }
-        // Clicking the mask thumbnail targets the mask for painting (click
-        // again to target pixels). Shift+click instead toggles the mask's
-        // enabled state (the Shift+click mask thumbnail). The clicked
-        // row becomes the selection so the menu and brush always operate on
-        // what the user clicked.
-        if (d->layers[index_].hasMask &&
-            !event->modifiers().testFlag(Qt::AltModifier) &&
-            layerMaskThumbRect(d->layers[index_])
-                .contains(event->position().toPoint())) {
-            if (!d->selectedLayers.contains(index_)) {
-                d->selectedLayers.clear();
-                d->selectedLayers.push_back(index_);
-                d->activeLayer = index_;
-                emit state_->activeLayerChanged();
-            }
-            if (event->modifiers().testFlag(Qt::ShiftModifier)) {
-                state_->setLayerMaskEnabled(!d->layers[index_].maskEnabled);
-                return;
-            }
-            state_->setLayerMaskSelected(index_,
-                                         !d->layers[index_].maskSelected);
-            return;
-        }
         // The disclosure chevron on a group row collapses/expands it. Plain =
         // this group; Ctrl/Cmd = every group; Alt/Option = every group nested
         // under this one. This is a UI-state toggle, never part of the
         // selection (matches standard editors).
-        if (d->layers[index_].kind == LayerItem::Kind::Group) {
-            const QRect chevron(26 + d->layers[index_].indent * 12, 13, 12, 12);
+        if (hasKids_) {
+            const QRect chevron(26 + panelIndent(d->layers[index_]) * 12, 13,
+                            12, 12);
             if (chevron.contains(event->position().toPoint())) {
                 state_->toggleLayerGroupExpanded(
                     index_, event->modifiers().testFlag(Qt::AltModifier),
@@ -546,6 +663,7 @@ class LayerRow final : public QWidget {
     }
 
     void mouseDoubleClickEvent(QMouseEvent* event) override {
+        if (synthetic()) return;
         // Double-clicking the layer name opens the inline rename; a double-click
         // anywhere else on the row just re-selects it.
         if (nameRect().contains(event->position().toPoint())) {
@@ -643,6 +761,7 @@ class LayerRow final : public QWidget {
     }
 
     void contextMenuEvent(QContextMenuEvent* event) override {
+        if (synthetic()) return;
         DocumentItem* d = state_->activeDocument();
         if (!d || index_ < 0 || index_ >= d->layers.size()) return;
         // Right-click on an unselected row selects it before acting (so the
@@ -682,11 +801,16 @@ class LayerRow final : public QWidget {
         linkMask->setEnabled(isPixel && clicked.hasMask);
         QAction* loadSel = menu.addAction(tr("Load Mask as Selection"));
         loadSel->setEnabled(isPixel && clicked.hasMask && clicked.mask);
+        const bool isAdjustment =
+            clicked.kind == LayerItem::Kind::Adjustment;
         QAction* clip = menu.addAction(
-            clicked.clipped ? tr("Release Clipping Mask")
-                            : tr("Create Clipping Mask"),
+            clicked.clipped
+                ? (isAdjustment ? tr("Detach from Layer Below")
+                                : tr("Release Clipping Mask"))
+                : (isAdjustment ? tr("Attach to Layer Below")
+                                : tr("Create Clipping Mask")),
             QKeySequence(QLatin1String("Ctrl+Alt+G")));
-        clip->setEnabled(isPixel);
+        clip->setEnabled(isPixel || isAdjustment);
         QAction* toggleFilter = menu.addAction(
             clicked.hasLiveFilter && clicked.liveFilterEnabled
                 ? tr("Disable Live Filter")
@@ -781,11 +905,10 @@ class LayerRow final : public QWidget {
         DocumentItem* d = state_->activeDocument();
         if (!d || index_ >= d->layers.size()) return {};
         const LayerItem& layer = d->layers[index_];
-        const int indent = layer.indent * 12;
-        // Group rows keep room for the disclosure chevron before the preview.
+        const int indent = panelIndent(layer) * 12;
+        // Rows with children keep room for the disclosure chevron.
         int x = 26 + indent + 32 + 6;
-        if (layer.kind == LayerItem::Kind::Group) x += 14;
-        if (layer.hasMask) x = layerMaskThumbRect(layer).right() + 6;
+        if (layer.kind == LayerItem::Kind::Group || hasKids_) x += 14;
         return QRect(x, 0, width() - x - 46, height());
     }
 
@@ -869,7 +992,8 @@ class LayerRow final : public QWidget {
     QWidget* siblingRow(int index) const {
         if (!siblings_) return nullptr;
         for (LayerRow* row : *siblings_) {
-            if (row && row->layerIndex() == index) return row;
+            if (row && !row->synthetic() && row->layerIndex() == index)
+                return row;
         }
         return nullptr;
     }
@@ -886,6 +1010,7 @@ class LayerRow final : public QWidget {
     bool pressWasMulti_ = false;
     QLineEdit* renameEdit_ = nullptr;   // inline name editor (hidden by default)
     bool renaming_ = false;             // true while the editor is open
+    bool hasKids_ = false;              // display-tree child flag
 };
 
 class LayersPanel final : public QWidget {
@@ -1300,7 +1425,7 @@ class LayersPanel final : public QWidget {
             if (d) {
                 const int last = d->layers.size() - 1;
                 const int targetIndent =
-                    last >= 0 ? d->layers[last].indent : 0;
+                    last >= 0 ? panelIndent(d->layers[last]) : 0;
                 state_->reparentSelectedLayers(d->layers.size(), targetIndent);
             }
             clearDropCaret();
@@ -1315,7 +1440,8 @@ class LayersPanel final : public QWidget {
     // window, so off-screen rows have no widget by design).
     QWidget* rowWidget(int index) const {
         for (LayerRow* row : rows_) {
-            if (row->layerIndex() == index) return row;
+            if (row && !row->synthetic() && row->layerIndex() == index)
+                return row;
         }
         return nullptr;
     }
@@ -1370,10 +1496,16 @@ class LayersPanel final : public QWidget {
                 continue;
             }
             row->setIndex(order_[pos]);
+            if (!row->synthetic()) {
+                const int li = row->layerIndex();
+                row->setHasKids(li >= 0 && li < panelHasKids_.size() &&
+                                panelHasKids_[li]);
+            }
             const int y = pos * kRowHeight;
             if (row->y() != y || row->width() != w)
                 row->setGeometry(0, y, w, kRowHeight);
             row->show();
+            row->raise();
         }
         stack_->setUpdatesEnabled(true);
     }
@@ -1405,9 +1537,57 @@ class LayersPanel final : public QWidget {
         const int n = d->layers.size();
         order_.clear();
         order_.reserve(n);
+        // Build a display tree from indents. Affinity puts a clipped
+        // adjustment above its base in file order but below it in the panel,
+        // so a child is the layer directly above a shallower row as well as
+        // the usual parent-before-children group form.
+        QVector<int> parent(n, -1);
+        QVector<QVector<int>> kids(n);
         for (int i = 0; i < n; ++i) {
-            if (!d->rowHiddenByCollapsedGroup(i)) order_.append(i);
+            const LayerItem& li = d->layers[i];
+            const int indent = panelIndent(li);
+            if (indent <= 0) continue;
+            int p = -1;
+            // The one child-above-parent form is a clipped adjustment: it
+            // sits above the base it grades, so its parent is the next row.
+            if (li.kind == LayerItem::Kind::Adjustment && li.panelIndent >= 0 &&
+                i + 1 < n &&
+                panelIndent(d->layers[i + 1]) == indent - 1) {
+                p = i + 1;
+            } else {
+                // Groups keep their children after them: nearest shallower
+                // preceding row is the parent. Never borrow a later group.
+                for (int j = i - 1; j >= 0; --j) {
+                    if (panelIndent(d->layers[j]) < indent) {
+                        p = j;
+                        break;
+                    }
+                }
+            }
+            if (p >= 0) {
+                parent[i] = p;
+                kids[p].append(i);
+            }
         }
+        panelHasKids_.assign(n, 0);
+        for (int i = 0; i < n; ++i)
+            panelHasKids_[i] = (!kids[i].isEmpty() ||
+                                d->layers[i].hasMask ||
+                                (d->layers[i].clipped &&
+                                 d->layers[i].kind == LayerItem::Kind::Pixel))
+                                   ? 1
+                                   : 0;
+        std::function<void(int)> emitRow = [&](int i) {
+            order_.append(i);
+            if (!d->layers[i].groupExpanded) return;
+            if (d->layers[i].clipped &&
+                d->layers[i].kind == LayerItem::Kind::Pixel)
+                order_.append(-(i + kClipRowBase));
+            if (d->layers[i].hasMask) order_.append(-(i + 1));
+            for (int c : kids[i]) emitRow(c);
+        };
+        for (int i = 0; i < n; ++i)
+            if (parent[i] < 0) emitRow(i);
         int removed = 0, created = 0;
         const int poolWant = qMin(order_.size(), poolNeeded());
         while (rows_.size() > poolWant && rows_.size() > 64) {
@@ -1472,6 +1652,7 @@ class LayersPanel final : public QWidget {
     QVBoxLayout* stackLayout_ = nullptr;
     QVector<LayerRow*> rows_;    // pooled rows for the visible window
     QVector<int> order_;        // visible layer indices in stack order
+    QVector<char> panelHasKids_;  // display-tree child flag per layer
     int base_ = -1;             // order_ position bound to rows_[0]
     LayerDropState drop_;        // live drag-over caret shared with the rows
     QComboBox* blendMode_ = nullptr;
