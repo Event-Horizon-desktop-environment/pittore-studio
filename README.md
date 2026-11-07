@@ -15,6 +15,12 @@ and the test suite checks that they agree.
 interface still moves around and you should expect rough edges. Linux only —
 the build refuses to configure anywhere else.
 
+
+| PayPal | Ko-fi |
+|:---:|:---:|
+|[<img src="https://github.com/vinceliuice/WhiteSur-gtk-theme/blob/pictures/pictures/paypal.png?raw=true" width="32" height="32" alt="paypal" />](https://paypal.me/gamedev1909)|[<img src="https://github.com/user-attachments/assets/06c1704b-ead5-4b4a-a865-9b85aa9f5015" width="32" height="32" alt="ko-fi" />](https://ko-fi.com/tlv)|
+
+
 ## Features
 
 - Layer documents with groups, masks, clipping, adjustment layers and a full
